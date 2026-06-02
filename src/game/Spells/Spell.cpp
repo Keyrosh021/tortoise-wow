@@ -59,6 +59,142 @@ using namespace Spells;
 
 #define SPELL_CHANNEL_VISUAL_TIMER 800
 
+namespace
+{
+
+bool IsHolyShockSpell(SpellEntry const* spellInfo)
+{
+    return spellInfo && spellInfo->IsFitToFamilyMask<CF_PALADIN_HOLY_SHOCK>();
+}
+
+uint32 GetHolyShockResetChance(Player* player)
+{
+    if (!player)
+        return 0;
+
+    uint32 chance = 5;
+    int32 const healingPower = std::max<int32>(0, player->SpellBaseHealingBonusDone(SPELL_SCHOOL_MASK_HOLY));
+
+    chance += healingPower / 100;
+
+    if (player->HasAura(51825))
+        chance += 15;
+
+    return std::min<uint32>(chance, 100);
+}
+
+void HandleHolyShockCooldownReset(Unit* caster, SpellEntry const* spellInfo)
+{
+    if (!IsHolyShockSpell(spellInfo))
+        return;
+
+    Player* player = caster ? caster->ToPlayer() : nullptr;
+    if (!player)
+        return;
+
+    uint32 const resetChance = GetHolyShockResetChance(player);
+    if (!resetChance || !roll_chance_i(resetChance))
+        return;
+
+    SpellCooldowns cooldowns = player->GetSpellCooldownMap();
+    for (SpellCooldowns::const_iterator itr = cooldowns.begin(); itr != cooldowns.end();)
+    {
+        SpellEntry const* cooldownSpellInfo = sSpellMgr.GetSpellEntry(itr->first);
+
+        if (IsHolyShockSpell(cooldownSpellInfo))
+            player->RemoveSpellCooldown((itr++)->first, true);
+        else
+            ++itr;
+    }
+}
+
+// Holy Strike/Holy Might: refresh Holy Might only on Holy Strike casts so misses and parries do not drop it.
+bool IsHolyStrikeSpell(SpellEntry const* spellInfo)
+{
+    if (!spellInfo)
+        return false;
+
+    switch (spellInfo->Id)
+    {
+        case 678:
+        case 679:
+        case 680:
+        case 1866:
+        case 2495:
+        case 5569:
+        case 10332:
+        case 10333:
+            return true;
+        default:
+            return false;
+    }
+}
+
+uint32 GetHolyMightSpellForCaster(Unit* caster)
+{
+    if (!caster)
+        return 0;
+    // Holy Might: proc auras (51355-51359) map back to visible Holy Might buffs refreshed on Holy Strike cast.
+    if (caster->HasAura(51359))
+        return 51354;
+    if (caster->HasAura(51358))
+        return 51353;
+    if (caster->HasAura(51357))
+        return 51352;
+    if (caster->HasAura(51356))
+        return 51351;
+    if (caster->HasAura(51355))
+        return 51350;
+
+    return 0;
+}
+
+bool IsHolyStrikeDamageCarrierSpell(SpellEntry const* spellInfo)
+{
+    return IsHolyStrikeSpell(spellInfo);
+}
+
+// Repentance: immune NPC targets receive the Repent fallback aura instead of the incapacitate.
+uint32 GetRepentanceImmuneFallbackSpellId(uint32 spellId)
+{
+    switch (spellId)
+    {
+        case 20066:
+            return 51360;
+        case 51557:
+            return 51561;
+        case 51558:
+            return 51562;
+        default:
+            return 0;
+    }
+}
+
+// Repent: helper aura ranks need fixed 20 second duration and expiry handling.
+bool IsRepentanceImmuneFallbackAura(uint32 spellId)
+{
+    switch (spellId)
+    {
+        case 51360:
+        case 51561:
+        case 51562:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Repentance: cast the fallback aura only from the immune miss path.
+void CastRepentanceImmuneFallback(Unit* caster, Unit* target, uint32 spellId)
+{
+    if (!caster || !target || !spellId)
+        return;
+
+    caster->CastSpell(target, spellId, true);
+}
+
+}
+
 extern pEffect SpellEffects[TOTAL_SPELL_EFFECTS];
 
 bool IsQuestTameSpell(uint32 spellId)
@@ -362,16 +498,10 @@ WorldObject* Spell::FindCorpseUsing()
 void Spell::FillTargetMap()
 {
     // TODO: ADD the correct target FILLS!!!!!!
+    // Repentance fallback and other triggered helpers can need later effect slots even when an earlier effect is empty.
 
     for (int i = 0; i < MAX_EFFECT_INDEX; ++i)
     {
-        // not call for empty effect.
-        // Also some spells use not used effect targets for store targets for dummy effect in triggered spells
-        if (m_spellInfo->Effect[i] == SPELL_EFFECT_NONE)
-            continue;
-
-        // TODO: find a way so this is not needed?
-       // for area auras always add caster as target (needed for totems for example)
         if (m_casterUnit)
         {
             if (IsAreaAuraEffect(m_spellInfo->Effect[i]) ||
@@ -1339,6 +1469,11 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
     else if (missInfo == SPELL_MISS_MISS || missInfo == SPELL_MISS_RESIST || missInfo == SPELL_MISS_DODGE ||
              missInfo == SPELL_MISS_PARRY || missInfo == SPELL_MISS_BLOCK || missInfo == SPELL_MISS_IMMUNE)
     {
+        // Repentance: tooltip only promises Repent fallback on immunity, not resist or other misses.
+        if (missInfo == SPELL_MISS_IMMUNE && pRealUnitCaster && unit->IsAlive() && !unit->IsPlayer())
+            if (uint32 const fallbackSpellId = GetRepentanceImmuneFallbackSpellId(m_spellInfo->Id))
+                CastRepentanceImmuneFallback(pRealUnitCaster, unit, fallbackSpellId);
+
         // in 1.12.1 we need explicit miss info
         if (pRealUnitCaster && pRealUnitCaster != unit)
         {
@@ -1980,6 +2115,13 @@ void Spell::DoSpellHitOnUnit(Unit *unit, uint32 effectMask)
             {
                 m_spellAuraHolder->SetAuraMaxDuration(duration);
                 m_spellAuraHolder->SetAuraDuration(duration);
+            }
+
+            // Repent: fallback aura must last 20 seconds even if helper spell data is treated as persistent.
+            if (IsRepentanceImmuneFallbackAura(m_spellInfo->Id))
+            {
+                m_spellAuraHolder->SetAuraMaxDuration(20 * IN_MILLISECONDS);
+                m_spellAuraHolder->SetAuraDuration(20 * IN_MILLISECONDS);
             }
 
             if (!unit->AddSpellAuraHolder(m_spellAuraHolder))
@@ -4182,6 +4324,17 @@ void Spell::cast(bool skipCheck)
             // Blessing of Protection (Divine Shield, Divine Protection in generic switch case)
             if (m_spellInfo->Mechanic == MECHANIC_INVULNERABILITY && m_spellInfo->Id != 25771)
                 AddPrecastSpell(25771);                     // Forbearance
+
+            if (m_casterUnit && IsHolyStrikeSpell(m_spellInfo))
+            {
+                if (uint32 holyMightSpellId = GetHolyMightSpellForCaster(m_casterUnit))
+                {
+                    // Recast the active Holy Might rank so misses and parries do not drop the buff.
+                    m_casterUnit->RemoveAurasDueToSpell(holyMightSpellId);
+                    m_casterUnit->CastSpell(m_casterUnit, holyMightSpellId, true);
+                }
+            }
+
             break;
         }
         default:
@@ -4496,6 +4649,7 @@ void Spell::SendSpellCooldown()
         return;
 
     m_casterUnit->AddSpellAndCategoryCooldowns(m_spellInfo, m_CastItem ? m_CastItem->GetEntry() : 0, this);
+    HandleHolyShockCooldownReset(m_casterUnit, m_spellInfo);
 }
 
 void Spell::update(uint32 difftime)

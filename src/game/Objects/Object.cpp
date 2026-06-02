@@ -3725,6 +3725,10 @@ SpellMissInfo WorldObject::SpellHitResult(Unit* pVictim, SpellEntry const* spell
         }
     }
 
+    // Judgement of Righteousness: uses melee hit/miss instead of magic
+    if (spell->IsFitToFamilyMask<CF_PALADIN_JUDGEMENT_OF_RIGHTEOUSNESS>() && spell->SpellIconID == 25)
+        return MeleeSpellHitResult(pVictim, spell, spellPtr);
+
     switch (spell->DmgClass)
     {
         case SPELL_DAMAGE_CLASS_NONE:
@@ -4547,9 +4551,10 @@ uint32 WorldObject::MeleeDamageBonusDone(Unit* pVictim, uint32 pdamage, WeaponAt
     // PERCENT damage auras
     // ====================
     float DonePercent   = 1.0f;
-
     // ..done pct, already included in weapon damage based spells
-    if (pUnit && !isWeaponDamageBasedSpell)
+    // Skip for JoR: SpellDamageBonusDone already applies pct modifiers (e.g. Vengeance); applying here too causes double-application.
+    bool isJoRPct = spellProto && spellProto->IsFitToFamilyMask<CF_PALADIN_JUDGEMENT_OF_RIGHTEOUSNESS>() && spellProto->SpellIconID == 25;
+    if (pUnit && !isWeaponDamageBasedSpell && !isJoRPct)
     {
         Unit::AuraList const& mModDamagePercentDone = pUnit->GetAurasByType(SPELL_AURA_MOD_DAMAGE_PERCENT_DONE);
         for (const auto i : mModDamagePercentDone)
@@ -4597,7 +4602,8 @@ uint32 WorldObject::MeleeDamageBonusDone(Unit* pVictim, uint32 pdamage, WeaponAt
     // weapon damage based spells
     else if (APbonus || DoneFlat)
     {
-        bool normalized = spellProto ? spellProto->HasEffect(SPELL_EFFECT_NORMALIZED_WEAPON_DMG) : false;
+        bool isCrusaderStrike = spellProto && spellProto->SpellFamilyName == SPELLFAMILY_PALADIN && spellProto->SpellIconID == 2164;
+        bool normalized = isCrusaderStrike || (spellProto ? spellProto->HasEffect(SPELL_EFFECT_NORMALIZED_WEAPON_DMG) : false);
         DoneTotal += int32(APbonus / 14.0f * GetAPMultiplier(attType, normalized));
 
         // for weapon damage based spells we still have to apply damage done percent mods
@@ -4630,7 +4636,10 @@ uint32 WorldObject::MeleeDamageBonusDone(Unit* pVictim, uint32 pdamage, WeaponAt
     float tmpDamage = float(int32(pdamage) + DoneTotal * int32(stack)) * DonePercent;
 
     // apply spellmod to Done damage
-    if (spellProto && pUnit)
+    // Skip for JoR: SpellEffects.cpp explicitly calls SpellDamageBonusDone for JoR which also
+    // applies SPELLMOD_DAMAGE, so applying it here too causes double-application.
+    bool isJoR = spellProto && spellProto->IsFitToFamilyMask<CF_PALADIN_JUDGEMENT_OF_RIGHTEOUSNESS>() && spellProto->SpellIconID == 25;
+    if (spellProto && pUnit && !isJoR)
     {
         if (Player* modOwner = pUnit->GetSpellModOwner())
             modOwner->ApplySpellMod(spellProto->Id, damagetype == DOT ? SPELLMOD_DOT : SPELLMOD_DAMAGE, tmpDamage, spell);

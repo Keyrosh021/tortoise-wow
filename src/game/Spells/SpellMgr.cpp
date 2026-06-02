@@ -1153,6 +1153,23 @@ bool SpellMgr::IsNoStackSpellDueToSpell(uint32 spellId_1, uint32 spellId_2) cons
         case SPELLFAMILY_PALADIN:
             if (spellInfo_2->SpellFamilyName == SPELLFAMILY_PALADIN)
             {
+                auto const isRepentProcAura = [](SpellEntry const* spellInfo) -> bool
+                {
+                    return spellInfo && (spellInfo->Id == 51360 || spellInfo->Id == 51561 || spellInfo->Id == 51562);
+                };
+
+                auto const isJudgementOfLightOrWisdomAura = [](SpellEntry const* spellInfo) -> bool
+                {
+                    return spellInfo && spellInfo->IsFitToFamilyMask<CF_PALADIN_JUDGEMENT_OF_WISDOM_LIGHT>();
+                };
+
+                // Repent uses the same proc-trigger aura shape as Judgement of Light/Wisdom.
+                // Keep them from colliding in the generic no-stack heuristic so Judgements
+                // still replace other Judgements instead of evicting Repent.
+                if ((isRepentProcAura(spellInfo_1) && isJudgementOfLightOrWisdomAura(spellInfo_2)) ||
+                    (isRepentProcAura(spellInfo_2) && isJudgementOfLightOrWisdomAura(spellInfo_1)))
+                    return false;
+
                 // Paladin Seals
                 if (spellInfo_1->IsSealSpell() && spellInfo_2->IsSealSpell())
                     return true;

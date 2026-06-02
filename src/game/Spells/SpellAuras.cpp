@@ -266,6 +266,31 @@ pAuraHandler AuraHandler[TOTAL_AURAS] =
     &Aura::HandleNoImmediateEffect,                         //197 SPELL_AURA_MOD_PERIODIC_DAMAGE_PERCENT_TAKEN implemented in Unit::MeleeDamageBonusTaken and Unit::SpellDamageBonusTaken
     &Aura::HandleNoImmediateEffect,                         //198 SPELL_AURA_MOD_CRIT_DAMAGE_BONUS_TAKEN  implemented in WorldObject::SpellCriticalDamageBonus
     &Aura::HandleModHealingFromArmor,                       //199 SPELL_AURA_MOD_SPELL_HEALING_OF_ARMOR_PERCENT implemented in WorldObject::SpellBaseHealingBonusDone
+    &Aura::HandleNoImmediateEffect,                         //200 SPELL_AURA_TOTEMIC_ALIGNMENT_PCT
+    &Aura::HandleNoImmediateEffect,                         //201 SPELL_AURA_TOTEMIC_ALIGNMENT_THREAT_TRANSFER
+    &Aura::HandleNoImmediateEffect,                         //202 SPELL_AURA_MOD_PET_STAT_FROM_OWNER_PCT
+    &Aura::HandleNoImmediateEffect,                         //203 SPELL_AURA_MOD_PET_ARMOR_FROM_OWNER_PCT
+    &Aura::HandleNoImmediateEffect,                         //204 SPELL_AURA_MOD_PET_RESISTANCE_AND_DODGE_FROM_OWNER_PCT
+    &Aura::HandleNoImmediateEffect,                         //205 SPELL_AURA_MOD_PET_ATTACK_POWER_FROM_RANGED_ATTACK_POWER_PCT
+    &Aura::HandleNoImmediateEffect,                         //206 SPELL_AURA_MOD_PET_SPELL_POWER_FROM_RANGED_ATTACK_POWER_PCT
+    &Aura::HandleNoImmediateEffect,                         //207 SPELL_AURA_MOD_ATTACK_AND_SPELL_RANGE
+    &Aura::HandleNoImmediateEffect,                         //208 SPELL_AURA_MOD_NO_REAGENT_USE_CHANCE
+    &Aura::HandleNoImmediateEffect,                         //209 SPELL_AURA_MOD_MECHANIC_DURATION_TAKEN_PCT
+    &Aura::HandleNoImmediateEffect,                         //210 SPELL_AURA_MOD_SELF_RESURRECT_RECOVERY_PCT
+    &Aura::HandleNoImmediateEffect,                         //211 SPELL_AURA_MOD_PET_HIT_AND_CRIT_CHANCE
+    &Aura::HandleNoImmediateEffect,                         //212 SPELL_AURA_SHIELDRENDER_TALISMAN
+    &Aura::HandleNoImmediateEffect,                         //213 SPELL_AURA_MOD_SPELL_POWER_FROM_INTELLECT_PCT
+    &Aura::HandleNoImmediateEffect,                         //214 SPELL_AURA_MOD_MANA_GAIN_PCT
+    &Aura::HandleNoImmediateEffect,                         //215 SPELL_AURA_MOD_PET_HIT_FROM_OWNER_SPELL_HIT_PCT
+    &Aura::HandleNoImmediateEffect,                         //216 SPELL_AURA_MOD_PET_CRIT_FROM_OWNER_SPELL_CRIT_PCT
+    &Aura::HandleNoImmediateEffect,                         //217 SPELL_AURA_MOD_ENERGY_TICK_INTERVAL_BY_AGILITY
+    &Aura::HandleNoImmediateEffect,                         //218 SPELL_AURA_TRIGGER_SPELL_ON_FULL_CHANNEL
+    &Aura::HandleUnused,                                    //219 SPELL_AURA_219_UNUSED
+    &Aura::HandleNoImmediateEffect,                         //220 SPELL_AURA_MOD_DAMAGE_TAKEN_FROM_PET_PCT
+    &Aura::HandleNoImmediateEffect,                         //221 SPELL_AURA_MOD_ATTACK_POWER_OF_PARTY_FLAT
+    &Aura::HandleNoImmediateEffect,                         //222 SPELL_AURA_MOD_ATTACK_POWER_OF_PARTY_PCT
+    &Aura::HandleNoImmediateEffect,                         //223 SPELL_AURA_MOD_EQUIPPED_ITEM_PROC_CHANCE_PCT
+    &Aura::HandleNoImmediateEffect,                         //224 SPELL_AURA_MOD_BLOCKED_DAMAGE_PERCENT_TAKEN
 };
 
 static AuraType const frozenAuraTypes[] = { SPELL_AURA_MOD_ROOT, SPELL_AURA_MOD_STUN, SPELL_AURA_NONE };
@@ -6326,6 +6351,14 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
     SpellEntry const* spellProto = sProto ? sProto : GetSpellProto();
     AuraType const aura_type = sProto ? auraType : m_modifier.m_auraname;
 
+    auto sendPeriodicMissResult = [spellProto](Unit* caster, Unit* victim, SpellMissInfo missInfo)
+    {
+        if (missInfo == SPELL_MISS_IMMUNE)
+            caster->SendSpellOrDamageImmune(victim, spellProto->Id);
+        else
+            caster->SendSpellMiss(victim, spellProto->Id, missInfo);
+    };
+
     switch (aura_type)
     {
         case SPELL_AURA_PERIODIC_DAMAGE:
@@ -6339,9 +6372,15 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
             if (!pCaster)
                 return;
 
-            if (spellProto->Effect[GetEffIndex()] == SPELL_EFFECT_PERSISTENT_AREA_AURA &&
-                    pCaster->SpellHitResult(target, spellProto, GetEffIndex(), false) != SPELL_MISS_NONE)
-                return;
+            if (spellProto->Effect[GetEffIndex()] == SPELL_EFFECT_PERSISTENT_AREA_AURA)
+            {
+                SpellMissInfo missInfo = pCaster->SpellHitResult(target, spellProto, GetEffIndex(), false);
+                if (missInfo != SPELL_MISS_NONE)
+                {
+                    sendPeriodicMissResult(pCaster, target, missInfo);
+                    return;
+                }
+            }
 
             // Check for immune (not use charges)
             if (!spellProto->HasAttribute(SPELL_ATTR_UNAFFECTED_BY_INVULNERABILITY)) // confirmed Impaling spine goes through immunity
@@ -6373,9 +6412,14 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
                     pdamage = uint32(target->GetMaxHealth() * (m_modifier.m_amount > 0 ? m_modifier.m_amount : 0) / 100);
             }
 
-            // Consecration: recalculate the damage on each tick
+            // Consecration: recalculate the damage on each tick with a frontloaded progression.
+            // Base damage increased by 8%; tick multipliers: 156%->140%->...->44% (step -16% per tick).
             if (spellProto->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_CONSECRATION>())
+            {
                 pdamage = pCaster->SpellDamageBonusDone(target, GetSpellProto(), GetEffIndex(), m_currentBasePoints, DOT, GetStackAmount());
+                int32 const tickPct = 172 - int32(GetAuraTicks()) * 16;  // tick1=156, tick8=44
+                pdamage = uint32(float(pdamage) * 1.08f * float(tickPct) / 100.0f);
+            }
             // TODO: once dithering is implemented properly it should get removed from there
             // Curse of Agony damage-per-tick calculation
             else if (spellProto->IsFitToFamily<SPELLFAMILY_WARLOCK, CF_WARLOCK_CURSE_OF_AGONY>())
@@ -6438,6 +6482,10 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
             const uint32 malus = (resist > 0 ? (absorb + uint32(resist)) : absorb);
             pdamage = (pdamage <= malus ? 0 : (pdamage - malus));
 
+           // Show a resist combat log entry for periodic ticks fully reduced to 0.
+            if (pdamage == 0 && resist > 0)
+                pCaster->SendSpellNonMeleeDamageLog(target, spellProto->Id, originalDamage, spellProto->GetSpellSchoolMask(), absorb, resist, true, 0);
+
             SpellPeriodicAuraLogInfo pInfo(this, pdamage, absorb, resist, 0.0f);
             target->SendPeriodicAuraLog(&pInfo, sProto ? auraType : SPELL_AURA_NONE);
 
@@ -6468,9 +6516,15 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
             if (!pCaster->IsInWorld() || !pCaster->IsAlive())
                 return;
 
-            if (spellProto->Effect[GetEffIndex()] == SPELL_EFFECT_PERSISTENT_AREA_AURA &&
-                    pCaster->SpellHitResult(target, spellProto, GetEffIndex(), false) != SPELL_MISS_NONE)
-                return;
+            if (spellProto->Effect[GetEffIndex()] == SPELL_EFFECT_PERSISTENT_AREA_AURA)
+            {
+                SpellMissInfo missInfo = pCaster->SpellHitResult(target, spellProto, GetEffIndex(), false);
+                if (missInfo != SPELL_MISS_NONE)
+                {
+                    sendPeriodicMissResult(pCaster, target, missInfo);
+                    return;
+                }
+            }
 
             // Check for immune
             if (!spellProto->HasAttribute(SPELL_ATTR_UNAFFECTED_BY_INVULNERABILITY))
@@ -6738,9 +6792,16 @@ void Aura::PeriodicTick(SpellEntry const* sProto, AuraType auraType, uint32 data
             if (!pCaster->IsAlive())
                 return;
 
-            if (GetSpellProto()->Effect[GetEffIndex()] == SPELL_EFFECT_PERSISTENT_AREA_AURA &&
-                    pCaster->SpellHitResult(target, spellProto, GetEffIndex(), false) != SPELL_MISS_NONE)
-                return;
+            // Persistent area aura ticks can miss; report that outcome and stop the tick.
+            if (GetSpellProto()->Effect[GetEffIndex()] == SPELL_EFFECT_PERSISTENT_AREA_AURA)
+            {
+                SpellMissInfo missInfo = pCaster->SpellHitResult(target, spellProto, GetEffIndex(), false);
+                if (missInfo != SPELL_MISS_NONE)
+                {
+                    sendPeriodicMissResult(pCaster, target, missInfo);
+                    return;
+                }
+            }
 
             // Check for immune (not use charges)
             if (!spellProto->HasAttribute(SPELL_ATTR_UNAFFECTED_BY_INVULNERABILITY)) // confirmed Impaling spine goes through immunity
@@ -8686,6 +8747,8 @@ void SpellAuraHolder::CalculateForDebuffLimit()
         case 20186: // Judgement of Wisdom (Rank 1)
         case 20354: // Judgement of Wisdom (Rank 2)
         case 20355: // Judgement of Wisdom (Rank 3)
+        case 51751: // Judgement of Wisdom (Rank 4)
+        case 51752: // Judgement of Wisdom (Rank 5)
         case 20549: // War Stomp
         case 20253: // Intercept Stun (Rank 1)
         case 20614: // Intercept Stun (Rank 2)
