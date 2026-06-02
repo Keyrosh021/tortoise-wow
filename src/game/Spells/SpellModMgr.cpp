@@ -236,6 +236,31 @@ void SpellModMgr::LoadSpellMods()
 
     // Other modifications (no 'speed' field in spell_mod)
 
+    // Divine Strike should scale 0.3% from spellpower.
+    if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(51810)))
+        spellInfo->EffectBonusCoefficient[EFFECT_INDEX_0] = 0.003f;
+
+    // Holy Shield damage scales 15% from spellpower.
+    for (uint32 spellId : { 20925, 20927, 20928 })
+    {
+        if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(spellId)))
+            spellInfo->EffectBonusCoefficient[EFFECT_INDEX_1] = 0.15f;
+    }
+
+    // Blessing of Sanctuary: use 1% spellpower scaling on blocked-hit Holy damage.
+    for (uint32 spellId : { 20911, 20912, 20913, 20914, 25899 })
+    {
+        if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(spellId)))
+            spellInfo->EffectBonusCoefficient[EFFECT_INDEX_1] = 0.01f;
+    }
+
+    // Retribution Aura should only scale from 1% spellpower.
+    for (uint32 spellId : { 7294, 10298, 10299, 10300, 10301 })
+    {
+        if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(spellId)))
+            spellInfo->EffectBonusCoefficient[EFFECT_INDEX_0] = 0.01f;
+    }
+
     // Flare
     if (SpellEntry* fuseeEcl = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(1543)))
         fuseeEcl->speed = 0.0f;

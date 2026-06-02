@@ -686,6 +686,13 @@ void Spell::EffectSchoolDMG(SpellEffectIndex effect_idx)
                     if (!unitTarget->HasUnitState(UNIT_STAT_STUNNED | UNIT_STAT_PENDING_STUNNED))
                         damage = int32(damage * 0.5f);
 
+                    // First apply bonus damage from the caster, then apply damage modifiers on the target.
+                    damage = m_caster->SpellDamageBonusDone(unitTarget, m_spellInfo, effect_idx, damage, SPELL_DIRECT_DAMAGE);
+                    damage = unitTarget->SpellDamageBonusTaken(m_caster, m_spellInfo, effect_idx, damage, SPELL_DIRECT_DAMAGE);
+                }
+                // Judgement of Righteousness: apply custom 1H or 2H spellpower scaling.
+                else if (m_spellInfo->IsFitToFamilyMask<CF_PALADIN_JUDGEMENT_OF_RIGHTEOUSNESS>() && m_spellInfo->SpellIconID == 25)
+                {
                     damage = m_caster->SpellDamageBonusDone(unitTarget, m_spellInfo, effect_idx, damage, SPELL_DIRECT_DAMAGE);
                     damage = unitTarget->SpellDamageBonusTaken(m_caster, m_spellInfo, effect_idx, damage, SPELL_DIRECT_DAMAGE);
                 }
@@ -3151,6 +3158,10 @@ void Spell::EffectDummy(SpellEffectIndex eff_idx)
                             hurt = 25902;
                             heal = 25903;
                             break;
+                        case 51786:
+                            hurt = 52012;
+                            heal = 51787;
+                            break;
                         default:
                             sLog.outError("Spell::EffectDummy: Spell %u not handled in HS", m_spellInfo->Id);
                             return;
@@ -3177,70 +3188,6 @@ void Spell::EffectDummy(SpellEffectIndex eff_idx)
                         return;
 
                     m_caster->CastSpell(unitTarget, spell_proto, true, nullptr);
-                    return;
-                }
-                case 237: // Judgement of the Crusader (Custom)
-                {
-                    if (!unitTarget)
-                        return;
-
-                    switch (m_spellInfo->Id)
-                    {
-                        case 21183: // Rank 1
-                        case 20188: // Rank 2
-                        case 20300: // Rank 3
-                        case 20301: // Rank 4
-                        case 20302: // Rank 5
-                        case 20303: // Rank 6
-                        {
-                            if (Player* pPlayer = m_caster->ToPlayer())
-                            {
-                                bool hasProc = false;
-                                if (Item* item = pPlayer->GetWeaponForAttack(BASE_ATTACK, true, true))
-                                {
-                                    float chanceMultiplier = m_currentBasePoints[eff_idx];
-                                    for (auto const& spellData : item->GetProto()->Spells)
-                                    {
-                                        if (!spellData.SpellId || spellData.SpellTrigger != ITEM_SPELLTRIGGER_CHANCE_ON_HIT)
-                                            continue;
-
-                                        hasProc = true;
-
-                                        if (SpellEntry const* pSpellEntry = sSpellMgr.GetSpellEntry(spellData.SpellId))
-                                        {
-                                            // nerf chance for overpowered effects
-                                            if (pSpellEntry->Id == 16602 ||
-                                                pSpellEntry->Id == 16928 ||
-                                                pSpellEntry->Id == 16939 ||
-                                                pSpellEntry->Id == 23605 ||
-                                                pSpellEntry->Id == 48102 ||
-                                                pSpellEntry->IsCCSpell() ||
-                                                pSpellEntry->HasAura(SPELL_AURA_MOD_CONFUSE) ||
-                                                pSpellEntry->HasAura(SPELL_AURA_MOD_DECREASE_SPEED) ||
-                                                pSpellEntry->HasAura(SPELL_AURA_MOD_CASTING_SPEED_NOT_STACK))
-                                                chanceMultiplier *= 0.2f;
-                                            else if (pSpellEntry->IsAreaOfEffectSpell())
-                                                chanceMultiplier *= 0.5f;
-                                        }
-                                    }
-                                    if (chanceMultiplier < 2.0f)
-                                        chanceMultiplier = 2.0f;
-                                    pPlayer->CastItemCombatSpell(unitTarget, BASE_ATTACK, chanceMultiplier);
-                                }
-
-                                // refund judgement mana if weapon has no proc
-                                if (!hasProc)
-                                {
-                                    if (SpellEntry const* pJudge = sSpellMgr.GetSpellEntry(20271))
-                                    {
-                                        uint32 manaCost = Spell::CalculatePowerCost(pJudge, pPlayer);
-                                        pPlayer->ModifyPower(POWER_MANA, manaCost);
-                                    }
-                                }
-                            }
-                            return;
-                        }
-                    }
                     return;
                 }
             }
@@ -3443,8 +3390,50 @@ void Spell::EffectTriggerSpell(SpellEffectIndex eff_idx)
 
             break;
     }
+    SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(triggered_spell_id);
+    if (!spellInfo)
+    {
+        sLog.outError("EffectTriggerSpell of spell %u: triggering unknown spell id %i", m_spellInfo->Id, triggered_spell_id);
+        return;
+    }
+
     switch (triggered_spell_id)
     {
+        // Holy Strike support spells: keep ally burst, then explicitly restore paladin mana and self-heal.
+        case 51324:
+        case 51875:
+        case 51876:
+        case 51877:
+        case 51878:
+        case 51879:
+        case 51880:
+        case 51881:
+            if (m_casterUnit)
+            {
+                m_casterUnit->CastSpell(m_casterUnit, triggered_spell_id, true, m_CastItem, nullptr, m_originalCasterGUID);
+
+                if (spellInfo->Effect[EFFECT_INDEX_0] == SPELL_EFFECT_ENERGIZE)
+                {
+                    int32 manaGain = m_casterUnit->CalculateSpellDamage(m_casterUnit, spellInfo, EFFECT_INDEX_0);
+                    if (manaGain > 0 && spellInfo->EffectMiscValue[EFFECT_INDEX_0] >= 0 && spellInfo->EffectMiscValue[EFFECT_INDEX_0] < MAX_POWERS)
+                        m_casterUnit->EnergizeBySpell(m_casterUnit, triggered_spell_id, uint32(manaGain), Powers(spellInfo->EffectMiscValue[EFFECT_INDEX_0]));
+                }
+
+                if (spellInfo->Effect[EFFECT_INDEX_1] == SPELL_EFFECT_HEAL)
+                {
+                    int32 selfHeal = m_casterUnit->CalculateSpellDamage(m_casterUnit, spellInfo, EFFECT_INDEX_1);
+                    if (selfHeal > 0)
+                    {
+                        selfHeal = m_casterUnit->SpellHealingBonusDone(m_casterUnit, spellInfo, EFFECT_INDEX_1, selfHeal, HEAL);
+                        selfHeal = m_casterUnit->SpellHealingBonusTaken(m_casterUnit, spellInfo, EFFECT_INDEX_1, selfHeal, HEAL);
+                        selfHeal /= 2;
+
+                        if (selfHeal > 0)
+                            m_casterUnit->DealHeal(m_casterUnit, uint32(selfHeal), spellInfo);
+                    }
+                }
+            }
+            return;
         // Item [Scorpid Surprise] - Heals 294 damage over 21 sec, assuming you don't bite down on a poison sac.
         // 10% proc rate (no source !)
         case 6411:
@@ -3475,14 +3464,6 @@ void Spell::EffectTriggerSpell(SpellEffectIndex eff_idx)
         case 29286:
             m_caster->CastSpell(unitTarget, 26464, true, m_CastItem, nullptr, m_originalCasterGUID);
             return;
-    }
-
-    // normal case
-    SpellEntry const *spellInfo = sSpellMgr.GetSpellEntry(triggered_spell_id);
-    if (!spellInfo)
-    {
-        sLog.outError("EffectTriggerSpell of spell %u: triggering unknown spell id %i", m_spellInfo->Id, triggered_spell_id);
-        return;
     }
 
     // select formal caster for triggered spell
@@ -5678,6 +5659,9 @@ void Spell::EffectWeaponDmg(SpellEffectIndex eff_idx)
         {
             switch (m_spellInfo->SpellIconID)
             {
+                case 2164: // Crusader Strike - damage is normalized
+                    normalized = true;
+                    break;
                 case 2036:
                 {
                     switch (m_spellInfo->Id)
@@ -5810,8 +5794,12 @@ void Spell::EffectWeaponDmg(SpellEffectIndex eff_idx)
         bonus = m_casterUnit->SpellDamageBonusDone(unitTarget, m_spellInfo, eff_idx, bonus, SPELL_DIRECT_DAMAGE);
         bonus = unitTarget->SpellDamageBonusTaken(m_casterUnit, m_spellInfo, eff_idx, bonus, SPELL_DIRECT_DAMAGE);
     }
-
-    // effects that split damage among targets
+    // Crusader Strike: 20% holy spellpower coefficient
+    else if (m_spellInfo->SpellFamilyName == SPELLFAMILY_PALADIN && m_spellInfo->SpellIconID == 2164)
+    {
+        int32 spBonus = int32(m_casterUnit->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_HOLY) * 0.20f);
+        bonus += spBonus;
+    }
     if (bonus > 0)
     {
         switch (m_spellInfo->Id)

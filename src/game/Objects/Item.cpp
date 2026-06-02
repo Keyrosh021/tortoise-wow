@@ -110,11 +110,47 @@ void AddItemsSetItem(Player* player, Item* item)
             }
         }
     }
+    // Redemption T3: identify both set ids so the missing 6-piece Exorcism cooldown aura can be applied.
+    bool const isRedemptionSet = setid == 647 || setid == 648;
+
+    // Redemption T3 6-piece is consumed from ItemSet.dbc at runtime. Mirror the live
+    // set bonus here so the server still applies it when the DBC entry is stale.
+    if (isRedemptionSet && eff->item_count >= 6)
+    {
+        uint32 z = 0;
+        for (; z < 8; ++z)
+        {
+            if (eff->spells[z] && eff->spells[z]->Id == 51823)
+                break;
+        }
+
+        if (z == 8)
+        {
+            for (auto& spell : eff->spells)
+            {
+                if (!spell)
+                {
+                    SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(51823);
+                    if (!spellInfo)
+                    {
+                        sLog.outError("Unknown Redemption item set spell id %u", 51823u);
+                        break;
+                    }
+
+                    player->ApplyEquipSpell(spellInfo, nullptr, true);
+                    spell = spellInfo;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void RemoveItemsSetItem(Player* player, ItemPrototype const* proto)
 {
     uint32 setid = proto->ItemSet;
+    // Redemption T3: remove the custom 6-piece Exorcism cooldown aura when the bonus is lost.
+    bool const isRedemptionSet = setid == 647 || setid == 648;
 
     ItemSetEntry const* set = sItemSetStore.LookupEntry(setid);
 
@@ -140,6 +176,20 @@ void RemoveItemsSetItem(Player* player, ItemPrototype const* proto)
         return;
 
     --eff->item_count;
+
+    // Redemption T3: explicitly strip aura 51823 because it was patched into the set at runtime.
+    if (isRedemptionSet && eff->item_count < 6)
+    {
+        for (auto& spell : eff->spells)
+        {
+            if (spell && spell->Id == 51823)
+            {
+                player->ApplyEquipSpell(spell, nullptr, false);
+                spell = nullptr;
+                break;
+            }
+        }
+    }
 
     for (uint32 x = 0; x < 8; x++)
     {

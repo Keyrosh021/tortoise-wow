@@ -236,12 +236,67 @@ pAuraProcHandler AuraProcHandler[TOTAL_AURAS] =
     &Unit::HandleNULLProc,                                  //197 SPELL_AURA_MOD_PERIODIC_DAMAGE_PERCENT_TAKEN
     &Unit::HandleNULLProc,                                  //198 SPELL_AURA_MOD_CRIT_DAMAGE_BONUS_TAKEN
     &Unit::HandleNULLProc,                                  //199 SPELL_AURA_MOD_SPELL_HEALING_OF_ARMOR_PERCENT
+    &Unit::HandleNULLProc,                                  //200 SPELL_AURA_TOTEMIC_ALIGNMENT_PCT
+    &Unit::HandleNULLProc,                                  //201 SPELL_AURA_TOTEMIC_ALIGNMENT_THREAT_TRANSFER
+    &Unit::HandleNULLProc,                                  //202 SPELL_AURA_MOD_PET_STAT_FROM_OWNER_PCT
+    &Unit::HandleNULLProc,                                  //203 SPELL_AURA_MOD_PET_ARMOR_FROM_OWNER_PCT
+    &Unit::HandleNULLProc,                                  //204 SPELL_AURA_MOD_PET_RESISTANCE_AND_DODGE_FROM_OWNER_PCT
+    &Unit::HandleNULLProc,                                  //205 SPELL_AURA_MOD_PET_ATTACK_POWER_FROM_RANGED_ATTACK_POWER_PCT
+    &Unit::HandleNULLProc,                                  //206 SPELL_AURA_MOD_PET_SPELL_POWER_FROM_RANGED_ATTACK_POWER_PCT
+    &Unit::HandleNULLProc,                                  //207 SPELL_AURA_MOD_ATTACK_AND_SPELL_RANGE
+    &Unit::HandleNULLProc,                                  //208 SPELL_AURA_MOD_NO_REAGENT_USE_CHANCE
+    &Unit::HandleNULLProc,                                  //209 SPELL_AURA_MOD_MECHANIC_DURATION_TAKEN_PCT
+    &Unit::HandleNULLProc,                                  //210 SPELL_AURA_MOD_SELF_RESURRECT_RECOVERY_PCT
+    &Unit::HandleNULLProc,                                  //211 SPELL_AURA_MOD_PET_HIT_AND_CRIT_CHANCE
+    &Unit::HandleNULLProc,                                  //212 SPELL_AURA_SHIELDRENDER_TALISMAN
+    &Unit::HandleNULLProc,                                  //213 SPELL_AURA_MOD_SPELL_POWER_FROM_INTELLECT_PCT
+    &Unit::HandleNULLProc,                                  //214 SPELL_AURA_MOD_MANA_GAIN_PCT
+    &Unit::HandleNULLProc,                                  //215 SPELL_AURA_MOD_PET_HIT_FROM_OWNER_SPELL_HIT_PCT
+    &Unit::HandleNULLProc,                                  //216 SPELL_AURA_MOD_PET_CRIT_FROM_OWNER_SPELL_CRIT_PCT
+    &Unit::HandleNULLProc,                                  //217 SPELL_AURA_MOD_ENERGY_TICK_INTERVAL_BY_AGILITY
+    &Unit::HandleNULLProc,                                  //218 SPELL_AURA_TRIGGER_SPELL_ON_FULL_CHANNEL
+    &Unit::HandleNULLProc,                                  //219 SPELL_AURA_219_UNUSED
+    &Unit::HandleNULLProc,                                  //220 SPELL_AURA_MOD_DAMAGE_TAKEN_FROM_PET_PCT
+    &Unit::HandleNULLProc,                                  //221 SPELL_AURA_MOD_ATTACK_POWER_OF_PARTY_FLAT
+    &Unit::HandleNULLProc,                                  //222 SPELL_AURA_MOD_ATTACK_POWER_OF_PARTY_PCT
+    &Unit::HandleNULLProc,                                  //223 SPELL_AURA_MOD_EQUIPPED_ITEM_PROC_CHANCE_PCT
+    &Unit::HandleNULLProc,                                  //224 SPELL_AURA_MOD_BLOCKED_DAMAGE_PERCENT_TAKEN
 };
 
 // Fonctions Nostalrius
 inline bool SpellCanTrigger(const SpellEntry* spellProto, const SpellEntry* procSpell, uint8 eff_idx = 0)
 {
     return (procSpell && procSpell->SpellFamilyName == spellProto->SpellFamilyName && procSpell->SpellFamilyFlags & spellProto->EffectItemType[eff_idx]);
+}
+
+inline bool IsCrusaderStrikeProc(SpellEntry const* spellInfo)
+{
+    // Blessed/Righteous Strikes: accept live Crusader Strike helpers even when family flags are missing.
+    if (!spellInfo)
+        return false;
+
+    if (spellInfo->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_CRUSADER_STRIKE>())
+        return true;
+
+    if (spellInfo->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_CRUSADER_STRIKE_DEBUFF>())
+        return true;
+
+    switch (spellInfo->Id)
+    {
+        case 7297:
+        case 8825:
+        case 8826:
+        case 10338:
+        case 10339:
+        case 47314:
+        case 47315:
+        case 47316:
+        case 47317:
+        case 47318:
+            return true;
+        default:
+            return false;
+    }
 }
 
 SpellProcEventTriggerCheck Unit::IsTriggeredAtSpellProcEvent(Unit *pVictim, SpellAuraHolder* holder, SpellEntry const* procSpell, uint32 procFlag, uint32 procExtra, WeaponAttackType attType, bool isVictim, SpellProcEventEntry const*& spellProcEvent, bool isSpellTriggeredByAuraOrItem) const
@@ -302,15 +357,6 @@ SpellProcEventTriggerCheck Unit::IsTriggeredAtSpellProcEvent(Unit *pVictim, Spel
             if (spellProto->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_SEAL_OF_THE_CRUSADER, CF_PALADIN_SEAL_OF_WISDOM_LIGHT, CF_PALADIN_SEAL_OF_COMMAND, CF_PALADIN_SEALS>())
                 return roll_chance_u(50) ? SPELL_PROC_TRIGGER_OK : SPELL_PROC_TRIGGER_ROLL_FAILED;
         }
-        // Sanctified Command (Custom Paladin Talent)
-        if (spellProto->Id == 45954 || spellProto->Id == 45955)
-        {
-            // Judgement of Command
-            if (procSpell->SpellIconID == 561 && procSpell->DmgClass == 2 && procSpell->SpellVisual == 0)
-                return SPELL_PROC_TRIGGER_OK;
-            else
-                return SPELL_PROC_TRIGGER_FAILED;
-        }
         if (spellProto->Id == 51022)
         {
             if (!procSpell->IsFitToFamily<SPELLFAMILY_DRUID, CF_DRUID_HEALING_TOUCH>() &&
@@ -319,6 +365,13 @@ SpellProcEventTriggerCheck Unit::IsTriggeredAtSpellProcEvent(Unit *pVictim, Spel
                 !procSpell->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_HOLY_LIGHT1, CF_PALADIN_HOLY_LIGHT2>())
                 return SPELL_PROC_TRIGGER_FAILED;
         }
+        // Blessed Strikes needs to accept the live Crusader Strike ranks/helpers.
+        if (spellProto->Id == 51320 || spellProto->Id == 51321)
+            return IsCrusaderStrikeProc(procSpell) ? SPELL_PROC_TRIGGER_OK : SPELL_PROC_TRIGGER_FAILED;
+        // Righteous Strikes needs to accept the live Crusader Strike spell variants
+        // before the generic spell_proc_event filter rejects them.
+        if (spellProto->Id >= 51341 && spellProto->Id <= 51345)
+            return IsCrusaderStrikeProc(procSpell) ? SPELL_PROC_TRIGGER_OK : SPELL_PROC_TRIGGER_FAILED;
         // Eye for an Eye
         if (spellProto->SpellIconID == 1820)
         {
@@ -358,6 +411,14 @@ SpellProcEventTriggerCheck Unit::IsTriggeredAtSpellProcEvent(Unit *pVictim, Spel
                 // Frosty Zap
             case 24392:
                 if (SpellCanTrigger(spellProto, procSpell))
+                    return SPELL_PROC_TRIGGER_OK;
+                break;
+            case 51341: // Righteous Strikes rank 1
+            case 51342: // Righteous Strikes rank 2
+            case 51343: // Righteous Strikes rank 3
+            case 51344: // Righteous Strikes rank 4
+            case 51345: // Righteous Strikes rank 5
+                if (procSpell && procSpell->SpellFamilyName == SPELLFAMILY_PALADIN && procSpell->SpellIconID == 2164 && procSpell->DmgClass == SPELL_DAMAGE_CLASS_MELEE)
                     return SPELL_PROC_TRIGGER_OK;
                 break;
             }
@@ -1170,49 +1231,9 @@ SpellAuraProcResult Unit::HandleDummyAuraProc(Unit *pVictim, uint32 damage, int3
             break;
         case SPELLFAMILY_PALADIN:
         {
+            
             switch (dummySpell->Id)
             {
-                // Sanctified Command (Custom Paladin Talent)
-                case 45954:
-                case 45955:
-                {
-                    if (Player* pPlayer = ToPlayer())
-                    {
-                        uint32 sealSpellId;
-                        switch (procSpell->Id)
-                        {
-                            case 20467: // Rank 1
-                                sealSpellId = 20375;
-                                break;
-                            case 20963: // Rank 2
-                                sealSpellId = 20915;
-                                break;
-                            case 20964: // Rank 3
-                                sealSpellId = 20918;
-                                break;
-                            case 20965: // Rank 4
-                                sealSpellId = 20919;
-                                break;
-                            case 20966: // Rank 5
-                                sealSpellId = 20920;
-                                break;
-                            default:
-                                return SPELL_AURA_PROC_FAILED;
-                        }
-
-                        SpellEntry const* pSeal = sSpellMgr.GetSpellEntry(sealSpellId);
-                        if (!pSeal)
-                            return SPELL_AURA_PROC_FAILED;
-
-                        float const manaEffectiveness = float(triggerAmount) / 100.0f;
-                        int32 const manaAmount = pSeal->manaCost * manaEffectiveness;
-                        CastCustomSpell(this, 45987, &manaAmount, nullptr, nullptr, true);
-
-                        return SPELL_AURA_PROC_OK;
-                    }
-
-                    return SPELL_AURA_PROC_FAILED;
-                }
                 // Holy Power (Redemption Armor set)
                 case 28789:
                 {
@@ -1402,11 +1423,18 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
                 case 20149:
                 case 20150:
                 {
+                    if (cooldown && HasSpellCooldown(trigger_spell_id))
+                        return SPELL_AURA_PROC_FAILED;
+
                     int32 const mana = int32(GetMaxPower(POWER_MANA) * 0.02);
                     if (!mana)
                         return SPELL_AURA_PROC_FAILED;
 
                     EnergizeBySpell(this, trigger_spell_id, mana, POWER_MANA);
+
+                    if (cooldown)
+                        AddSpellCooldown(trigger_spell_id, 0, time(nullptr) + cooldown);
+
                     return SPELL_AURA_PROC_OK;
                 }
                 // Primal Fury (custom version)
@@ -1655,17 +1683,31 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
 
                 int32 damagePoint = urand(0, 1) ? floor(damageBasePoints) : ceil(damageBasePoints);
 
+                int32 totalSP = SpellBaseDamageBonusDone(auraSpellInfo->GetSpellSchoolMask());
+                float spellPowerScale = 0.98f;
+                if (IsPlayer())
+                {
+                    if (Item* item = ((Player*)this)->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
+                    {
+                        if (!item->isOneHandedWeapon())
+                            spellPowerScale = 1.125f;
+                    }
+                }
+
+                int32 spellPowerBonus = 0;
                 if (damagePoint >= 0)
                 {
-                    int32 const spellPowerBonus = SpellBonusWithCoeffs(
+                    spellPowerBonus = SpellBonusWithCoeffs(
                         auraSpellInfo,
                         EFFECT_INDEX_0,
                         0,
-                        SpellBaseDamageBonusDone(auraSpellInfo->GetSpellSchoolMask()),
+                        totalSP,
                         0,
                         SPELL_DIRECT_DAMAGE,
                         true,
                         this);
+
+                    spellPowerBonus = int32(spellPowerBonus * spellPowerScale);
 
                     damagePoint += spellPowerBonus;
                 }
@@ -1676,37 +1718,32 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
                 return SPELL_AURA_PROC_OK;
             }
 
-            // Blessed Strikes: Crusader Strike resets Holy Shock cooldown
-            if (auraSpellInfo->Id >= 51317 && auraSpellInfo->Id <= 51321)
+            // Blessed/Righteous Strikes: local proc path also accepts Crusader Strike helper spell ids.
+            auto const isCrusaderStrikeProc = [](SpellEntry const* spellInfo) -> bool
             {
-                if (!procSpell || !procSpell->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_CRUSADER_STRIKE>())
-                    return SPELL_AURA_PROC_FAILED;
+                if (!spellInfo)
+                    return false;
 
-                // effectBasePoints3 carries the proc chance percentage per rank.
-                uint32 resetChance = uint32(auraSpellInfo->EffectBasePoints[EFFECT_INDEX_2]) + 1;
-                if (!roll_chance_i(resetChance))
-                    return SPELL_AURA_PROC_FAILED;
+                if (spellInfo->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_CRUSADER_STRIKE>())
+                    return true;
 
-                Player* playerCaster = ToPlayer();
-                if (!playerCaster)
-                    return SPELL_AURA_PROC_FAILED;
-
-                std::vector<uint32> spellsToClear;
-                for (const auto& cdEntry : playerCaster->GetSpellCooldownMap())
+                switch (spellInfo->Id)
                 {
-                    SpellEntry const* cdSpell = sSpellMgr.GetSpellEntry(cdEntry.first);
-                    if (!cdSpell || cdSpell->SpellFamilyName != SPELLFAMILY_PALADIN)
-                        continue;
-
-                    if (cdSpell->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_HOLY_SHOCK>())
-                        spellsToClear.push_back(cdEntry.first);
+                    case 7297:
+                    case 8825:
+                    case 8826:
+                    case 10338:
+                    case 10339:
+                    case 47314:
+                    case 47315:
+                    case 47316:
+                    case 47317:
+                    case 47318:
+                        return true;
+                    default:
+                        return false;
                 }
-
-                for (uint32 spellId : spellsToClear)
-                    playerCaster->RemoveSpellCooldown(spellId, true);
-
-                return SPELL_AURA_PROC_OK;
-            }
+            };
 
             // Righteous Defense talent ranks (51328-30) - only while Righteous Fury is active and always self-targeted.
             if (auraSpellInfo->Id == 51328 || auraSpellInfo->Id == 51329 || auraSpellInfo->Id == 51330)
@@ -1721,6 +1758,27 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
                 // Refresh instead of stacking the damage taken reduction aura.
                 if (HasAura(trigger_spell_id))
                     RemoveAurasDueToSpell(trigger_spell_id);
+            }
+            // Blessed Strikes: Crusader Strike can reset Holy Shock cooldown.
+            else if (auraSpellInfo->Id == 51320 || auraSpellInfo->Id == 51321)
+            {
+                Player* player = ToPlayer();
+                if (!player || !IsCrusaderStrikeProc(procSpell))
+                    return SPELL_AURA_PROC_FAILED;
+
+                SpellCooldowns cooldowns = player->GetSpellCooldownMap();
+
+                for (SpellCooldowns::const_iterator itr = cooldowns.begin(); itr != cooldowns.end();)
+                {
+                    SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(itr->first);
+
+                    if (spellInfo && spellInfo->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_HOLY_SHOCK>())
+                        player->RemoveSpellCooldown((itr++)->first, true);
+                    else
+                        ++itr;
+                }
+
+                return SPELL_AURA_PROC_OK;
             }
             // Judgement of Light and Judgement of Wisdom
             else if (auraSpellInfo->IsFitToFamilyMask<CF_PALADIN_JUDGEMENT_OF_WISDOM_LIGHT>())
@@ -1751,6 +1809,12 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
                     case 20355:
                         trigger_spell_id = 20353;
                         break; // Rank 3
+                    case 51751:
+                        trigger_spell_id = 51749;
+                        break; // Rank 4
+                    case 51752:
+                        trigger_spell_id = 51750;
+                        break; // Rank 5
                     default:
                         sLog.outError("Unit::HandleProcTriggerSpell: Spell %u miss posibly Judgement of Light/Wisdom", auraSpellInfo->Id);
                         return SPELL_AURA_PROC_FAILED;
@@ -1784,6 +1848,7 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
                     case 25914: originalSpellId = 20473; break;
                     case 25913: originalSpellId = 20929; break;
                     case 25903: originalSpellId = 20930; break;
+                    case 51787: originalSpellId = 51786; break;
                     default:
                         sLog.outError("Unit::HandleProcTriggerSpell: Spell %u not handled in HShock", procSpell->Id);
                         return SPELL_AURA_PROC_FAILED;
@@ -1920,6 +1985,24 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
     // try detect target manually if not set
     if (target == nullptr)
         target = !(procFlags & PROC_FLAG_DEAL_HELPFUL_SPELL) && Spells::IsPositiveSpell(trigger_spell_id) ? this : pVictim;
+
+    switch (trigger_spell_id)
+    {
+        case 51361: // Repent Rank 1
+        case 51559: // Repent Rank 2
+        case 51560: // Repent Rank 3
+        {
+            // Repent's helper damage spell uses an enemy target template, so drive the self-hit through
+            // the normal direct-spell damage pipeline using the original aura caster as attacker,
+            // while still applying the damage to the debuffed target.
+            uint32 repentDamage = std::max(1, triggerEntry->CalculateSimpleValue(EFFECT_INDEX_0));
+            if (Unit* pAuraCaster = triggeredByAura->GetCaster())
+                pAuraCaster->SpellNonMeleeDamageLog(this, trigger_spell_id, repentDamage);
+            else
+                SpellNonMeleeDamageLog(this, trigger_spell_id, repentDamage);
+            return SPELL_AURA_PROC_OK;
+        }
+    }
 
     // default case
     if (!target || (target != this && !target->IsAlive()))
@@ -2134,6 +2217,16 @@ SpellAuraProcResult Unit::HandleAddTargetTriggerAuraProc(Unit *pVictim, uint32 /
             case 24392: // Gelee soudaine
             case 14179: // Frappes implacables
                 bTarget = false;
+                break;
+            // Righteous Strikes: target-trigger auras self-cast Zealous Defense and refresh the one-hit absorb.
+            case 51341: // Righteous Strikes rank 1
+            case 51342: // Righteous Strikes rank 2
+            case 51343: // Righteous Strikes rank 3
+            case 51344: // Righteous Strikes rank 4
+            case 51345: // Righteous Strikes rank 5
+                bTarget = false;
+                if (HasAura(trigger_spell_id))
+                    RemoveAurasDueToSpell(trigger_spell_id);
                 break;
         }
 
