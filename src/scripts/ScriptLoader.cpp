@@ -338,6 +338,7 @@ void AddSC_boss_chronormu();
 void AddSC_npc_loothelper();
 void AddSC_npc_ptr();
 void AddSC_jewelcrafting();
+void AddSC_barbershop();
 
 void AddScripts()
 {
@@ -672,4 +673,5 @@ void AddScripts()
     AddSC_npc_loothelper();
     AddSC_npc_ptr();
     AddSC_jewelcrafting();
+    AddSC_barbershop();
 }
