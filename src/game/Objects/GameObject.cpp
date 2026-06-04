@@ -47,6 +47,7 @@
 #include "DynamicTree.h"
 #include "vmap/GameObjectModel.h"
 #include "GuidObjectScaling.h"
+#include "Barbershop/TurtleBarbershopMgr.h"
 #include <G3D/Box.h>
 #include <G3D/CoordinateFrame.h>
 #include <G3D/Quat.h>
@@ -1567,6 +1568,9 @@ void GameObject::Use(Unit* user)
             GetClosestChairSlotPosition(user->GetPositionX(), user->GetPositionY(), slotX, slotY);
             user->NearTeleportTo(slotX, slotY, GetPositionZ(), GetOrientation(), TELE_TO_NOT_LEAVE_COMBAT | TELE_TO_NOT_UNSUMMON_PET);
             user->SetStandState(UNIT_STAND_STATE_SIT_LOW_CHAIR + info->chair.height);
+
+            if (player->GetSession() && GetEntry() == 105180)
+                sTurtleBarbershopMgr.OpenBarbershop(player);
             return;
         }
         case GAMEOBJECT_TYPE_SPELL_FOCUS:                   // 8
