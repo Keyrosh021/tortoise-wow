@@ -8,6 +8,9 @@
 
 bool DpsAssistAction::isUseful()
 {
+    if (!AttackAction::isUseful())
+        return false;
+
     // if carry flag, do not start fight
     if (bot->HasAura(23333) || bot->HasAura(23335) || bot->HasAura(34976))
         return false;
@@ -17,6 +20,24 @@ bool DpsAssistAction::isUseful()
 
 bool AttackAnythingAction::isUseful() 
 {
+    if (!AttackAction::isUseful())
+        return false;
+
+    Unit* currentTarget = AI_VALUE(Unit*, "current target");
+    if (currentTarget && currentTarget->IsInWorld() && !sServerFacade.UnitIsDead(currentTarget) &&
+        !AI_VALUE2(bool, "invalid target", "current target"))
+    {
+        return false;
+    }
+
+    if (Unit* victim = bot->GetVictim())
+    {
+        if (victim->IsInWorld() && !sServerFacade.UnitIsDead(victim))
+        {
+            return false;
+        }
+    }
+
     if (!ai->AllowActivity(GRIND_ACTIVITY)) //Bot not allowed to be active
         return false;
 
@@ -47,10 +68,50 @@ bool ai::AttackAnythingAction::isPossible()
 
 bool ai::AttackAnythingAction::Execute(Event& event)
 {
+    if (Unit* victim = bot->GetVictim())
+    {
+        if (victim->IsInWorld() && !sServerFacade.UnitIsDead(victim))
+        {
+            context->GetValue<Unit*>("current target")->Set(victim);
+            context->GetValue<ObjectGuid>("attack target")->Set(victim->GetObjectGuid());
+            return false;
+        }
+    }
+
     bool result = AttackAction::Execute(event);
+    Unit* grindTarget = GetTarget();
+
+    auto tryPullDispatch = [this, &event, grindTarget]() -> bool
+    {
+        if (!grindTarget || !grindTarget->IsInWorld() || sServerFacade.UnitIsDead(grindTarget))
+            return false;
+
+        if (!ai->HasStrategy("pull", BotState::BOT_STATE_COMBAT))
+            return false;
+
+        PullStrategy* strategy = PullStrategy::Get(ai);
+        if (!strategy || !strategy->CanDoPullAction(grindTarget))
+            return false;
+
+        Event pullEvent("attack anything", grindTarget->GetObjectGuid());
+        bool didPull = ai->DoSpecificAction("pull my target", pullEvent, true);
+
+        if (didPull && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "target=" << grindTarget->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, grindTarget)
+                << " ranged=" << (ai->IsRanged(bot) ? 1 : 0)
+                << " inCombat=" << (bot->IsInCombat() ? 1 : 0)
+                << " victim=" << (bot->GetVictim() ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "AttackAnythingPullDispatch", std::to_string(grindTarget->GetGUIDLow()), out.str());
+        }
+
+        return didPull;
+    };
+
     if (result)
     {
-        Unit* grindTarget = GetTarget();
         if (grindTarget)
         {
             std::string grindName = grindTarget->GetName();
@@ -62,12 +123,9 @@ bool ai::AttackAnythingAction::Execute(Event& event)
                 {
                     if (PullStrategy* strategy = PullStrategy::Get(ai))
                     {
-                        if (strategy->CanDoPullAction(grindTarget) && (ai->GetBot()->getClass() == CLASS_DRUID || ai->GetBot()->getClass() == CLASS_PALADIN || AI_VALUE2(uint32, "item count", "ammo")))
+                        if (strategy->CanDoPullAction(grindTarget))
                         {
-                            Event pullEvent("attack anything", grindTarget->GetObjectGuid());
-                            bool doAction = ai->DoSpecificAction("pull my target", pullEvent, true);
-
-                            if (doAction)
+                            if (tryPullDispatch())
                             {
                                 return true;
                             }
@@ -76,9 +134,13 @@ bool ai::AttackAnythingAction::Execute(Event& event)
                 }
 
                 context->GetValue<ObjectGuid>("attack target")->Set(grindTarget->GetObjectGuid());
-                ai->StopMoving();
             }
         }
+    }
+    else if (grindTarget && ai->IsRanged(bot) && !bot->GetVictim() && !bot->IsInCombat())
+    {
+        if (tryPullDispatch())
+            return true;
     }
 
     return result;

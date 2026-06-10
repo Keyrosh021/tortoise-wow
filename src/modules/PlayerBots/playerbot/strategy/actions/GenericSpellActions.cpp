@@ -69,6 +69,28 @@ bool CastSpellAction::Execute(Event& event)
 
     if (executed)
     {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            Unit* target = GetTarget();
+            const bool isRangedBot = ai->IsRanged(bot);
+            const bool isCasterRanged = isRangedBot && bot->getClass() != CLASS_HUNTER;
+            const bool hasManaBar = AI_VALUE2(bool, "has mana", "self target");
+            const uint8 manaPct = hasManaBar ? AI_VALUE2(uint8, "mana", "self target") : 0;
+
+            std::ostringstream out;
+            out << "spell=" << spellName
+                << " target=" << (target ? target->GetName() : "self")
+                << " ranged=" << (isRangedBot ? 1 : 0)
+                << " casterRanged=" << (isCasterRanged ? 1 : 0)
+                << " hasMana=" << (hasManaBar ? 1 : 0)
+                << " mana=" << static_cast<uint32>(manaPct);
+
+            if (target)
+                out << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target);
+
+            sPlayerbotAIConfig.logEvent(ai, "SpellCastTrace", target ? std::to_string(target->GetGUIDLow()) : "0", out.str());
+        }
+
         if (ai->HasCheat(BotCheatMask::attackspeed))
             spellDuration = 1;
 
@@ -104,7 +126,12 @@ bool CastSpellAction::isPossible()
     }
     else
     {
-        float dist = bot->GetDistance(spellTarget, true, ai->IsRanged(bot) ? DIST_CALC_COMBAT_REACH : DIST_CALC_COMBAT_REACH_WITH_MELEE);
+        // Keep ranged spell range validation on the same distance basis as
+        // attack/reach selection. The combat-reach flavored distance can
+        // overreport badly for some creature states and block casts even while
+        // the attack logic considers the target valid and in range.
+        float dist = ai->IsRanged(bot) ? sServerFacade.GetDistance2d(bot, spellTarget)
+                                       : bot->GetDistance(spellTarget, true, DIST_CALC_COMBAT_REACH_WITH_MELEE);
         if (range == ATTACK_DISTANCE) 
         {
             canReach = bot->CanReachWithMeleeAttack(spellTarget);
@@ -135,8 +162,10 @@ bool CastSpellAction::isPossible()
         return false;
     }
     
-    // Check if the spell can be casted
-	return ai->CanCastSpell(spellName, spellTarget, 0, nullptr, true);
+    // Honor actual spell range here. Ignoring range lets ranged bots "approve"
+    // casts from too far away, which can put targets into combat before the bot
+    // has really walked into cast range.
+	return ai->CanCastSpell(spellName, spellTarget, 0, nullptr, false);
 }
 
 bool CastSpellAction::isUseful()

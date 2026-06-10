@@ -45,9 +45,10 @@ std::list<int32> ItemVendorListValue::Calculate()
 {
     uint32 itemId = stoi(getQualifier());
 
-    VendorMap* vendorMap = GAI_VALUE(VendorMap*, "vendor map");
-
     std::list<int32> entries;
+    VendorMap* vendorMap = GAI_VALUE(VendorMap*, "vendor map");
+    if (!vendorMap)
+        return entries;
 
     auto range = vendorMap->equal_range(itemId);
 

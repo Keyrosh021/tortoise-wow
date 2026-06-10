@@ -63,9 +63,109 @@
 #include "GuidObjectScaling.h"
 #include "PerfStats.h"
 #include "Autoscaling/AutoScaler.hpp"
+#include <sstream>
 
 // apply implementation of the singletons
 #include "Policies/SingletonImp.h"
+
+namespace
+{
+    uint32 GetRespawnSourceGuidLow(Creature const* creature)
+    {
+        if (!creature)
+            return 0;
+
+        if (creature->GetLootCorpseSourceGuidLow())
+            return creature->GetLootCorpseSourceGuidLow();
+
+        if (creature->GetDbGuid())
+            return creature->GetDbGuid();
+
+        return creature->GetGUIDLow();
+    }
+
+    CreatureData const* GetRespawnSourceCreatureData(Creature const* creature)
+    {
+        uint32 sourceGuid = GetRespawnSourceGuidLow(creature);
+        if (!sourceGuid)
+            return nullptr;
+
+        return sObjectMgr.GetCreatureData(sourceGuid);
+    }
+
+    uint32 CountAliveRespawnSources(Creature* creature)
+    {
+        if (!creature)
+            return 0;
+
+        uint32 sourceGuid = GetRespawnSourceGuidLow(creature);
+        if (!creature->IsInWorld() || !sourceGuid)
+            return 0;
+
+        std::list<Creature*> nearbyCreatures;
+        MaNGOS::AnyUnitInObjectRangeCheck check(creature, 500.0f);
+        MaNGOS::CreatureListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(nearbyCreatures, check);
+        Cell::VisitAllObjects(creature, searcher, 500.0f);
+
+        uint32 aliveCount = 0;
+        for (Creature* other : nearbyCreatures)
+        {
+            if (!other || other == creature || !other->IsAlive() || other->IsLootCorpseClone())
+                continue;
+
+            if (GetRespawnSourceGuidLow(other) != sourceGuid)
+                continue;
+
+            ++aliveCount;
+        }
+
+        return aliveCount;
+    }
+
+    bool CreateRespawnReplacementCreature(Creature* creature, char const* eventName)
+    {
+        if (!creature || !creature->IsCorpse())
+            return false;
+
+        Map* map = creature->GetMap();
+        uint32 sourceGuid = GetRespawnSourceGuidLow(creature);
+        CreatureData const* dbSpawnData = sourceGuid ? sObjectMgr.GetCreatureData(sourceGuid) : nullptr;
+        if (!map || !sourceGuid || !dbSpawnData)
+            return false;
+
+        if (CountAliveRespawnSources(creature) > 0)
+            return false;
+
+        uint32 newCreatureId = dbSpawnData->ChooseCreatureId();
+        CreatureInfo const* cinfo = sObjectMgr.GetCreatureTemplate(newCreatureId);
+        if (!cinfo)
+            return false;
+
+        GameEventCreatureData const* eventData = sGameEventMgr.GetCreatureUpdateDataForActiveEvent(sourceGuid);
+        CreatureCreatePos spawnPos(map, dbSpawnData->position.x, dbSpawnData->position.y, dbSpawnData->position.z, dbSpawnData->position.o);
+        Creature* replacement = new Creature();
+        if (!replacement->Create(map->GenerateLocalLowGuid(cinfo->GetHighGuid()), spawnPos, cinfo, newCreatureId, dbSpawnData, eventData))
+        {
+            delete replacement;
+            return false;
+        }
+
+        replacement->SetLootCorpseSourceGuidLow(sourceGuid);
+        map->Add(replacement);
+
+        if (replacement->AI())
+            replacement->AI()->JustRespawned();
+
+        if (replacement->GetZoneScript())
+            replacement->GetZoneScript()->OnCreatureRespawn(replacement);
+
+        if (!replacement->IsLikePlayer())
+            replacement->SetTempPacified(5000);
+
+        return true;
+    }
+
+}
 
 
 TrainerSpell const* TrainerSpellData::Find(uint32 spell_id) const
@@ -215,6 +315,9 @@ Creature::Creature(CreatureSubtype subtype) :
     m_pacifiedTimer(0), m_manaRegen(0),
     m_groupLootTimer(0), m_groupLootId(0), m_lootMoney(0), m_lootGroupRecipientId(0), m_corpseDecayTimer(0),
     m_respawnTime(0), m_respawnDelay(120), m_corpseDelay(60),
+    m_aliveSince(time(nullptr)), m_diedAt(0), m_corpseRemovedAt(0), m_lastDeathSnapshotAt(0),
+    m_lootCorpseSourceGuidLow(0), m_isLootCorpseClone(false),
+    m_lastDeathX(0.0f), m_lastDeathY(0.0f), m_lastDeathZ(0.0f), m_lastDeathO(0.0f),
     m_wanderDistance(5.0f), m_combatStartTime(0), m_combatResetCount(0), m_subtype(subtype),
     m_defaultMovementType(IDLE_MOTION_TYPE), m_equipmentId(0), m_creatureStateFlags(CSTATE_REGEN_HEALTH | CSTATE_REGEN_MANA),
     m_AI_locked(false), m_temporaryFactionFlags(TEMPFACTION_NONE),
@@ -289,6 +392,7 @@ void Creature::RemoveCorpse()
     if ((GetDeathState() != CORPSE && !IsDeadByDefault()) || (GetDeathState() != ALIVE && IsDeadByDefault()))
         return;
 
+    m_corpseRemovedAt = time(nullptr);
     m_corpseDecayTimer = 0;
     SetDeathState(DEAD);
     UpdateObjectVisibility();
@@ -489,7 +593,7 @@ bool Creature::InitEntry(uint32 Entry, CreatureData const* data /*=nullptr*/, Cr
 
 uint32 Creature::GetSpawnFlags() const
 {
-    if (CreatureData const* data = sObjectMgr.GetCreatureData(GetGUIDLow()))
+    if (CreatureData const* data = GetRespawnSourceCreatureData(this))
         return data->spawn_flags;
     return 0;
 }
@@ -725,6 +829,13 @@ void Creature::Update(uint32 update_diff, uint32 diff)
             break;
         case DEAD:
         {
+            if (IsLootCorpseClone())
+            {
+                if (IsInWorld())
+                    AddObjectToRemoveList();
+                return;
+            }
+
             if (m_respawnTime <= time(nullptr) && (!m_isSpawningLinked || GetMap()->GetCreatureLinkingHolder()->CanSpawn(this)))
             {
                 DEBUG_FILTER_LOG(LOG_FILTER_AI_AND_MOVEGENSS, "Respawning...");
@@ -817,10 +928,32 @@ void Creature::Update(uint32 update_diff, uint32 diff)
             // Cf. fix de Daemon [c1491] & mon autre bricolage de celui-ci [c1527)
             // Les mobs 11357, 8901, 14826 etc. : ont des minuscules temps de repop. Sans rajouter cette condition, tous les
             // mobs spawn via un event/script despawn (loots avec) au bout de genre 25s, sans qu'on puisse le changer dans la DB car pas de GUID fixe.
-            if (m_corpseDecayTimer <= update_diff || (m_respawnTime <= time(nullptr) && GetDBTableGUIDLow() && !IsPet()))
+            bool respawnReady = m_respawnTime <= time(nullptr) && GetRespawnSourceGuidLow(this) && !IsPet() && !IsLootCorpseClone();
+            if (m_corpseDecayTimer <= update_diff || respawnReady)
             {
                 if (IsInWorld())                            // can be despawned by update pool
                 {
+                    if (respawnReady)
+                    {
+                        uint32 aliveCount = CountAliveRespawnSources(this);
+
+                        if (aliveCount == 0 && CreateRespawnReplacementCreature(this, "core_respawn_ready"))
+                        {
+                            SetLootCorpseClone(true);
+                            SetLootCorpseSourceGuidLow(GetRespawnSourceGuidLow(this));
+                            SetRespawnTime(0);
+                            break;
+                        }
+
+                        if (aliveCount > 0)
+                        {
+                            SetLootCorpseClone(true);
+                            SetLootCorpseSourceGuidLow(GetRespawnSourceGuidLow(this));
+                            SetRespawnTime(0);
+                            break;
+                        }
+                    }
+
                     RemoveCorpse();
                     DEBUG_FILTER_LOG(LOG_FILTER_AI_AND_MOVEGENSS, "Removing corpse... %u ", GetEntry());
                 }
@@ -1965,11 +2098,13 @@ float Creature::GetAttackDistance(Unit const* pTarget) const
     return (finalDistance * aggroRate);
 }
 
-void Creature::SetDeathState(DeathState s)
+    void Creature::SetDeathState(DeathState s)
 {
+    time_t now = time(nullptr);
+
     if ((s == JUST_DIED && !IsDeadByDefault()) || (s == JUST_ALIVED && IsDeadByDefault()))
     {
-        auto data = sObjectMgr.GetCreatureData(GetGUIDLow());
+        CreatureData const* data = GetRespawnSourceCreatureData(this);
 
         uint32 respawnDelay = m_respawnDelay;
         ApplyDynamicRespawnDelay(respawnDelay, data);
@@ -1984,7 +2119,7 @@ void Creature::SetDeathState(DeathState s)
             if (data->spawn_flags & SPAWN_FLAG_DYNAMIC_RESPAWN_TIME && sWorld.GetActiveSessionCount() > sWorld.m_dynamicRespawnRatio)
                 respawnDelay *= sWorld.m_dynamicRespawnRatio;
         }
-        m_respawnTime = time(nullptr) + respawnDelay;        // respawn delay (spawntimesecs)
+        m_respawnTime = now + respawnDelay;        // respawn delay (spawntimesecs)
 
         // always save boss respawn time at death to prevent crash cheating
         if (sWorld.getConfig(CONFIG_BOOL_SAVE_RESPAWN_TIME_IMMEDIATELY) || IsWorldBoss())
@@ -1995,6 +2130,13 @@ void Creature::SetDeathState(DeathState s)
 
     if (s == JUST_DIED)
     {
+        m_diedAt = now;
+        m_lastDeathSnapshotAt = now;
+        m_lastDeathX = GetPositionX();
+        m_lastDeathY = GetPositionY();
+        m_lastDeathZ = GetPositionZ();
+        m_lastDeathO = GetOrientation();
+
         // Turtle: Store players in map during raid boss death,
         // to allow trading of soulbound items among eligible players.
         if (IsWorldBoss() && IsInWorld() && FindMap() && FindMap()->IsRaid())
@@ -2027,6 +2169,9 @@ void Creature::SetDeathState(DeathState s)
 
     if (s == JUST_ALIVED)
     {
+        m_aliveSince = now;
+        m_diedAt = 0;
+        m_corpseRemovedAt = 0;
         m_playersPresentAtDeath.clear();
 
         ClearUnitState(UNIT_STAT_ALL_DYN_STATES);
@@ -2433,41 +2578,90 @@ private:
     uint32 m_deadCount;
 };
 
-void Creature::ApplyDynamicRespawnDelay(uint32& delay, CreatureData const* data)
+void Creature::ApplyDynamicRespawnDelay(uint32& delay, CreatureData const* data, DynamicRespawnDebugInfo* debugInfo)
 {
+    if (debugInfo)
+    {
+        debugInfo->applied = false;
+        debugInfo->skipReason.clear();
+        debugInfo->playerCountUsed = 0;
+        debugInfo->aliveSameEntry = 0;
+        debugInfo->deadSameEntry = 0;
+        debugInfo->reductionRate = 0.0f;
+        debugInfo->originalDelay = delay;
+        debugInfo->reducedDelay = delay;
+        debugInfo->minimumDelay = 0;
+    }
+
     if (!IsInWorld())
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "not_in_world";
         return;
+    }
 
     // Only affects continents
     if (GetMapId() > 1)
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "not_continent";
         return;
+    }
 
     // Only affects normal spawns
     if (GetSubtype() != CREATURE_SUBTYPE_GENERIC)
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "not_generic_subtype";
         return;
+    }
 
     if (!data || (data->spawn_flags & SPAWN_FLAG_NO_DYNAMIC_RESPAWN))
+    {
+        if (debugInfo)
+            debugInfo->skipReason = !data ? "missing_spawn_data" : "spawn_flag_no_dynamic_respawn";
         return;
+    }
 
     // Only affects rares and above with the forced flag
     if (GetCreatureInfo()->rank >= CREATURE_ELITE_ELITE)
     {
         if (!(data->spawn_flags & SPAWN_FLAG_FORCE_DYNAMIC_ELITE))
+        {
+            if (debugInfo)
+                debugInfo->skipReason = "elite_requires_force_flag";
             return;
+        }
     }
 
     if (GetLevel() > sWorld.getConfig(CONFIG_UINT32_DYN_RESPAWN_AFFECT_LEVEL_BELOW))
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "level_above_limit";
         return;
+    }
 
     float checkRange = sWorld.getConfig(CONFIG_FLOAT_DYN_RESPAWN_CHECK_RANGE);
     if (checkRange <= 0)
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "range_disabled";
         return;
+    }
 
     if (delay > sWorld.getConfig(CONFIG_UINT32_DYN_RESPAWN_AFFECT_RESPAWN_TIME_BELOW))
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "base_delay_above_limit";
         return;
+    }
 
     if (delay < sWorld.getConfig(CONFIG_UINT32_DYN_RESPAWN_MIN_RESPAWN_TIME))
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "base_delay_below_minimum";
         return;
+    }
 
     DynamicRespawnRatesPlayerChecker check(this);
     MaNGOS::PlayerWorker<DynamicRespawnRatesPlayerChecker> searcher(check);
@@ -2475,17 +2669,34 @@ void Creature::ApplyDynamicRespawnDelay(uint32& delay, CreatureData const* data)
 
     // No dynamic respawns around an in progress escort
     if (check.HasNearbyEscort())
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "nearby_escort";
         return;
+    }
 
     uint32 playerCount = check.GetCount();
+    if (debugInfo)
+        debugInfo->playerCountUsed = playerCount;
+
     if (playerCount < sWorld.getConfig(CONFIG_UINT32_DYN_RESPAWN_PLAYERS_THRESHOLD))
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "below_player_threshold";
         return;
+    }
 
     float maxReductionRate = sWorld.getConfig(CONFIG_FLOAT_DYN_RESPAWN_MAX_REDUCTION_RATE);
 
     DynamicRespawnRatesCreatureChecker check2(GetEntry());
     MaNGOS::CreatureWorker<DynamicRespawnRatesCreatureChecker> worker(this, check2);
     Cell::VisitGridObjects(this, worker, checkRange);
+
+    if (debugInfo)
+    {
+        debugInfo->aliveSameEntry = check2.GetAliveCount();
+        debugInfo->deadSameEntry = check2.GetDeadCount();
+    }
 
     float reductionRate;
     if ((check2.GetAliveCount() < check2.GetDeadCount()) &&
@@ -2502,7 +2713,14 @@ void Creature::ApplyDynamicRespawnDelay(uint32& delay, CreatureData const* data)
 
     // Invalid configuration
     if (reductionRate < 0)
+    {
+        if (debugInfo)
+            debugInfo->skipReason = "negative_reduction_rate";
         return;
+    }
+
+    if (debugInfo)
+        debugInfo->reductionRate = reductionRate;
 
     uint32 originalDelay = delay;
     uint32 reduction = static_cast<uint32>(reductionRate * originalDelay);
@@ -2524,6 +2742,9 @@ void Creature::ApplyDynamicRespawnDelay(uint32& delay, CreatureData const* data)
         minimum = indoorMinimum;
     }
 
+    if (debugInfo)
+        debugInfo->minimumDelay = minimum;
+
     // Cap the lower-end reduction at the chosen minimum
     if (delay < minimum)
         delay = minimum;
@@ -2531,6 +2752,14 @@ void Creature::ApplyDynamicRespawnDelay(uint32& delay, CreatureData const* data)
     // Prevent bad configs extending the respawn time beyond default
     if (delay > originalDelay)
         delay = originalDelay;
+
+    if (debugInfo)
+    {
+        debugInfo->applied = true;
+        debugInfo->skipReason = "applied";
+        debugInfo->originalDelay = originalDelay;
+        debugInfo->reducedDelay = delay;
+    }
 }
 
 void Creature::SaveRespawnTime()

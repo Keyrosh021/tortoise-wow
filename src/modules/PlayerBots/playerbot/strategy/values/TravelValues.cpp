@@ -11,26 +11,62 @@ using namespace ai;
 EntryGuidps EntryGuidpsValue::Calculate()
 {
     EntryGuidps guidps;
+    uint32 rawCreatures = 0;
+    uint32 keptCreatures = 0;
+    uint32 invalidCreatures = 0;
+    uint32 inactiveEventCreatures = 0;
+    uint32 rawGameObjects = 0;
+    uint32 keptGameObjects = 0;
+    uint32 invalidGameObjects = 0;
+    uint32 inactiveEventGameObjects = 0;
 
     for (auto& creatureDataPair : WorldPosition().getCreaturesNear())
     {
+        ++rawCreatures;
         AsyncGuidPosition aGuidP(creatureDataPair);
-        if (aGuidP.isValid() && !aGuidP.IsEventUnspawned())
+        if (!aGuidP.isValid())
         {
-            aGuidP.FetchArea();
-            guidps[aGuidP.GetEntry()].push_back(aGuidP);
+            ++invalidCreatures;
+            continue;
         }
+
+        if (aGuidP.IsEventUnspawned())
+        {
+            ++inactiveEventCreatures;
+            continue;
+        }
+
+        aGuidP.FetchArea();
+        guidps[aGuidP.GetEntry()].push_back(aGuidP);
+        ++keptCreatures;
     }
 
     for (auto& goDataPair : WorldPosition().getGameObjectsNear())
     {
+        ++rawGameObjects;
         AsyncGuidPosition aGuidP(goDataPair);
-        if (aGuidP.isValid() && !aGuidP.IsEventUnspawned())
+        if (!aGuidP.isValid())
         {
-            aGuidP.FetchArea();
-            guidps[-((int32)aGuidP.GetEntry())].push_back(aGuidP);
+            ++invalidGameObjects;
+            continue;
         }
+
+        if (aGuidP.IsEventUnspawned())
+        {
+            ++inactiveEventGameObjects;
+            continue;
+        }
+
+        aGuidP.FetchArea();
+        guidps[-((int32)aGuidP.GetEntry())].push_back(aGuidP);
+        ++keptGameObjects;
     }
+
+    sLog.outString(
+        ">> EntryGuidps rawCreatures=%u keptCreatures=%u invalidCreatures=%u inactiveEventCreatures=%u rawGameObjects=%u keptGameObjects=%u invalidGameObjects=%u inactiveEventGameObjects=%u uniqueEntries=%u",
+        rawCreatures, keptCreatures, invalidCreatures, inactiveEventCreatures,
+        rawGameObjects, keptGameObjects, invalidGameObjects, inactiveEventGameObjects,
+        (uint32)guidps.size());
 
     return guidps;
 }
@@ -247,78 +283,8 @@ uint32 EntryTravelPurposeMapValue::SkillIdToGatherEntry(int32 entry)
 
 bool NeedTravelPurposeValue::Calculate()
 {
-    TravelDestinationPurpose purpose = TravelDestinationPurpose(stoi(getQualifier()));
-
-    const std::map<TravelDestinationPurpose, SkillType> gatheringSkills =
-    { {TravelDestinationPurpose::GatherFishing, SKILL_FISHING}
-        , {TravelDestinationPurpose::GatherSkinning, SKILL_SKINNING}
-        , {TravelDestinationPurpose::GatherMining, SKILL_MINING}
-        , {TravelDestinationPurpose::GatherHerbalism, SKILL_HERBALISM}
-    };
-
-    SkillType skill;
-
-    switch (purpose)
-    {
-    case TravelDestinationPurpose::Repair:
-        if (AI_VALUE2(bool, "group or", "should repair,can repair,following party"))
-            return true;
-        if (AI_VALUE2(bool, "has strategy", "free") && AI_VALUE(bool, "should repair") && AI_VALUE(bool, "can repair"))
-            return true;
-        break;
-    case TravelDestinationPurpose::Vendor:
-        if (AI_VALUE2(bool, "group or", "should sell,can sell,following party"))
-            return true;
-        if (AI_VALUE2(bool, "has strategy", "free") && AI_VALUE(bool, "should sell") && AI_VALUE(bool, "can sell"))
-            return true;
-        break;
-    case TravelDestinationPurpose::AH:
-        if (AI_VALUE2(bool, "group or", "should ah sell,can ah sell,following party"))
-            return true;
-        if (AI_VALUE2(bool, "has strategy", "free") && AI_VALUE(bool, "should ah sell") && AI_VALUE(bool, "can ah sell"))
-            return true;
-        break;
-    case TravelDestinationPurpose::GatherFishing:
-        if (!AI_VALUE2(bool, "has strategy", "tfish"))
-            return false;
-    case TravelDestinationPurpose::GatherSkinning:
-    case TravelDestinationPurpose::GatherMining:
-    case TravelDestinationPurpose::GatherHerbalism:
-        skill = gatheringSkills.at(purpose);
-        if (bot->GetSkillValue(skill) < std::min(bot->GetSkillMax(skill), bot->GetSkillMaxForLevel(bot)))
-        {
-            return true;
-        }
-
-        return false;
-    case TravelDestinationPurpose::Boss:
-        return AI_VALUE(bool, "can fight boss");
-    case TravelDestinationPurpose::Mail:
-        return AI_VALUE(bool, "can get mail") && AI_VALUE(bool, "should get mail");
-    case TravelDestinationPurpose::Explore:
-        return ai->HasStrategy("explore", BotState::BOT_STATE_NON_COMBAT);    
-    case TravelDestinationPurpose::GenericRpg:
-    {
-        uint32 rpgPhase = ai->GetFixedBotNumber(BotTypeNumber::RPG_PHASE_NUMBER, 60, 1);
-
-        if (rpgPhase < 15) //Only last 45 minutes of the hour allow generic rpg.
-            return false;
-
-        return !AI_VALUE2(bool, "manual bool", "is travel refresh");
-    }
-    case TravelDestinationPurpose::Grind:
-    {
-        uint32 rpgPhase = ai->GetFixedBotNumber(BotTypeNumber::RPG_PHASE_NUMBER, 60, 1);
-
-        if (rpgPhase > 45) //Only first 45 minutes of the hour allow generic grind.
-            return false;
-
-        return !AI_VALUE2(bool, "manual bool", "is travel refresh");
-    }
-    default:
-        return false;
-    }
-
+    // Temporary safety valve from the original recovery: quest/named travel still works,
+    // but purpose-triggered travel is disabled until the underlying trigger crash path is stable.
     return false;
 }
 
@@ -477,17 +443,17 @@ bool TravelTargetActiveValue::Calculate()
 
 bool TravelTargetReadyValue::Calculate()
 {
-    return AI_VALUE(TravelTarget*, "leader travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_READY;
+    return AI_VALUE(TravelTarget*, "travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_READY;
 };
 
 bool TravelTargetTravelingValue::Calculate()
 {
-    return AI_VALUE(TravelTarget*, "leader travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_TRAVEL;
+    return AI_VALUE(TravelTarget*, "travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_TRAVEL;
 };
 
 bool TravelTargetWorkingValue::Calculate()
 {
-    return AI_VALUE(TravelTarget*, "leader travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK;
+    return AI_VALUE(TravelTarget*, "travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK;
 };
 
 bool QuestStageActiveValue::Calculate()

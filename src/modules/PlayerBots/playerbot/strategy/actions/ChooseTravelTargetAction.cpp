@@ -74,7 +74,25 @@ bool ChooseTravelTargetAction::Execute(Event& event)
 
     if (!SetBestTarget(requester, &newTarget, destinationList))
     {
+        if (SetBestTarget(requester, &newTarget, destinationList, false))
+        {
+            setNewTarget(requester, &newTarget, travelTarget);
+            return true;
+        }
+
+        size_t totalPoints = 0;
+        for (auto& [partition, travelPointList] : destinationList)
+            totalPoints += travelPointList.size();
+
+        sPlayerbotAIConfig.logEvent(
+            ai,
+            "TravelTargetSelectFailed",
+            futureTravelPurposeName,
+            "dests=" + std::to_string(destinationList.size()) + " points=" + std::to_string(totalPoints));
+
         SET_AI_VALUE2(bool, "no active travel destinations", futureTravelPurpose, true);
+        sTravelMgr.SetNullTravelTarget(travelTarget);
+        travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
         ai->TellDebug(ai->GetMaster(), "No target set", "debug travel");
         return false;
     }
@@ -100,6 +118,14 @@ bool ChooseTravelTargetAction::isUseful()
 
 void ChooseTravelTargetAction::setNewTarget(Player* requester, TravelTarget* newTarget, TravelTarget* oldTarget)
 {
+    std::string purpose = "unknown";
+    if (newTarget && newTarget->GetDestination())
+    {
+        auto it = TravelDestinationPurposeName.find(newTarget->GetDestination()->GetPurpose());
+        if (it != TravelDestinationPurposeName.end())
+            purpose = it->second;
+    }
+
     if (CanFreeMoveValue::CanFreeMoveTo(ai, newTarget->GetPosStr()))
         ReportTravelTarget(bot, requester, newTarget, oldTarget);
 
@@ -121,6 +147,29 @@ void ChooseTravelTargetAction::setNewTarget(Player* requester, TravelTarget* new
 
     //Actually apply the new target to the travel target used by the bot.
     oldTarget->CopyTarget(newTarget);
+
+    const bool isNullDestination = oldTarget->GetDestination() && typeid(*oldTarget->GetDestination()) == typeid(NullTravelDestination);
+    if (isNullDestination)
+    {
+        // Treat null travel as a real cooldown target so we do not immediately churn back
+        // into request/choose/reset loops on every non-combat tick.
+        oldTarget->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+
+        if (newTarget && newTarget->GetDestination())
+        {
+            sPlayerbotAIConfig.logEvent(
+                ai,
+                "TravelIdleCooldown",
+                newTarget->GetDestination()->GetTitle(),
+                purpose + "|" + newTarget->GetDestination()->GetShortName());
+        }
+
+        RESET_AI_VALUE(GuidPosition,"rpg target");
+        RESET_AI_VALUE(std::set<ObjectGuid>&, "ignore rpg target");
+        RESET_AI_VALUE(ObjectGuid,"attack target");
+        SET_AI_VALUE2(std::string, "manual string", "future travel detail", std::string());
+        return;
+    }
 
     if (oldTarget->IsForced()) //Make sure travel goes into cooldown after getting to the destination.
         oldTarget->SetExpireIn(HOUR * IN_MILLISECONDS);
@@ -146,6 +195,29 @@ void ChooseTravelTargetAction::setNewTarget(Player* requester, TravelTarget* new
     }
 
     oldTarget->SetStatus(TravelStatus::TRAVEL_STATUS_READY);
+
+    if (newTarget && newTarget->GetDestination())
+    {
+        sPlayerbotAIConfig.logEvent(
+            ai,
+            "TravelTargetSelected",
+            newTarget->GetDestination()->GetTitle(),
+            purpose + "|" + newTarget->GetDestination()->GetShortName());
+
+        if (purpose == "QuestTaker")
+        {
+            std::ostringstream out;
+            out << "entry=" << newTarget->GetEntry()
+                << " retries=" << newTarget->GetRetryCount(false)
+                << " status=" << (uint32)oldTarget->GetStatus()
+                << " point=" << newTarget->GetPosStr();
+            sPlayerbotAIConfig.logEvent(
+                ai,
+                "QuestTurnInTravelSelected",
+                newTarget->GetDestination()->GetTitle(),
+                out.str());
+        }
+    }
 
     //Clear rpg and attack/grind target. We want to travel, not hang around some more.
     RESET_AI_VALUE(GuidPosition,"rpg target");
@@ -328,7 +400,7 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
 
         for (auto& [destination, position, distance] : travelPointList)
         {
-            if (!target->IsForced() && isActive.find(destination) != isActive.end() && !isActive[destination])
+            if (onlyActive && !target->IsForced() && isActive.find(destination) != isActive.end() && !isActive[destination])
                 continue;
 
             if (distanceCheck) //Check if we have moved significantly after getting the destinations.
@@ -343,7 +415,11 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
                 distanceCheck = false;
             }
 
-            if (target->IsForced() || (isActive[destination] = destination->IsActive(bot, PlayerTravelInfo(bot))))
+            bool destinationActive = target->IsForced() || !onlyActive;
+            if (!destinationActive)
+                destinationActive = (isActive[destination] = destination->IsActive(bot, PlayerTravelInfo(bot)));
+
+            if (destinationActive)
             {
                 if (partition != std::prev(partitionedList.end())->first && !urand(0, 10)) //10% chance to skip to a longer partition.
                 {
@@ -556,7 +632,7 @@ bool ChooseGroupTravelTargetAction::Execute(Event& event)
 
     TravelTarget newTarget = TravelTarget(ai);
 
-    if (!SetBestTarget(requester, &newTarget, travelList))
+    if (!SetBestTarget(requester, &newTarget, travelList) && !SetBestTarget(requester, &newTarget, travelList, false))
         return false;
     
     newTarget.SetGroupCopy(playerDesitnations[newTarget.GetDestination()]);
@@ -735,6 +811,12 @@ bool RequestTravelTargetAction::isUseful() {
         return false;
 
     if (AI_VALUE(bool, "travel target active"))
+        return false;
+
+    TravelTarget* currentTarget = AI_VALUE(TravelTarget*, "travel target");
+    if (currentTarget && currentTarget->GetDestination() &&
+        typeid(*currentTarget->GetDestination()) == typeid(NullTravelDestination) &&
+        currentTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_COOLDOWN)
         return false;
 
     if (AI_VALUE2(bool, "no active travel destinations", (getQualifier().empty() ? "quest" : getQualifier())))
@@ -1345,7 +1427,29 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
 
     ai->TellDebug(ai->GetMaster(), "Getting new destination ranges for travel quest", "debug travel");
 
-    std::vector<std::tuple<uint32, int32, float>> destinationFetches = { {(uint32)TravelDestinationPurpose::QuestGiver, 0, 400 + bot->GetLevel() * 10} };
+    auto starterQuestForRace = [](uint8 race) -> uint32
+    {
+        switch (race)
+        {
+            case RACE_HUMAN: return 783;      // A Threat Within
+            case RACE_DWARF:
+            case RACE_GNOME: return 179;     // Dwarven Outfitters
+            case RACE_NIGHTELF: return 458;  // The Woodland Protector
+            default: return 0;
+        }
+    };
+
+    std::vector<std::tuple<uint32, int32, float>> turnInFetches;
+    std::vector<std::tuple<uint32, int32, float>> objectiveFetches;
+    std::vector<std::tuple<uint32, int32, float>> destinationFetches;
+    uint32 turnInQuestCount = 0;
+    uint32 objectiveQuestCount = 0;
+    bool hasAnyQuestHistory = false;
+    bool hasActiveQuestWork = false;
+    auto queuedQuestCount = [&turnInFetches, &objectiveFetches]() -> size_t
+    {
+        return turnInFetches.size() + objectiveFetches.size();
+    };
 
     for (ObjectGuid guid : AI_VALUE(std::list<ObjectGuid>, "group members"))
     {
@@ -1361,6 +1465,8 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
             continue;
 
         QuestStatusMap& questMap = player->getQuestStatusMap();
+        if (!questMap.empty())
+            hasAnyQuestHistory = true;
 
         bool onlyClassQuest = bot == player && !urand(0, 10);
 
@@ -1371,13 +1477,18 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
             if (questStatus.m_rewarded)
                 continue;
 
+            hasActiveQuestWork = true;
+
             Quest const* questTemplate = sObjectMgr.GetQuestTemplate(questId);
 
             if (!questTemplate)
                 continue;
 
             if (player->CanRewardQuest(questTemplate, false))
+            {
                 flag = (uint32)TravelDestinationPurpose::QuestTaker;
+                ++turnInQuestCount;
+            }
             else
             {
                 for (uint32 objective = 0; objective < 4; objective++)
@@ -1389,23 +1500,110 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
                     if (AI_VALUE2(bool, "group or", "following party,need quest objective::" + Qualified::MultiQualify(qualifier, ","))) //Noone needs the quest objective.
                         flag = flag | (uint32)purposeFlag;
                 }
+
+                if (flag)
+                    ++objectiveQuestCount;
             }
 
             if (!flag)
                 continue;
 
-            destinationFetches.push_back({ flag, questId, 1000 + (bot->GetLevel() * bot->GetLevel()) * 75 });
+            if (flag == (uint32)TravelDestinationPurpose::QuestTaker)
+                turnInFetches.push_back({ flag, questId, 1000 + (bot->GetLevel() * bot->GetLevel()) * 75 });
+            else
+                objectiveFetches.push_back({ flag, questId, 1000 + (bot->GetLevel() * bot->GetLevel()) * 75 });
 
-            if (onlyClassQuest && destinationFetches.size() > 1) //Only do class quests if we have any.
+            if (onlyClassQuest && queuedQuestCount() > 1) //Only do class quests if we have any.
             {
-                Quest const* firstQuest = sObjectMgr.GetQuestTemplate(std::get<1>(destinationFetches[1]));
+                Quest const* firstQuest = nullptr;
+                if (!turnInFetches.empty())
+                    firstQuest = sObjectMgr.GetQuestTemplate(std::get<1>(turnInFetches.front()));
+                else if (!objectiveFetches.empty())
+                    firstQuest = sObjectMgr.GetQuestTemplate(std::get<1>(objectiveFetches.front()));
+
+                if (!firstQuest)
+                    continue;
 
                 if (firstQuest->GetRequiredClasses() && !questTemplate->GetRequiredClasses())
                     continue;
 
                 if (!firstQuest->GetRequiredClasses() && questTemplate->GetRequiredClasses())
-                    destinationFetches = { destinationFetches.front() };
+                {
+                    turnInFetches.clear();
+                    objectiveFetches.clear();
+                }
             }
+        }
+    }
+
+    uint32 starterQuest = starterQuestForRace(bot->getRace());
+    bool starterQuestSeeded = false;
+    if (bot->GetLevel() <= 8 && starterQuest && !hasAnyQuestHistory && !hasActiveQuestWork &&
+        bot->GetQuestStatus(starterQuest) == QUEST_STATUS_NONE)
+    {
+        destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, (int32)starterQuest, 1200.0f });
+        starterQuestSeeded = true;
+
+        std::ostringstream out;
+        out << "race=" << (uint32)bot->getRace()
+            << " level=" << (uint32)bot->GetLevel()
+            << " questId=" << starterQuest
+            << " reason=empty-quest-log";
+        sPlayerbotAIConfig.logEvent(ai, "StarterQuestTravelSeed", "QuestFetches", out.str());
+    }
+
+    if (!starterQuestSeeded)
+        destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, 0, 400 + bot->GetLevel() * 10 });
+
+    destinationFetches.insert(destinationFetches.begin() + 1, turnInFetches.begin(), turnInFetches.end());
+    destinationFetches.insert(destinationFetches.end(), objectiveFetches.begin(), objectiveFetches.end());
+
+    {
+        std::ostringstream out;
+        out << "total=" << destinationFetches.size()
+            << " turnIns=" << turnInQuestCount
+            << " objectives=" << objectiveQuestCount
+            << " baseQuestGiver=1";
+        sPlayerbotAIConfig.logEvent(ai, "RequestQuestTravelTargetAction", "QuestFetches", out.str());
+    }
+
+    if (turnInQuestCount || objectiveQuestCount)
+    {
+        PlayerTravelInfo debugTravelInfo(bot);
+        size_t debugFetchIndex = 0;
+
+        for (auto const& [purpose, questId, range] : destinationFetches)
+        {
+            if (debugFetchIndex++ >= 3)
+                break;
+
+            std::vector<int32> entries;
+            if (questId)
+                entries.push_back(questId);
+
+            DestinationList allDestinations = sTravelMgr.GetDestinations(debugTravelInfo, purpose, entries, false, 0.0f);
+            DestinationList rawDestinations = sTravelMgr.GetDestinations(debugTravelInfo, purpose, entries, true, 0.0f);
+            DestinationList destinations = sTravelMgr.GetDestinations(debugTravelInfo, purpose, entries, true, range);
+            PartitionedTravelList partitions = sTravelMgr.GetPartitions(center, travelPartitions, debugTravelInfo, purpose, entries, true, range);
+
+            size_t totalPoints = 0;
+            for (auto const& [partition, points] : partitions)
+                totalPoints += points.size();
+
+            std::ostringstream out;
+            out << "purpose=" << purpose
+                << " questId=" << questId
+                << " range=" << range
+                << " hasRpgQuest=" << debugTravelInfo.GetBoolValue2("has strategy", "rpg quest")
+                << " freeSlots=" << (uint32)debugTravelInfo.GetUint8Value("free quest log slots")
+                << " canFightEqual=" << debugTravelInfo.GetBoolValue("can fight equal")
+                << " canFightElite=" << debugTravelInfo.GetBoolValue("can fight elite")
+                << " allDests=" << allDestinations.size()
+                << " rawDests=" << rawDestinations.size()
+                << " dests=" << destinations.size()
+                << " partitions=" << partitions.size()
+                << " points=" << totalPoints;
+            sPlayerbotAIConfig.logEvent(ai, "QuestFetchDebug", "QuestFetch", out.str());
         }
     }
 
@@ -1414,14 +1612,36 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
             PartitionedTravelList list;
             for (auto [purpose, questId, range] : destinationFetches)
             {
-                PartitionedTravelList subList = sTravelMgr.GetPartitions(center, partitions, travelInfo, purpose, { questId }, true, range);
+                std::vector<int32> entries;
+                if (questId)
+                    entries.push_back(questId);
+
+                PartitionedTravelList subList = sTravelMgr.GetPartitions(center, partitions, travelInfo, purpose, entries, true, range);
 
                 for (auto& [partition, points] : subList)
                     list[partition].insert(list[partition].end(), points.begin(), points.end());
             }
 
             if (list.empty())
-                list = sTravelMgr.GetPartitions(center, partitions, travelInfo, (uint32)TravelDestinationPurpose::QuestGiver);
+            {
+                // If the strict "possible only" pass finds nothing useful, fall back to a softer
+                // quest search before parking the bot in long null-travel cooldown. This keeps
+                // autonomous questers moving instead of idling for minutes at a time.
+                for (auto [purpose, questId, range] : destinationFetches)
+                {
+                    std::vector<int32> entries;
+                    if (questId)
+                        entries.push_back(questId);
+
+                    PartitionedTravelList subList = sTravelMgr.GetPartitions(center, partitions, travelInfo, purpose, entries, false, range);
+
+                    for (auto& [partition, points] : subList)
+                        list[partition].insert(list[partition].end(), points.begin(), points.end());
+                }
+            }
+
+            if (list.empty())
+                list = sTravelMgr.GetPartitions(center, partitions, travelInfo, (uint32)TravelDestinationPurpose::QuestGiver, {}, false);
 
             return list;
         }
@@ -1431,6 +1651,45 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
     SET_AI_VALUE2(std::string, "manual string", "future travel purpose", "quest");
     SET_AI_VALUE2(std::string, "manual string", "future travel condition", event.getSource());
     SET_AI_VALUE2(int, "manual int", "future travel relevance", relevance * 100);
+
+    return true;
+}
+
+bool RequestQuestTravelTargetAction::isUseful()
+{
+    if (bot->InBattleGround())
+        return false;
+
+    if (!ai->AllowActivity(TRAVEL_ACTIVITY))
+        return false;
+
+    TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+    if (travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_PREPARE)
+        return false;
+
+    if (travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_COOLDOWN &&
+        dynamic_cast<NullTravelDestination*>(travelTarget->GetDestination()))
+        return false;
+
+    if (travelTarget->GetDestination() &&
+        dynamic_cast<NullTravelDestination*>(travelTarget->GetDestination()) &&
+        travelTarget->GetTimeLeft() > 0)
+        return false;
+
+    if (AI_VALUE(bool, "travel target active"))
+        return false;
+
+    if (AI_VALUE2(bool, "no active travel destinations", "quest"))
+        return false;
+
+    if (!AI_VALUE(bool, "can move around"))
+        return false;
+
+    if (!isAllowed())
+    {
+        ai->TellDebug(ai->GetMaster(), "Skipped quest because of skip chance", "debug travel");
+        return false;
+    }
 
     return true;
 }

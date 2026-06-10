@@ -19,6 +19,16 @@
 # CMake policies
 cmake_minimum_required(VERSION 3.1...3.29)
 
+# Legacy compatibility: some older instructions use -DPREFIX=...
+# CMake's own compiler-identification templates also use a variable named
+# PREFIX during project() setup, so preserve the user value under a different
+# name before project() runs.
+if(DEFINED PREFIX)
+  set(MANGOS_LEGACY_PREFIX "${PREFIX}")
+  unset(PREFIX CACHE)
+  unset(PREFIX)
+endif()
+
 project(TurtleWoW)
 include(FetchContent)
 
@@ -45,12 +55,13 @@ option(USE_REALMMERGE "Compile helper tool for merging character databases" OFF)
 option(USE_ADDRESS_SANITIZER "Enable clang address sanitizer - debug feature that slowing down server, but allow to catch memory corruption" OFF)
 option(ENABLE_PROFILING "(Windows only) Enable Optick integration, which allows to profile CPU and Memory. Also disabling some async code" OFF)
 option(ENABLE_LSAN "Enables Leak Sanitizer" OFF)
+option(USE_NATIVE_OPTIMIZATIONS "Optimize binaries for the build host CPU" OFF)
 # Allow enabling official Turtle addon support
 option(ALLOW_TURTLE_ADDONS "Allow Turtle addons" OFF)
 # Build cmangos/playerbots — bot AI vendored under src/modules/PlayerBots/.
 # When ON, mangosd links the bot subsystem; runtime activation is gated by
 # AiPlayerbot.Enabled in aiplayerbot.conf.
-option(BUILD_PLAYERBOTS "Build the cmangos/playerbots subsystem" OFF)
+option(BUILD_PLAYERBOTS "Build the cmangos/playerbots subsystem" ON)
 
 
 if(UNIX)
@@ -154,10 +165,10 @@ find_package(Git)
 message(STATUS
   "\nThis script builds the MaNGOS server.
   Options that can be used in order to configure the process:
-    PREFIX: Path where the server should be installed to
+    CMAKE_INSTALL_PREFIX: Path where the server should be installed to
     USE_PCH: Use precompiled headers
   To set an option simply type -D<OPTION>=<VALUE> after 'cmake <srcs>'.
-  For example: cmake .. -DPREFIX=/opt/mangos\n"
+  For example: cmake .. -DCMAKE_INSTALL_PREFIX=/opt/mangos\n"
 ) # TODO: PLATFORM: Sets the architecture for compile (X86,X64)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -187,19 +198,23 @@ else()
 endif()
 
 # Set up the install-prefix
-if(CMAKE_INSTALL_PREFIX STREQUAL "/usr/local")
-  get_filename_component(PREFIX_ABSOLUTE "../server" ABSOLUTE)
+get_filename_component(LEGACY_PREFIX_ABSOLUTE "../server" ABSOLUTE BASE_DIR ${CMAKE_SOURCE_DIR})
+if(CMAKE_INSTALL_PREFIX STREQUAL "/usr/local" OR CMAKE_INSTALL_PREFIX STREQUAL "${LEGACY_PREFIX_ABSOLUTE}")
+  get_filename_component(PREFIX_ABSOLUTE "." ABSOLUTE BASE_DIR ${CMAKE_SOURCE_DIR})
   set(CMAKE_INSTALL_PREFIX ${PREFIX_ABSOLUTE} CACHE PATH "Install path prefix." FORCE)
 endif()
 
-if(PREFIX)
+set(MANGOS_INSTALL_PREFIX_OVERRIDE "${MANGOS_LEGACY_PREFIX}")
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+  set(MANGOS_INSTALL_PREFIX_OVERRIDE "")
+endif()
+
+if(MANGOS_INSTALL_PREFIX_OVERRIDE AND NOT MANGOS_INSTALL_PREFIX_OVERRIDE STREQUAL "/usr/local" AND NOT MANGOS_INSTALL_PREFIX_OVERRIDE STREQUAL "${LEGACY_PREFIX_ABSOLUTE}")
   if(!WIN32)
-    string(REGEX REPLACE "^~" "$ENV{HOME}" PREFIX ${PREFIX})
+    string(REGEX REPLACE "^~" "$ENV{HOME}" MANGOS_INSTALL_PREFIX_OVERRIDE "${MANGOS_INSTALL_PREFIX_OVERRIDE}")
   endif()
-  get_filename_component(PREFIX_ABSOLUTE ${PREFIX} ABSOLUTE)
-  set(CMAKE_INSTALL_PREFIX ${PREFIX} CACHE PATH "Install path prefix." FORCE)
-else()
-  set(PREFIX ${CMAKE_INSTALL_PREFIX} CACHE PATH "Install path prefix.")
+  get_filename_component(PREFIX_ABSOLUTE ${MANGOS_INSTALL_PREFIX_OVERRIDE} ABSOLUTE)
+  set(CMAKE_INSTALL_PREFIX ${MANGOS_INSTALL_PREFIX_OVERRIDE} CACHE PATH "Install path prefix." FORCE)
 endif()
 
 # If win32 put it in the bin dir not lib
@@ -223,6 +238,10 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 unset(ACE_INCLUDE_DIR CACHE)
 unset(ACE_LIBRARIES CACHE)
 unset(ACE_LIBRARIES_DIR CACHE)
+
+if(BUILD_PLAYERBOTS)
+  find_package(Boost REQUIRED COMPONENTS filesystem system thread)
+endif()
 unset(ACE_INCLUDE_DIR)
 unset(ACE_LIBRARIES)
 unset(ACE_LIBRARIES_DIR)
@@ -433,7 +452,12 @@ if(UNIX)
     #set(BUILD_ADDITIONAL_FLAGS "${BUILD_ADDITIONAL_FLAGS} -fsanitize=unsigned-integer-overflow")
   endif()
 
-  set(BUILD_ADDITIONAL_FLAGS "${BUILD_ADDITIONAL_FLAGS} --no-warnings -fexceptions -fnon-call-exceptions -march=native -O3 -pipe ")
+  set(BUILD_ADDITIONAL_FLAGS "${BUILD_ADDITIONAL_FLAGS} --no-warnings -fexceptions -fnon-call-exceptions -O3 -pipe ")
+  if(USE_NATIVE_OPTIMIZATIONS)
+    set(BUILD_ADDITIONAL_FLAGS "${BUILD_ADDITIONAL_FLAGS} -march=native -mtune=native")
+  else()
+    set(BUILD_ADDITIONAL_FLAGS "${BUILD_ADDITIONAL_FLAGS} -mtune=generic")
+  endif()
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     if(PROFILE_GENERATE)
       set(BUILD_ADDITIONAL_FLAGS "${BUILD_ADDITIONAL_FLAGS} -fprofile-generate")
@@ -609,6 +633,12 @@ if (BUILD_PLAYERBOTS)
         ${CMAKE_SOURCE_DIR}/dep/windows/include/mysql
         ${CMAKE_SOURCE_DIR}/dep/include/g3dlite
     )
+
+    if(TARGET Boost::filesystem AND TARGET Boost::system AND TARGET Boost::thread)
+        target_link_libraries(playerbots PUBLIC Boost::filesystem Boost::system Boost::thread)
+    else()
+        target_link_libraries(playerbots PUBLIC ${Boost_FILESYSTEM_LIBRARY} ${Boost_SYSTEM_LIBRARY} ${Boost_THREAD_LIBRARY})
+    endif()
 endif()
 
 if (USE_EXTRACTORS OR USE_REALMMERGE)

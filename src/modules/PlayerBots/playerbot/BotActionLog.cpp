@@ -369,6 +369,11 @@ namespace {
         if (!u || !u->IsPlayer()) return nullptr;
         return static_cast<Player*>(u)->GetPlayerbotAI();
     }
+
+    inline PlayerbotAI* AiFor(WorldObject* wo) {
+        if (!wo || !wo->IsPlayer()) return nullptr;
+        return static_cast<Player*>(wo)->GetPlayerbotAI();
+    }
 }
 
 void BotActionLog_LogAuraApply(Unit* target, uint32 spellId, int32 durationMs, uint64 casterGuidRaw)
@@ -417,6 +422,32 @@ void BotActionLog_LogCastResult(WorldObject* caster, uint32 spellId, uint8 resul
     BotActionLog::LogCastResult(ai, spellId, result, phase);
 }
 
+void BotActionLog_LogSpellGo(WorldObject* caster, uint32 spellId, uint64 targetGuidRaw, uint8 sendToCaster)
+{
+    PlayerbotAI* ai = AiFor(caster);
+    if (!ai) return;
+
+    SpellEntry const* info = sSpellMgr.GetSpellEntry(spellId);
+    const char* spellName = info ? info->SpellName[0].c_str() : "?";
+
+    BotActionLog::Write(ai, "SPELL_GO",
+        "spell=%s(%u) targetGuid=0x%llx sendToCaster=%u",
+        spellName,
+        spellId,
+        (unsigned long long)targetGuidRaw,
+        static_cast<unsigned>(sendToCaster));
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "spell=" << spellName
+            << " spellId=" << spellId
+            << " targetGuid=0x" << std::hex << targetGuidRaw << std::dec
+            << " sendToCaster=" << static_cast<uint32>(sendToCaster);
+        sPlayerbotAIConfig.logEvent(ai, "SpellGoTrace", std::to_string(ObjectGuid(targetGuidRaw).GetCounter()), out.str());
+    }
+}
+
 void BotActionLog_LogDamage(Unit* attacker, Unit* victim, uint32 damage, uint32 spellId, const char* damageType)
 {
     // Throttle: only log every Nth damage event per bot to avoid log-spam in
@@ -447,5 +478,25 @@ void BotActionLog_LogDamage(Unit* attacker, Unit* victim, uint32 damage, uint32 
             attacker ? attacker->GetName() : "?",
             spellId, damage, damageType ? damageType : "?");
     }
-}
 
+    if (attackerAi && spellId)
+    {
+        SpellEntry const* info = sSpellMgr.GetSpellEntry(spellId);
+        const char* spellName = info ? info->SpellName[0].c_str() : "?";
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "spell=" << spellName
+                << " spellId=" << spellId
+                << " victim=" << (victim ? victim->GetName() : "?")
+                << " victimGuid=0x" << std::hex << (victim ? victim->GetObjectGuid().GetRawValue() : 0ull) << std::dec
+                << " dmg=" << damage
+                << " type=" << (damageType ? damageType : "?")
+                << " victimAlive=" << ((victim && victim->IsAlive()) ? 1 : 0)
+                << " victimInCombat=" << ((victim && victim->IsInCombat()) ? 1 : 0)
+                << " attackerInCombat=" << ((attacker && attacker->IsInCombat()) ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(attackerAi, "SpellDamageImpact", victim ? victim->GetName() : "?", out.str());
+        }
+    }
+}

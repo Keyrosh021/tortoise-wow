@@ -355,6 +355,7 @@ AiPlayerbot.RandomBotQuestIds = 7848,3802,5505,6502,7761,9378
 # AiPlayerbot.RespawnModHostile = 5.0     # Each nearby player will decrease the respawn time by 5% for hostile mobs.
 # AiPlayerbot.RespawnModThreshold = 10    # Atleast 10 players (including the bot) needs to be near the bot before respawns are modified.
 # AiPlayerbot.RespawnModMax = 18          # After the threshold it will decrease the respawn for up to 18 nearby players max.
+# AiPlayerbot.RespawnCorpseCloneMax = 5   # Preserve up to 5 lootable corpses per DB spawn while the original spawn resumes.
 # AiPlayerbot.RespawnModForPlayerBots = 0 # Bots with a player master are not affected.
 # AiPlayerbot.RespawnModForInstances = 0  # Mobs inside instances are not affected.
 
@@ -970,6 +971,21 @@ AiPlayerbot.UseKnockback = 1
 
 # Default bot formation
 #AiPlayerbot.DefaultFormation = near
+
+# Human-like movement knobs for autonomous/random bots.
+#AiPlayerbot.HumanLikeMovement = 0
+#AiPlayerbot.HumanLikePathJitterChance = 0.30
+#AiPlayerbot.HumanLikePathJitterRadius = 1.25
+#AiPlayerbot.HumanLikePathForwardJitterRadius = 0.60
+#AiPlayerbot.HumanLikeFollowAngleJitter = 0.18
+#AiPlayerbot.HumanLikeFollowDistanceJitter = 0.75
+#AiPlayerbot.HumanLikePauseChance = 0.03
+#AiPlayerbot.HumanLikePauseMinMs = 3000
+#AiPlayerbot.HumanLikePauseMaxMs = 25000
+#AiPlayerbot.HumanLikePauseCooldownMs = 85000
+#AiPlayerbot.HumanLikeJumpChance = 0.12
+#AiPlayerbot.HumanLikeSpinChance = 0.20
+#AiPlayerbot.HumanLikeJumpCooldownMs = 12000
 
 # Debug switches
 #AiPlayerbot.SpellDump = 0

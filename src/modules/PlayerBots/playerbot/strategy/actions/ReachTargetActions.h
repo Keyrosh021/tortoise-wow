@@ -9,6 +9,7 @@
 #include "playerbot/strategy/values/MoveStyleValue.h"
 #include "GenericSpellActions.h"
 #include "playerbot/PlayerbotFactory.h"
+#include <iomanip>
 
 namespace ai
 {
@@ -41,8 +42,11 @@ namespace ai
             {
                 UpdateMovementState();
 
-                // Ignore movement if too far
-                const float distanceToTarget = bot->GetDistance(target, false, DIST_CALC_COMBAT_REACH);
+                // Use the same distance basis as attack/selection logic.
+                // The combat-reach flavored distance can overreport badly for some
+                // creature states, which makes bots believe nearby mobs are far away
+                // and stall in reach/cast loops.
+                const float distanceToTarget = sServerFacade.GetDistance2d(bot, target);
                 float chaseDist = range;
                 const bool inLos = bot->IsWithinLOSInMap(target, true);
                 const bool isFriend = sServerFacade.IsFriendlyTo(bot, target);
@@ -65,6 +69,41 @@ namespace ai
                     std::ostringstream out;
                     out << "Moving to reach " << ChatHelper::formatWorldobject(target);
                     ai->TellPlayerNoFacing(GetMaster(), out);
+                }
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "action=" << getName()
+                        << " target=" << target->GetName()
+                        << " spell=" << (spellName.empty() ? "-" : spellName)
+                        << " dist=" << std::fixed << std::setprecision(2) << distanceToTarget
+                        << " range=" << range
+                        << " chaseDist=" << chaseDist
+                        << " los=" << (inLos ? 1 : 0)
+                        << " friend=" << (isFriend ? 1 : 0)
+                        << " ranged=" << (ai->IsRanged(bot) ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(ai, "ReachTargetTrace", std::to_string(target->GetGUIDLow()), out.str());
+                }
+
+                if (!isFriend && ai->IsRanged(bot) && range > 0.0f && inLos &&
+                    !sServerFacade.IsDistanceGreaterThan(distanceToTarget, range + sPlayerbotAIConfig.contactDistance))
+                {
+                    ai->StopMoving();
+                    bot->SetTarget(target);
+                    bot->Attack(target, false);
+
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                    {
+                        std::ostringstream out;
+                        out << "action=" << getName()
+                            << " target=" << target->GetName()
+                            << " dist=" << std::fixed << std::setprecision(2) << distanceToTarget
+                            << " range=" << range;
+                        sPlayerbotAIConfig.logEvent(ai, "ReachTargetHold", std::to_string(target->GetGUIDLow()), out.str());
+                    }
+
+                    return true;
                 }
                 
                 if (inLos && isFriend && (range <= ai->GetRange("follow")))
@@ -97,11 +136,20 @@ namespace ai
                             return false;
                         }
 
+                        // Do not use self/point-blank utility spells as chase anchors for ranged combat.
+                        // These create low-APM loops where the bot keeps "reaching" for a zero-range spell
+                        // instead of using its actual offensive rotation.
+                        if (!spellName.empty() && ai->IsRanged(bot) && !sServerFacade.IsFriendlyTo(bot, target) &&
+                            range <= sPlayerbotAIConfig.contactDistance)
+                        {
+                            return false;
+                        }
+
                         // Force move if not in los
                         if (bot->IsWithinLOSInMap(target, true))
                         {
                             // Check if the bot is already on the range required
-                            return bot->GetDistance(target, true, DIST_CALC_COMBAT_REACH) > range;
+                            return sServerFacade.GetDistance2d(bot, target) > range;
                         }
 
                         return true;
@@ -162,6 +210,29 @@ namespace ai
 	{
     public:
         ReachMeleeAction(PlayerbotAI* ai) : ReachTargetAction(ai, "reach melee") {}
+
+        bool isUseful() override
+        {
+            if (ai->IsRanged(bot) &&
+                AI_VALUE2(bool, "has mana", "self target") &&
+                AI_VALUE2(uint8, "mana", "self target") > sPlayerbotAIConfig.lowMana)
+            {
+                if (Unit* target = GetTarget())
+                {
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                    {
+                        std::ostringstream out;
+                        out << "target=" << target->GetName()
+                            << " mana=" << static_cast<uint32>(AI_VALUE2(uint8, "mana", "self target"));
+                        sPlayerbotAIConfig.logEvent(ai, "ReachMeleeSuppressed", std::to_string(target->GetGUIDLow()), out.str());
+                    }
+
+                    return false;
+                }
+            }
+
+            return ReachTargetAction::isUseful();
+        }
     };
 
     class ReachSpellAction : public ReachTargetAction

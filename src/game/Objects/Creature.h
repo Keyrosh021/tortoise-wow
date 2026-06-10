@@ -46,6 +46,18 @@ class WorldSession;
 class CreatureGroup;
 
 struct GameEventCreatureData;
+struct DynamicRespawnDebugInfo
+{
+    bool applied = false;
+    std::string skipReason;
+    uint32 playerCountUsed = 0;
+    uint32 aliveSameEntry = 0;
+    uint32 deadSameEntry = 0;
+    float reductionRate = 0.0f;
+    uint32 originalDelay = 0;
+    uint32 reducedDelay = 0;
+    uint32 minimumDelay = 0;
+};
 
 enum CreatureFlagsExtra
 {
@@ -622,6 +634,23 @@ class Creature : public Unit
         void SetCorpseDelay(uint32 delay) { m_corpseDelay = delay; }
         // cmangos has SetCorpseAccelerationDelay; Penqle has only SetCorpseDelay.
         void SetCorpseAccelerationDelay(uint32 delay) { m_corpseDelay = delay; }
+        void SetCorpseDecayTimer(uint32 delay) { m_corpseDecayTimer = delay; }
+        uint32 GetCorpseDecayTimer() const { return m_corpseDecayTimer; }
+        void SetLootCorpseSourceGuidLow(uint32 guid) { m_lootCorpseSourceGuidLow = guid; }
+        uint32 GetLootCorpseSourceGuidLow() const { return m_lootCorpseSourceGuidLow; }
+        bool IsLootCorpseClone() const { return m_isLootCorpseClone; }
+        void SetLootCorpseClone(bool value) { m_isLootCorpseClone = value; }
+        time_t GetLastDeathSnapshotAt() const { return m_lastDeathSnapshotAt; }
+        float GetLastDeathPositionX() const { return m_lastDeathX; }
+        float GetLastDeathPositionY() const { return m_lastDeathY; }
+        float GetLastDeathPositionZ() const { return m_lastDeathZ; }
+        float GetLastDeathOrientation() const { return m_lastDeathO; }
+        void CopyLootAccessFrom(Creature const& source)
+        {
+            m_lootRecipientGuid = source.m_lootRecipientGuid;
+            m_lootGroupRecipientId = source.m_lootGroupRecipientId;
+            SetUInt32Value(UNIT_DYNAMIC_FLAGS, source.GetUInt32Value(UNIT_DYNAMIC_FLAGS));
+        }
         // IsCritter: cmangos shorthand for type == CREATURE_TYPE_CRITTER.
         bool IsCritter() const { return GetCreatureInfo() && GetCreatureInfo()->type == CREATURE_TYPE_CRITTER; }
         // GetDbGuid: cmangos returns the DB-side guid (low part). Same as GUIDLow for Penqle.
@@ -849,7 +878,7 @@ class Creature : public Unit
         void SetRespawnTime(uint32 respawn) { m_respawnTime = respawn ? time(nullptr) + respawn : 0; }
         void Respawn();
         void SaveRespawnTime() override;
-        void ApplyDynamicRespawnDelay(uint32& delay, CreatureData const* data);
+        void ApplyDynamicRespawnDelay(uint32& delay, CreatureData const* data, DynamicRespawnDebugInfo* debugInfo = nullptr);
         void CastSpawnSpell();
 
         uint32 GetRespawnDelay() const { return m_respawnDelay; }
@@ -1132,6 +1161,16 @@ class Creature : public Unit
         time_t m_respawnTime;                               // (secs) time of next respawn
         uint32 m_respawnDelay;                              // (secs) delay between corpse disappearance and respawning
         uint32 m_corpseDelay;                               // (secs) delay between death and corpse disappearance
+        time_t m_aliveSince;
+        time_t m_diedAt;
+        time_t m_corpseRemovedAt;
+        time_t m_lastDeathSnapshotAt;
+        uint32 m_lootCorpseSourceGuidLow;
+        bool m_isLootCorpseClone;
+        float m_lastDeathX;
+        float m_lastDeathY;
+        float m_lastDeathZ;
+        float m_lastDeathO;
         float m_wanderDistance;
 
         time_t m_combatStartTime;

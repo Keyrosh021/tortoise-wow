@@ -80,6 +80,12 @@ float FreeMoveRangeValue::Calculate()
 
 bool CanFreeMoveValue::CanFreeMove(PlayerbotAI* ai, WorldPosition dest, float range)
 {
+    if (ai && !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster())
+    {
+        if (!ai->HasStrategy("stay", ai->GetState()) && !ai->HasStrategy("guard", ai->GetState()))
+            return true;
+    }
+
     if (!dest)
         return true;
 
@@ -100,6 +106,12 @@ bool CanFreeMoveValue::CanFreeMoveTo(PlayerbotAI* ai, WorldPosition dest)
 
 bool CanFreeMoveValue::CanFreeTarget(PlayerbotAI* ai, WorldPosition dest)
 {
+    if (ai && !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster())
+    {
+        if (!ai->HasStrategy("stay", ai->GetState()) && !ai->HasStrategy("guard", ai->GetState()))
+            return true;
+    }
+
     AiObjectContext* context = ai->GetAiObjectContext();
     float range = ai->HasStrategy("stay", BotState::BOT_STATE_NON_COMBAT) ? std::min(ai->GetRange("spell"), AI_VALUE(float, "free move range")) : AI_VALUE(float, "free move range");
 
@@ -108,6 +120,12 @@ bool CanFreeMoveValue::CanFreeTarget(PlayerbotAI* ai, WorldPosition dest)
 
 bool CanFreeMoveValue::CanFreeAttack(PlayerbotAI* ai, WorldPosition dest)
 {
+    if (ai && !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster())
+    {
+        if (!ai->HasStrategy("stay", ai->GetState()) && !ai->HasStrategy("guard", ai->GetState()))
+            return true;
+    }
+
     return CanFreeMove(ai, dest, ai->GetRange("attack"));
 }
 

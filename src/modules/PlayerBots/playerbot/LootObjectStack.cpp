@@ -8,6 +8,36 @@ using namespace ai;
 
 #define MAX_LOOT_OBJECT_COUNT 10
 
+namespace
+{
+    bool IsSurvivalWoodLock(uint32 lockId)
+    {
+        switch (lockId)
+        {
+            case 1660:
+            case 1661:
+            case 1662:
+            case 1663:
+            case 1664:
+            case 1665:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool IsSurvivalGatheringNode(GameObject const* go)
+    {
+        return go && (IsSurvivalWoodLock(go->GetGOInfo()->GetLockId()) ||
+            go->GetName() == "Simple Wood Tree" ||
+            go->GetName() == "Bright Wood Tree" ||
+            go->GetName() == "Shade Wood Tree" ||
+            go->GetName() == "Tropical Wood Tree" ||
+            go->GetName() == "Star Wood Tree" ||
+            go->GetName() == "Dead Wood Tree");
+    }
+}
+
 LootTarget::LootTarget(ObjectGuid guid) : guid(guid), asOfTime(time(0))
 {
 }
@@ -96,6 +126,14 @@ void LootObject::Refresh(Player* bot, ObjectGuid guid, bool debug)
     GameObject* go = ai->GetGameObject(guid);
     if (go && sServerFacade.isSpawned(go) && !go->IsInUse())
     {
+        if (IsSurvivalGatheringNode(go))
+        {
+            skillId = SKILL_SURVIVAL;
+            reqSkillValue = 1;
+            this->guid = guid;
+            return;
+        }
+
         bool isQuestItemOnly = false;
 
 #ifdef MANGOSBOT_TWO
@@ -251,8 +289,11 @@ bool LootObject::IsLootPossible(Player* bot)
         GameObject* go = ai->GetGameObject(guid);
         if (go)
         {
+            if (IsSurvivalGatheringNode(go) && !ai->HasSkill(SKILL_SURVIVAL))
+                return false;
+
             // Ignore for mining nodes and herbs
-            if (skillId != SKILL_MINING && skillId != SKILL_HERBALISM)
+            if (skillId != SKILL_MINING && skillId != SKILL_HERBALISM && skillId != SKILL_SURVIVAL)
             {
                 if (sObjectMgr.IsGameObjectForQuests(guid.GetEntry()))
                 {
@@ -376,4 +417,3 @@ std::vector<LootObject> LootObjectStack::OrderByDistance(float maxDistance)
         result.push_back(i->second);
     return result;
 }
-

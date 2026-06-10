@@ -44,10 +44,13 @@ TriggerNode::~TriggerNode()
 
 NextAction** TriggerNode::getHandlers()
 {
+    if (!trigger)
+        return NextAction::clone(handlers);
+
 	return NextAction::merge(NextAction::clone(handlers), trigger->getHandlers());
 }
 
 float TriggerNode::getFirstRelevance()
 {
-	return handlers[0] ? handlers[0]->getRelevance() : -1;
+	return firstRelevance;
 }

@@ -2483,9 +2483,9 @@ class Player final: public Unit
         void SetPlayerbotMgr(PlayerbotMgr* mgr) { m_playerbotMgr = mgr; }
         // Per-Player tick driver — called from Player::Update. Implementation in HostHooks.cpp.
         void UpdatePlayerbotHooks(uint32 diff);
-        // MeleeAttackStart/Stop: cmangos forwarders to AttackerStateUpdate. Stub no-op.
-        void MeleeAttackStart(Unit* /*pVictim*/) {}
-        void MeleeAttackStop(Unit* /*pVictim*/ = nullptr) {}
+        // MeleeAttackStart/Stop: preserve the expected player combat packets/state transitions.
+        void MeleeAttackStart(Unit* pVictim) { SendMeleeAttackStart(pVictim); }
+        void MeleeAttackStop(Unit* pVictim = nullptr) { SendMeleeAttackStop(pVictim); }
         // RemoveAllCooldowns: cmangos has it; Penqle has RemoveAllSpellCooldown. Forwarder.
         void RemoveAllCooldowns(bool /*sendOnly*/ = false) { RemoveAllSpellCooldown(); }
         // isMovingOrTurning: cmangos check; Penqle uses HasMovementFlag with MASK_MOVING_OR_TURN.

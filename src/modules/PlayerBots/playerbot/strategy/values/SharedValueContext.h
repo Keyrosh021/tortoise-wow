@@ -8,6 +8,7 @@
 #include "LootValues.h"
 #include "MountValues.h"
 #include "playerbot/PlayerbotAI.h"
+#include <memory>
 
 namespace ai
 {
@@ -49,15 +50,21 @@ namespace ai
     class SharedObjectContext
     {
     public:
-        SharedObjectContext() { valueContexts.Add(new SharedValueContext()); };
+        SharedObjectContext()
+        {
+            sharedAI = std::make_unique<PlayerbotAI>();
+            valueContexts.Add(new SharedValueContext());
+        };
+
+        void Reset()
+        {
+            valueContexts.Reset();
+        }
 
     public:
         virtual UntypedValue* GetUntypedValue(const std::string& name)
         {
-            PlayerbotAI* ai = new PlayerbotAI();
-            UntypedValue* value = valueContexts.GetObject(name, ai);
-            delete ai;
-            return value;
+            return valueContexts.GetObject(name, sharedAI.get());
         }
 
         template<class T>
@@ -79,6 +86,7 @@ namespace ai
             return GetValue<T>(name, out.str());
         }
     protected:
+        std::unique_ptr<PlayerbotAI> sharedAI;
         NamedObjectContextList<UntypedValue> valueContexts;
     };
 #define sSharedObjectContext MaNGOS::Singleton<SharedObjectContext>::Instance()

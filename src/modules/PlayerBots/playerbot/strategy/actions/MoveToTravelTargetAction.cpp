@@ -7,13 +7,35 @@
 #include "Maps/PathFinder.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
+#include <cmath>
 #include <iomanip>
+#include <mutex>
+#include <unordered_map>
 
 using namespace ai;
+
+namespace
+{
+    struct HumanLikeTravelState
+    {
+        time_t nextPause = 0;
+        time_t nextJump = 0;
+        time_t nextTrace = 0;
+    };
+
+    std::mutex s_humanLikeTravelMutex;
+    std::unordered_map<uint32, HumanLikeTravelState> s_humanLikeTravelStates;
+}
 
 bool MoveToTravelTargetAction::Execute(Event& event)
 {
     TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+
+    if (!ai->HasRealPlayerMaster() && !ai->HasActivePlayerMaster())
+    {
+        bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_WALK_MODE);
+        bot->SetWalk(false, true);
+    }
 
     if (target->GetStatus() == TravelStatus::TRAVEL_STATUS_READY)
     {
@@ -22,6 +44,45 @@ bool MoveToTravelTargetAction::Execute(Event& event)
     }
 
     target->CheckStatus();
+
+    if (target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK)
+    {
+        if (QuestRelationTravelDestination* questDest = dynamic_cast<QuestRelationTravelDestination*>(target->GetDestination()))
+        {
+            ObjectGuid targetGuid;
+            if (GuidPosition* guidPos = dynamic_cast<GuidPosition*>(target->GetPosition()))
+            {
+                if (WorldObject* wo = guidPos->GetWorldObject(bot->GetInstanceId()))
+                    targetGuid = wo->GetObjectGuid();
+            }
+
+            if (targetGuid)
+                bot->SetSelectionGuid(targetGuid);
+
+            bool didQuestWork = false;
+            if (questDest->GetRelation() == 0)
+                didQuestWork = ai->DoSpecificAction("accept quest", Event("quest travel", "*", bot), true);
+            else
+                didQuestWork = ai->DoSpecificAction("talk to quest giver", targetGuid ? Event("quest travel", targetGuid, bot) : Event("quest travel", "", bot), true);
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "source=move-to-travel"
+                    << " entry=" << questDest->GetEntry()
+                    << " questId=" << questDest->GetQuestId()
+                    << " relation=" << (uint32)questDest->GetRelation()
+                    << " guid=" << (targetGuid ? targetGuid.GetRawValue() : 0)
+                    << " didQuestWork=" << (didQuestWork ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(ai, "QuestTravelWorkAction", target->GetDestination()->GetTitle(), out.str());
+            }
+
+            target->SetStatus(didQuestWork ? TravelStatus::TRAVEL_STATUS_EXPIRED : TravelStatus::TRAVEL_STATUS_COOLDOWN);
+            context->ClearValues("no active travel destinations");
+            RESET_AI_VALUE(bool, "travel target active");
+            return didQuestWork;
+        }
+    }
 
     if (target->GetStatus() != TravelStatus::TRAVEL_STATUS_TRAVEL)
         return true;
@@ -89,6 +150,8 @@ bool MoveToTravelTargetAction::Execute(Event& event)
 
             SetDuration(randomDelay);
 
+            sPlayerbotAIConfig.logEvent(ai, "HumanLikePause", member->GetName(), std::to_string(randomDelay));
+
             // Occasionally face the member and perform an emote
             if (urand(0, 3) == 0) { // 25% chance to emote
                 bot->SetFacingToObject(member);
@@ -115,16 +178,38 @@ bool MoveToTravelTargetAction::Execute(Event& event)
     float z = location.getZ();
     float mapId = location.getMapId();
 
+    const bool humanLikeTravel = false;
+    time_t now = time(0);
+    HumanLikeTravelState humanState;
+    if (humanLikeTravel)
+    {
+        std::lock_guard<std::mutex> guard(s_humanLikeTravelMutex);
+        humanState = s_humanLikeTravelStates[bot->GetGUIDLow()];
+    }
+
+    if (humanLikeTravel)
+    {
+        if (humanState.nextTrace <= now)
+        {
+            std::ostringstream trace;
+            trace << "combat=" << (bot->IsInCombat() ? 1 : 0)
+                  << " mounted=" << (bot->IsMounted() ? 1 : 0)
+                  << " sameMap=" << (botLocation.getMapId() == location.getMapId() ? 1 : 0)
+                  << " sq2d=" << std::fixed << std::setprecision(2) << botLocation.sqDistance2d(location);
+
+            sPlayerbotAIConfig.logEvent(
+                ai,
+                "HumanLikeTravelTrace",
+                target->GetDestination() ? target->GetDestination()->GetTitle() : "travel",
+                trace.str());
+
+            std::lock_guard<std::mutex> guard(s_humanLikeTravelMutex);
+            s_humanLikeTravelStates[bot->GetGUIDLow()].nextTrace = now + 15;
+        }
+    }
+
     if (botLocation.getMapId() == location.getMapId() && botLocation.sqDistance2d(location) < 10000.0f)
     {
-        float maxDistance = target->GetDestination()->GetRadiusMin();
-
-        float angle = 2 * M_PI * urand(0, 100) / 100.0;
-        float mod = urand(50, 100) / 100.0;
-
-        x += cos(angle) * maxDistance * mod;
-        y += sin(angle) * maxDistance * mod;
-
         if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
         {
             std::ostringstream out;
@@ -144,6 +229,80 @@ bool MoveToTravelTargetAction::Execute(Event& event)
         }
     }
 
+    if (humanLikeTravel && !bot->IsInCombat() && !bot->IsMounted())
+    {
+        sPlayerbotAIConfig.logEvent(
+            ai,
+            "HumanLikeTravelEligible",
+            target->GetDestination() ? target->GetDestination()->GetTitle() : "travel",
+            "eligible");
+
+        if (humanState.nextPause <= now && frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikePauseChance)
+        {
+            uint32 pauseMs = urand(sPlayerbotAIConfig.humanLikePauseMinMs, sPlayerbotAIConfig.humanLikePauseMaxMs);
+            SetDuration(pauseMs);
+            sPlayerbotAIConfig.logEvent(ai, "HumanLikePause", target->GetDestination() ? target->GetDestination()->GetTitle() : "travel", std::to_string(pauseMs));
+
+            {
+                std::lock_guard<std::mutex> guard(s_humanLikeTravelMutex);
+                HumanLikeTravelState& state = s_humanLikeTravelStates[bot->GetGUIDLow()];
+                state.nextPause = now + (sPlayerbotAIConfig.humanLikePauseCooldownMs / 1000);
+            }
+
+            return true;
+        }
+
+        if (frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikePathJitterChance)
+        {
+            float dx = location.getX() - botLocation.getX();
+            float dy = location.getY() - botLocation.getY();
+            float len = std::sqrt(dx * dx + dy * dy);
+            if (len > 0.01f)
+            {
+                dx /= len;
+                dy /= len;
+                float lateralX = -dy;
+                float lateralY = dx;
+
+                float forwardJitter = frand(-sPlayerbotAIConfig.humanLikePathForwardJitterRadius,
+                                            sPlayerbotAIConfig.humanLikePathForwardJitterRadius);
+                float lateralJitter = frand(-sPlayerbotAIConfig.humanLikePathJitterRadius,
+                                            sPlayerbotAIConfig.humanLikePathJitterRadius);
+
+                x += dx * forwardJitter + lateralX * lateralJitter;
+                y += dy * forwardJitter + lateralY * lateralJitter;
+
+                sPlayerbotAIConfig.logEvent(
+                    ai,
+                    "HumanLikePathJitter",
+                    std::to_string(forwardJitter),
+                    std::to_string(lateralJitter));
+            }
+        }
+
+        if (humanState.nextJump <= now)
+        {
+            if (frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeSpinChance)
+            {
+                float spinOffset = frand(0.9f * static_cast<float>(M_PI), 1.8f * static_cast<float>(M_PI));
+                float wobble = frand(-0.45f, 0.45f);
+                bot->SetFacingTo(bot->GetOrientation() + spinOffset + wobble);
+                sPlayerbotAIConfig.logEvent(ai, "HumanLikeSpin", std::to_string(spinOffset), std::to_string(wobble));
+            }
+
+            if (frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeJumpChance)
+            {
+                ai->DoSpecificAction("jump::random", Event(), true);
+            }
+
+            {
+                std::lock_guard<std::mutex> guard(s_humanLikeTravelMutex);
+                HumanLikeTravelState& state = s_humanLikeTravelStates[bot->GetGUIDLow()];
+                state.nextJump = now + (sPlayerbotAIConfig.humanLikeJumpCooldownMs / 1000);
+            }
+        }
+    }
+
     bool canMove = MoveTo(mapId, x, y, z, false, false);
 
     if (!canMove)
@@ -153,12 +312,29 @@ bool MoveToTravelTargetAction::Execute(Event& event)
         if (target->IsMaxRetry(true))
         {
             ai->TellDebug(ai->GetMaster(), "The target is cooling down because we failed to move to it a few times in a row.", "debug travel");
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason=move-failed"
+                    << " retries=max"
+                    << " status=" << static_cast<uint32>(target->GetStatus())
+                    << " destination=" << (target->GetDestination() ? target->GetDestination()->GetTitle() : "none")
+                    << " botMap=" << bot->GetMapId()
+                    << " targetMap=" << mapId
+                    << " targetX=" << x
+                    << " targetY=" << y
+                    << " targetZ=" << z;
+                sPlayerbotAIConfig.logEvent(ai, "TravelCooldownTrace", target->GetDestination() ? target->GetDestination()->GetTitle() : "travel", out.str());
+            }
             target->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);      
             target->SetForced(false);
         }
     }
     else
+    {
         target->DecRetry(true);
+        WaitForReach(std::max<float>(botLocation.distance(WorldPosition(mapId, x, y, z)), 1.0f));
+    }
 
     if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
     {
@@ -248,4 +424,3 @@ bool MoveToTravelTargetAction::isUseful()
 
     return true;
 }
-

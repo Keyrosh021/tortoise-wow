@@ -5,6 +5,7 @@
 
 namespace ai
 {
+    static constexpr float PLAYERBOT_STRICT_LOOT_RANGE = 2.0f;
 
     class AvailableLootValue : public ManualSetValue<LootObjectStack*>
 	{
@@ -39,7 +40,7 @@ namespace ai
             return !loot.IsEmpty() &&
                     loot.GetWorldObject(bot) &&    
                     loot.IsLootPossible(bot) &&
-                    sServerFacade.IsDistanceLessOrEqualThan(AI_VALUE2(float, "distance", "loot target"), INTERACTION_DISTANCE);
+                    sServerFacade.IsDistanceLessOrEqualThan(AI_VALUE2(float, "distance", "loot target"), PLAYERBOT_STRICT_LOOT_RANGE);
         }
     };
 }

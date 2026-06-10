@@ -1334,6 +1334,7 @@ void World::LoadConfigSettingsFromFile(bool reload)
     setConfig(CONFIG_UINT32_DYN_RESPAWN_AFFECT_LEVEL_BELOW, "DynamicRespawn.AffectLevelBelow", 0);
     setConfig(CONFIG_UINT32_DYN_RESPAWN_PLAYERS_THRESHOLD, "DynamicRespawn.PlayersThreshold", 0);
     setConfig(CONFIG_UINT32_DYN_RESPAWN_PLAYERS_LEVELDIFF, "DynamicRespawn.PlayersMaxLevelDiff", 0);
+    setConfig(CONFIG_UINT32_DYN_RESPAWN_CORPSE_CLONE_MAX, "DynamicRespawn.CorpseCloneMax", 5);
 
     setConfig(CONFIG_UINT32_CHANNEL_INVITE_MIN_LEVEL, "ChannelInvite.MinLevel", 10);
     setConfig(CONFIG_BOOL_WHISPER_RESTRICTION, "WhisperRestriction", false);
@@ -2097,6 +2098,7 @@ void LoadPlayerEggLoot();
     sSpellMgr.LoadSpellPetAuras();
     sLog.outString("Loading player info...");
     sObjectMgr.LoadPlayerInfo();
+    InitPlayerbotsAfterPlayerInfo();
     sLog.outString("Loading exploration base XP...");
     sObjectMgr.LoadExplorationBaseXP();
     sLog.outString("Loading pet names...");
@@ -2475,6 +2477,7 @@ void TotalMoneyCallback(QueryResult* result, uint32 money)
 void World::Update(uint32 diff)
 {
     XScopeStatTimer ScopeStatTimer(sPerfMonitor.WorldTick);
+    const uint32 worldUpdateStart = WorldTimer::getMSTime();
     ///- Update the different timers
     for (auto& timer : m_timers)
     {
@@ -2514,7 +2517,9 @@ void World::Update(uint32 diff)
     }
 
     /// <li> Handle session updates
+    uint32 sessionsUpdateTime = WorldTimer::getMSTime();
     UpdateSessions(diff);
+    sessionsUpdateTime = WorldTimer::getMSTimeDiffToNow(sessionsUpdateTime);
     m_canProcessAsyncPackets = true;
 
     /// <li> Update uptime table
@@ -2547,18 +2552,40 @@ void World::Update(uint32 diff)
     _asyncTasks.clear();
     lock.unlock();
 
+    uint32 transportUpdateTime = WorldTimer::getMSTime();
     sTransportMgr.Update(diff);
+    transportUpdateTime = WorldTimer::getMSTimeDiffToNow(transportUpdateTime);
+
+    uint32 mapMgrUpdateTime = WorldTimer::getMSTime();
     sMapMgr.Update(diff);
+    mapMgrUpdateTime = WorldTimer::getMSTimeDiffToNow(mapMgrUpdateTime);
+
+    uint32 battlegroundUpdateTime = WorldTimer::getMSTime();
     sBattleGroundMgr.Update(diff);
+    battlegroundUpdateTime = WorldTimer::getMSTimeDiffToNow(battlegroundUpdateTime);
+
+    uint32 lfgUpdateTime = WorldTimer::getMSTime();
     sLFGMgr.Update(diff);
+    lfgUpdateTime = WorldTimer::getMSTimeDiffToNow(lfgUpdateTime);
+
+    uint32 guardUpdateTime = WorldTimer::getMSTime();
     sGuardMgr.Update(diff);
+    guardUpdateTime = WorldTimer::getMSTimeDiffToNow(guardUpdateTime);
+
+    uint32 zoneScriptUpdateTime = WorldTimer::getMSTime();
     sZoneScriptMgr.Update(diff);
+    zoneScriptUpdateTime = WorldTimer::getMSTimeDiffToNow(zoneScriptUpdateTime);
+
+    uint32 dynamicVisUpdateTime = WorldTimer::getMSTime();
     sDynamicVisMgr.UpdateVisibility(diff);
+    dynamicVisUpdateTime = WorldTimer::getMSTimeDiffToNow(dynamicVisUpdateTime);
 
     // hook into bot module update.
     // RandomPlayerbotMgr::UpdateAI ticks all logged-in random bots and the bot login queue.
     // Implementation lives in the bot module; declared via host hook in playerbot/HostHooks.cpp.
+    uint32 playerbotUpdateTime = WorldTimer::getMSTime();
     UpdatePlayerbotsTick(diff);
+    playerbotUpdateTime = WorldTimer::getMSTimeDiffToNow(playerbotUpdateTime);
 
     ///- Update groups with offline leaders
     if (m_timers[WUPDATE_GROUPS].Passed())
@@ -2592,6 +2619,17 @@ void World::Update(uint32 diff)
     asyncQueriesTime = WorldTimer::getMSTimeDiffToNow(asyncQueriesTime);
     if (getConfig(CONFIG_UINT32_PERFLOG_SLOW_ASYNC_QUERIES) && asyncQueriesTime > getConfig(CONFIG_UINT32_PERFLOG_SLOW_ASYNC_QUERIES))
         sLog.out(LOG_PERFORMANCE, "Update async queries: %ums", asyncQueriesTime);
+
+    const uint32 worldUpdateTime = WorldTimer::getMSTimeDiffToNow(worldUpdateStart);
+    if (getConfig(CONFIG_UINT32_PERFLOG_SLOW_WORLD_UPDATE) && worldUpdateTime > getConfig(CONFIG_UINT32_PERFLOG_SLOW_WORLD_UPDATE))
+    {
+        sLog.out(LOG_PERFORMANCE,
+            "World update: %ums [sessions %ums|transport %ums|mapMgr %ums|bg %ums|lfg %ums|guard %ums|zone %ums|dynvis %ums|playerbots %ums|async %ums] [activeSess %u|queuedSess %u|allSess " SIZEFMTD "|avgDiff %u|currDiff %u]",
+            worldUpdateTime, sessionsUpdateTime, transportUpdateTime, mapMgrUpdateTime, battlegroundUpdateTime,
+            lfgUpdateTime, guardUpdateTime, zoneScriptUpdateTime, dynamicVisUpdateTime, playerbotUpdateTime,
+            asyncQueriesTime, GetActiveSessionCount(), GetQueuedSessionCount(), m_sessions.size(),
+            GetAverageDiff(), GetCurrentDiff());
+    }
 
     ///- Erase old corpses
     if (m_timers[WUPDATE_CORPSES].Passed())

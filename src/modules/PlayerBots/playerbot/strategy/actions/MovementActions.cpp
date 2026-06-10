@@ -17,8 +17,84 @@
 #include "Entities/Vehicle.h"
 #endif
 #include "playerbot/strategy/generic/CombatStrategy.h"
+#include <unordered_map>
+#include <mutex>
 
 using namespace ai;
+
+namespace
+{
+    uint32 BuildMoveOptions(bool walk, bool pathfinding, bool fly = false)
+    {
+        uint32 options = pathfinding ? MOVE_PATHFINDING : MOVE_NONE;
+        options |= walk ? MOVE_WALK_MODE : MOVE_RUN_MODE;
+        if (fly)
+            options |= MOVE_FLY_MODE;
+        return options;
+    }
+
+    std::mutex s_humanLikeDispatchTraceMutex;
+    std::unordered_map<uint32, time_t> s_humanLikeDispatchNextTrace;
+
+    struct HumanLikeMoveState
+    {
+        time_t nextPause = 0;
+        time_t nextJump = 0;
+    };
+
+    std::mutex s_humanLikeMoveStateMutex;
+    std::unordered_map<uint32, HumanLikeMoveState> s_humanLikeMoveStates;
+
+    std::mutex s_movementTraceMutex;
+    std::unordered_map<std::string, time_t> s_movementTraceNextLog;
+
+    bool ShouldLogMovementTrace(Player* bot, const std::string& eventName, uint32 intervalSeconds = 10)
+    {
+        std::lock_guard<std::mutex> guard(s_movementTraceMutex);
+        const std::string key = eventName + ":" + std::to_string(bot->GetGUIDLow());
+        time_t now = time(0);
+        time_t& nextLog = s_movementTraceNextLog[key];
+        if (nextLog > now)
+            return false;
+
+        nextLog = now + intervalSeconds;
+        return true;
+    }
+
+    bool HasNullTravelDestination(PlayerbotAI* ai)
+    {
+        if (!ai)
+            return false;
+
+        AiObjectContext* context = ai->GetAiObjectContext();
+        if (!context)
+            return false;
+
+        TravelTarget* travelTarget = context->GetValue<TravelTarget*>("travel target")->Get();
+        if (!travelTarget)
+            return false;
+
+        TravelDestination* travelDestination = travelTarget->GetDestination();
+        return travelDestination && typeid(*travelDestination) == typeid(NullTravelDestination);
+    }
+
+    bool IsCasterStyleRangedWithMana(PlayerbotAI* ai, Player* bot)
+    {
+        if (!ai || !bot)
+            return false;
+
+        AiObjectContext* context = ai->GetAiObjectContext();
+        if (!context)
+            return false;
+
+        const bool isRangedBot = ai->IsRanged(bot);
+        const bool isCasterRanged = isRangedBot && bot->getClass() != CLASS_HUNTER;
+        const bool hasManaBar = context->GetValue<bool>("has mana", "self target")->Get();
+        const uint8 manaPct = hasManaBar ? context->GetValue<uint8>("mana", "self target")->Get() : 0;
+
+        return isCasterRanged && hasManaBar && manaPct > sPlayerbotAIConfig.lowMana;
+    }
+}
 
 void MovementAction::CreateWp(Player* wpOwner, float x, float y, float z, float o, uint32 entry, bool important)
 {
@@ -243,7 +319,14 @@ bool MovementAction::FlyDirect(const WorldPosition &startPosition, const WorldPo
         }
     }
     mm.Clear(false, true);
-    mm.MovePoint(movePosition.getMapId(), Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f), bot->IsFlying() ? FORCED_MOVEMENT_FLIGHT : FORCED_MOVEMENT_RUN, bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.f, bot->IsFlying());
+    {
+        uint32 moveOptions = BuildMoveOptions(false, false, bot->IsFlying());
+        mm.MovePoint(movePosition.getMapId(),
+            Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f),
+            moveOptions,
+            bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.0f,
+            -10.0f);
+    }
 
     AI_VALUE(LastMovement&, "last movement").lastAreaTrigger = movePosition;
 
@@ -955,17 +1038,44 @@ void MovementAction::UpdateFlyingState(
 #endif // !MANGOSBOT_ZERO
 }
 
-void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking)
+void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking, bool forceWalk)
 {
     MotionMaster& mm = *bot->GetMotionMaster();
 
     mm.Clear();
 
-    ForcedMovement moveMode = masterWalking ? FORCED_MOVEMENT_WALK : FORCED_MOVEMENT_RUN;
+    bool shouldWalk = masterWalking || forceWalk;
+    if (shouldWalk)
+        bot->m_movementInfo.AddMovementFlag(MOVEFLAG_WALK_MODE);
+    else
+    {
+        bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_WALK_MODE);
+        bot->SetWalk(false, !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster());
+    }
+
+    ForcedMovement moveMode = shouldWalk ? FORCED_MOVEMENT_WALK : FORCED_MOVEMENT_RUN;
 #ifndef MANGOSBOT_ZERO
     if (bot->IsFlying())
         moveMode = FORCED_MOVEMENT_FLIGHT;
 #endif
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementSpeedTrace"))
+    {
+        std::ostringstream out;
+        out << "action=" << getName()
+            << " walkFlag=" << (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_WALK_MODE) ? 1 : 0)
+            << " masterWalking=" << (masterWalking ? 1 : 0)
+            << " forceWalk=" << (forceWalk ? 1 : 0)
+            << " moveMode=" << static_cast<uint32>(moveMode)
+            << " walkSpeed=" << std::fixed << std::setprecision(2) << bot->GetSpeed(MOVE_WALK)
+            << " runSpeed=" << bot->GetSpeed(MOVE_RUN)
+#ifndef MANGOSBOT_ZERO
+            << " flightSpeed=" << bot->GetSpeed(MOVE_FLIGHT)
+#endif
+            << " gen=" << bot->GetMotionMaster()->GetCurrentMovementGeneratorType();
+
+        sPlayerbotAIConfig.logEvent(ai, "MovementSpeedTrace", std::to_string(movePath.getPointPath().size()), out.str());
+    }
 
     std::vector<WorldPosition> path = movePath.getPointPath();
 
@@ -974,18 +1084,21 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
         WorldPosition movePosition = path.back();
 
 #ifdef MANGOSBOT_ZERO
+        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, false);
         mm.MovePoint(movePosition.getMapId(),
             movePosition.getX(),
             movePosition.getY(),
             movePosition.getZ(),
-            moveMode,
-            generatePath);
+            moveOptions,
+            0.0f,
+            -10.0f);
 #else
+        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, bot->IsFlying());
         mm.MovePoint(movePosition.getMapId(),
             Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f),
-            moveMode,
+            moveOptions,
             bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.f,
-            bot->IsFlying());
+            -10.0f);
 #endif
     }
 
@@ -994,7 +1107,10 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
     std::vector<G3D::Vector3> pointPath = WorldPosition().toPointsArray(path);
     float size = WorldPosition().getPathLength(path);
 
-    bool usePath = true;
+    // Penqle's MotionMaster::MovePath is currently a cmangos-compat no-op in this repo,
+    // so path-dispatch silently fails and leaves bots with broken/creeping movement.
+    // Use MovePoint with pathfinding instead so travel always becomes a real run spline.
+    bool usePath = false;
 
     if (usePath)
     {
@@ -1020,18 +1136,21 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
         WorldPosition movePosition = path.back();
 
 #ifdef MANGOSBOT_ZERO
+        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, false);
         mm.MovePoint(movePosition.getMapId(),
             movePosition.getX(),
             movePosition.getY(),
             movePosition.getZ(),
-            moveMode,
-            generatePath);
+            moveOptions,
+            0.0f,
+            -10.0f);
 #else
+        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, bot->IsFlying());
         mm.MovePoint(movePosition.getMapId(),
             Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f),
-            moveMode,
+            moveOptions,
             bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.f,
-            bot->IsFlying());
+            -10.0f);
 #endif
     }
     WaitForReach(size);
@@ -1059,7 +1178,7 @@ Unit* MovementAction::GetMover(Player* bot)
     return bot;
 }
 
-bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react, bool noPath, bool ignoreEnemyTargets)
+bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react, bool noPath, bool ignoreEnemyTargets, bool forceWalk)
 {
     if (!endPos.isValid())
         return false;
@@ -1074,6 +1193,8 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     LastMovement& lastMove = AI_VALUE(LastMovement&, "last movement");
 
     bool detailedMove = ai->AllowActivity(DETAILED_MOVE_ACTIVITY, true);
+    if (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+        detailedMove = true;
     if (!detailedMove && lastMove.nextTeleport)
     {
         time_t now = time(0);
@@ -1301,7 +1422,7 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     }
     // END DEBUG
 
-    DispatchMovement(movePath, generatePath, masterWalking);
+    DispatchMovement(movePath, generatePath, masterWalking, forceWalk);
 
     if (!idle)
         ClearIdleState();
@@ -1309,9 +1430,140 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     return true;
 }
 
-bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, bool react, bool noPath, bool ignoreEnemyTargets)
+bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, bool react, bool noPath, bool ignoreEnemyTargets, bool forceWalk)
 {
-    return MoveTo2(WorldPosition(mapId, x, y, z), idle, react, noPath, ignoreEnemyTargets);
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementActionTrace"))
+    {
+        std::ostringstream out;
+        out << "action=" << getName()
+            << " idle=" << (idle ? 1 : 0)
+            << " react=" << (react ? 1 : 0)
+            << " noPath=" << (noPath ? 1 : 0)
+            << " ignoreEnemyTargets=" << (ignoreEnemyTargets ? 1 : 0)
+            << " forceWalk=" << (forceWalk ? 1 : 0)
+            << " state=" << static_cast<uint32>(ai->GetState())
+            << " travelActive=" << (AI_VALUE(bool, "travel target active") ? 1 : 0)
+            << " followNC=" << (ai->HasStrategy("follow", BotState::BOT_STATE_NON_COMBAT) ? 1 : 0)
+            << " wanderNC=" << (ai->HasStrategy("wander", BotState::BOT_STATE_NON_COMBAT) ? 1 : 0);
+
+        sPlayerbotAIConfig.logEvent(ai, "MovementActionTrace", std::to_string(mapId), out.str());
+    }
+
+    const bool suppressHumanLikeMove =
+        getName() == "move to travel target" ||
+        getName() == "move to rpg target";
+    const bool humanLikeMove =
+        sPlayerbotAIConfig.humanLikeMovement &&
+        !ai->HasRealPlayerMaster() &&
+        !suppressHumanLikeMove;
+    time_t now = time(0);
+
+    if (humanLikeMove)
+    {
+        uint32 low = bot->GetGUIDLow();
+        bool doTrace = false;
+
+        {
+            std::lock_guard<std::mutex> guard(s_humanLikeDispatchTraceMutex);
+            time_t& nextTrace = s_humanLikeDispatchNextTrace[low];
+            if (nextTrace <= now)
+            {
+                nextTrace = now + 15;
+                doTrace = true;
+            }
+        }
+
+        if (doTrace)
+        {
+            std::ostringstream out;
+            out << "travelActive=" << (AI_VALUE(bool, "travel target active") ? 1 : 0)
+                << " state=" << uint32(ai->GetState())
+                << " react=" << (react ? 1 : 0)
+                << " idle=" << (idle ? 1 : 0)
+                << " noPath=" << (noPath ? 1 : 0)
+                << " forceWalk=" << (forceWalk ? 1 : 0);
+
+            sPlayerbotAIConfig.logEvent(ai, "HumanLikeMoveDispatch", std::to_string(mapId), out.str());
+        }
+
+        if (!bot->IsInCombat() && !bot->IsMounted() && !react && !idle)
+        {
+            HumanLikeMoveState moveState;
+            {
+                std::lock_guard<std::mutex> guard(s_humanLikeMoveStateMutex);
+                moveState = s_humanLikeMoveStates[low];
+            }
+
+            if (moveState.nextPause <= now && frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikePauseChance)
+            {
+                uint32 pauseMs = urand(sPlayerbotAIConfig.humanLikePauseMinMs, sPlayerbotAIConfig.humanLikePauseMaxMs);
+                SetDuration(pauseMs);
+                sPlayerbotAIConfig.logEvent(ai, "HumanLikePause", std::to_string(mapId), std::to_string(pauseMs));
+
+                {
+                    std::lock_guard<std::mutex> guard(s_humanLikeMoveStateMutex);
+                    HumanLikeMoveState& state = s_humanLikeMoveStates[low];
+                    state.nextPause = now + (sPlayerbotAIConfig.humanLikePauseCooldownMs / 1000);
+                }
+
+                return true;
+            }
+
+            if (frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikePathJitterChance)
+            {
+                float dx = x - bot->GetPositionX();
+                float dy = y - bot->GetPositionY();
+                float len = std::sqrt(dx * dx + dy * dy);
+                if (len > 0.01f)
+                {
+                    dx /= len;
+                    dy /= len;
+                    float lateralX = -dy;
+                    float lateralY = dx;
+
+                    float forwardJitter = frand(-sPlayerbotAIConfig.humanLikePathForwardJitterRadius,
+                                                sPlayerbotAIConfig.humanLikePathForwardJitterRadius);
+                    float lateralJitter = frand(-sPlayerbotAIConfig.humanLikePathJitterRadius,
+                                                sPlayerbotAIConfig.humanLikePathJitterRadius);
+
+                    x += dx * forwardJitter + lateralX * lateralJitter;
+                    y += dy * forwardJitter + lateralY * lateralJitter;
+
+                    sPlayerbotAIConfig.logEvent(
+                        ai,
+                        "HumanLikePathJitter",
+                        std::to_string(forwardJitter),
+                        std::to_string(lateralJitter));
+                }
+            }
+
+            if (moveState.nextJump <= now)
+            {
+                if (frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeSpinChance)
+                {
+                    float spinOffset = frand(0.9f * static_cast<float>(M_PI), 1.8f * static_cast<float>(M_PI));
+                    float wobble = frand(-0.45f, 0.45f);
+                    bot->SetFacingTo(bot->GetOrientation() + spinOffset + wobble);
+                    sPlayerbotAIConfig.logEvent(ai, "HumanLikeSpin", std::to_string(spinOffset), std::to_string(wobble));
+                }
+
+                if (frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeJumpChance)
+                {
+                    sPlayerbotAIConfig.logEvent(ai, "HumanLikeJumpAttempt", std::to_string(mapId), "jump::random");
+                    ai->DoSpecificAction("jump::random", Event(), true);
+                }
+
+                {
+                    std::lock_guard<std::mutex> guard(s_humanLikeMoveStateMutex);
+                    HumanLikeMoveState& state = s_humanLikeMoveStates[low];
+                    uint32 jumpCooldownMs = std::max<uint32>(1000, sPlayerbotAIConfig.humanLikeJumpCooldownMs);
+                    state.nextJump = now + (jumpCooldownMs / 1000);
+                }
+            }
+        }
+    }
+
+    return MoveTo2(WorldPosition(mapId, x, y, z), idle, react, noPath, ignoreEnemyTargets, forceWalk);
 
     WorldPosition endPosition(mapId, x, y, z, 0);
     if (!endPosition.isValid())
@@ -2069,7 +2321,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
     }
 
 #ifdef MANGOSBOT_ZERO
-        mm.MovePoint(movePosition.getMapId(), movePosition.getX(), movePosition.getY(), movePosition.getZ(), masterWalking ? FORCED_MOVEMENT_WALK : FORCED_MOVEMENT_RUN, generatePath);
+        uint32 moveOptions = BuildMoveOptions(masterWalking, generatePath, false);
+        mm.MovePoint(movePosition.getMapId(), movePosition.getX(), movePosition.getY(), movePosition.getZ(), moveOptions, 0.0f, -10.0f);
 #else
     if (!bot->IsFreeFlying())
     {
@@ -2077,7 +2330,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
         if (bot->HasMovementFlag(MOVEFLAG_SWIMMING) && startPosition.isInWater() && !startPosition.isUnderWater() && !movePosition.isInWater())
             generatePath = true;
 
-        mm.MovePoint(movePosition.getMapId(), movePosition.getX(), movePosition.getY(), movePosition.getZ(), masterWalking ? FORCED_MOVEMENT_WALK : FORCED_MOVEMENT_RUN, generatePath);
+        uint32 moveOptions = BuildMoveOptions(masterWalking, generatePath, false);
+        mm.MovePoint(movePosition.getMapId(), movePosition.getX(), movePosition.getY(), movePosition.getZ(), moveOptions, 0.0f, -10.0f);
     }
     else
     {
@@ -2168,7 +2422,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
                     bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_LEVITATING);
             }
         }
-        mm.MovePoint(movePosition.getMapId(), Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f), bot->IsFlying() ? FORCED_MOVEMENT_FLIGHT : FORCED_MOVEMENT_RUN, bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.f, bot->IsFlying());
+        uint32 moveOptions = BuildMoveOptions(false, false, bot->IsFlying());
+        mm.MovePoint(movePosition.getMapId(), Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f), moveOptions, bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.f, -10.0f);
     }
 #endif
 
@@ -2248,7 +2503,18 @@ float MovementAction::GetFollowAngle()
             continue;
 
         if( ref->getSource() == bot)
-            return 2 * M_PI / (group->GetMembersCount() -1) * index;
+        {
+            float angle = 2 * M_PI / (group->GetMembersCount() -1) * index;
+
+            if (sPlayerbotAIConfig.humanLikeMovement && !ai->HasRealPlayerMaster())
+            {
+                float jitter = frand(-sPlayerbotAIConfig.humanLikeFollowAngleJitter,
+                                     sPlayerbotAIConfig.humanLikeFollowAngleJitter);
+                angle += jitter;
+            }
+
+            return angle;
+        }
 
         index++;
     }
@@ -2283,6 +2549,46 @@ bool MovementAction::Follow(Unit* target, float distance)
 {
     if (!distance)
         distance = ai->GetRange("follow");
+
+    if (sPlayerbotAIConfig.humanLikeMovement && !ai->HasRealPlayerMaster())
+    {
+        static std::mutex s_followTraceMutex;
+        static std::unordered_map<uint32, time_t> s_nextFollowTrace;
+        time_t now = time(0);
+        uint32 low = bot->GetGUIDLow();
+
+        {
+            std::lock_guard<std::mutex> guard(s_followTraceMutex);
+            time_t& nextTrace = s_nextFollowTrace[low];
+            if (nextTrace <= now)
+            {
+                std::ostringstream out;
+                out << "target=" << (target ? target->GetName() : "none")
+                    << " dist=" << distance;
+                sPlayerbotAIConfig.logEvent(ai, "HumanLikeFollowTrace", std::to_string(target ? target->GetGUIDLow() : 0), out.str());
+                nextTrace = now + 15;
+            }
+        }
+
+        float appliedJitter = frand(-sPlayerbotAIConfig.humanLikeFollowDistanceJitter,
+                                    sPlayerbotAIConfig.humanLikeFollowDistanceJitter);
+        distance += appliedJitter;
+        distance = std::max(0.5f, distance);
+
+        static std::mutex s_jitterLogMutex;
+        static std::unordered_map<uint32, time_t> s_nextJitterLog;
+
+        {
+            std::lock_guard<std::mutex> guard(s_jitterLogMutex);
+            time_t& nextLog = s_nextJitterLog[low];
+            if (nextLog <= now)
+            {
+                sPlayerbotAIConfig.logEvent(ai, "HumanLikeFollowJitter", std::to_string(appliedJitter), std::to_string(distance));
+                nextLog = now + 15;
+            }
+        }
+    }
+
     return Follow(target, distance, GetFollowAngle());
 }
 
@@ -2307,6 +2613,37 @@ void MovementAction::UpdateMovementState()
 
 bool MovementAction::Follow(Unit* target, float distance, float angle)
 {
+    const bool suppressIdleFollow =
+        ai->GetState() == BotState::BOT_STATE_NON_COMBAT &&
+        ai->HasStrategy("wander", BotState::BOT_STATE_NON_COMBAT) &&
+        HasNullTravelDestination(ai) &&
+        (!target || ai->IsSafe(target));
+
+    if (suppressIdleFollow)
+    {
+        ai->StopMoving();
+        bot->SetWalk(false, false);
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "IdleFollowSuppressed"))
+        {
+            sPlayerbotAIConfig.logEvent(ai, "IdleFollowSuppressed", target ? std::to_string(target->GetGUIDLow()) : "0",
+                "wander-null-travel-follow");
+        }
+        return false;
+    }
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && target && ShouldLogMovementTrace(bot, "FollowTrace"))
+    {
+        std::ostringstream out;
+        out << "action=" << getName()
+            << " target=" << target->GetName()
+            << " distance=" << std::fixed << std::setprecision(2) << distance
+            << " angle=" << angle
+            << " targetAlive=" << (target->IsAlive() ? 1 : 0)
+            << " followNC=" << (ai->HasStrategy("follow", BotState::BOT_STATE_NON_COMBAT) ? 1 : 0)
+            << " wanderNC=" << (ai->HasStrategy("wander", BotState::BOT_STATE_NON_COMBAT) ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(ai, "FollowTrace", std::to_string(target->GetGUIDLow()), out.str());
+    }
+
     if (!ai->IsSafe(target))
         return MoveTo2(target);
 
@@ -2536,6 +2873,24 @@ WorldPosition CalculatePerpendicularPoint(const WorldPosition& A, const WorldPos
 
 bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
 {
+    if (!obj)
+        return false;
+
+    if (obj->GetTypeId() == TYPEID_UNIT || obj->GetTypeId() == TYPEID_PLAYER)
+    {
+        Unit* unit = static_cast<Unit*>(obj);
+        if (!unit->IsAlive())
+        {
+            if (AI_VALUE(Unit*, "current target") == unit)
+            {
+                context->GetValue<Unit*>("current target")->Set(nullptr);
+                bot->SetSelectionGuid(ObjectGuid());
+            }
+            ai->StopMoving();
+            return false;
+        }
+    }
+
     if (!ai->CanMove())
     {
         return false;
@@ -2543,6 +2898,68 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
 
     if (!ai->IsSafe(obj))
         return false;
+
+    if (Unit* targetUnit = dynamic_cast<Unit*>(obj))
+    {
+        const float distanceToTarget = sServerFacade.GetDistance2d(bot, targetUnit);
+        const bool inLos = bot->IsWithinLOSInMap(targetUnit, true);
+        const bool allowMeleeFallback = !IsCasterStyleRangedWithMana(ai, bot);
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "ChaseToTrace"))
+        {
+            std::ostringstream out;
+            out << "action=" << getName()
+                << " target=" << targetUnit->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << distanceToTarget
+                << " desired=" << distance
+                << " los=" << (inLos ? 1 : 0)
+                << " ranged=" << (ai->IsRanged(bot) ? 1 : 0)
+                << " movingGen=" << bot->GetMotionMaster()->GetCurrentMovementGeneratorType();
+            sPlayerbotAIConfig.logEvent(ai, "ChaseToTrace", std::to_string(targetUnit->GetGUIDLow()), out.str());
+        }
+
+        const bool hasManaBar = AI_VALUE2(bool, "has mana", "self target");
+        const uint8 manaPct = hasManaBar ? AI_VALUE2(uint8, "mana", "self target") : 0;
+
+        if (ai->IsRanged(bot) && inLos && distance > 0.0f &&
+            !sServerFacade.IsDistanceGreaterThan(distanceToTarget, distance + sPlayerbotAIConfig.contactDistance))
+        {
+            ai->StopMoving();
+            bot->SetTarget(targetUnit);
+            bot->Attack(targetUnit, false);
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "target=" << targetUnit->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << distanceToTarget
+                    << " desired=" << distance
+                    << " mana=" << static_cast<uint32>(manaPct);
+                sPlayerbotAIConfig.logEvent(ai, "RangedHoldPosition", std::to_string(targetUnit->GetGUIDLow()), out.str());
+            }
+
+            return true;
+        }
+
+        if (IsCasterStyleRangedWithMana(ai, bot) && inLos && distanceToTarget <= ai->GetRange("spell") + sPlayerbotAIConfig.contactDistance)
+        {
+            ai->StopMoving();
+            bot->SetTarget(targetUnit);
+            bot->Attack(targetUnit, false);
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "RangedChaseHold"))
+            {
+                std::ostringstream out;
+                out << "target=" << targetUnit->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << distanceToTarget
+                    << " spellRange=" << ai->GetRange("spell")
+                    << " mana=" << static_cast<uint32>(AI_VALUE2(uint8, "mana", "self target"));
+                sPlayerbotAIConfig.logEvent(ai, "RangedChaseHold", std::to_string(targetUnit->GetGUIDLow()), out.str());
+            }
+
+            return true;
+        }
+    }
 
 #ifdef MANGOSBOT_TWO
     TransportInfo* transportInfo = bot->GetTransportInfo();
@@ -2565,6 +2982,9 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
 
     UpdateMovementState();
 
+    if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_WALK_MODE))
+        bot->SetWalk(false, false);
+
     bot->HandleEmoteState(0);
     if (!bot->IsStandState())
         bot->SetStandState(UNIT_STAND_STATE_STAND);
@@ -2586,7 +3006,8 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
         return MoveTo(targetPosition.getMapId(), targetPosition.getX(), targetPosition.getY(), targetPosition.getZ());
 
     const Vector3 directionToTarget = (targetPoint - botPoint).directionOrZero();
-    const Vector3 endPoint = botPoint + (directionToTarget * std::min(distance, distanceToTarget));
+    const bool directChase = distance <= 0.01f;
+    const Vector3 endPoint = directChase ? targetPoint : (botPoint + (directionToTarget * std::min(distance, distanceToTarget)));
     WorldPosition endPosition(obj->GetMapId(), endPoint.x, endPoint.y, endPoint.z);
     endPosition.setZ(endPosition.getHeight());
 
@@ -2649,7 +3070,8 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
             sServerFacade.GetChaseOffset(bot) == distance)
         {
             bot->SetTarget(obj); //Needed to keep chase going in combat.
-            bot->Attack((Unit*)obj, false); //Needed to keep chase going in combat.
+            const bool allowMeleeFallback = !IsCasterStyleRangedWithMana(ai, bot);
+            bot->Attack((Unit*)obj, !ai->IsRanged(bot) || (allowMeleeFallback && sServerFacade.GetDistance2d(bot, obj) < 5.0f)); //Needed to keep chase going in combat.
             return true;
         }
     }
@@ -2674,7 +3096,8 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
     if (angle > 20) angle = 0;
 
     bot->SetTarget(obj); //Needed to keep chase going in combat.
-    bot->Attack((Unit*)obj, false); //Needed to keep chase going in combat.
+    const bool allowMeleeFallback = !IsCasterStyleRangedWithMana(ai, bot);
+    bot->Attack((Unit*)obj, !ai->IsRanged(bot) || (allowMeleeFallback && sServerFacade.GetDistance2d(bot, obj) < 5.0f)); //Needed to keep chase going in combat.
 
     mm.MoveChase((Unit*)obj, distance, angle);
     float dist = sServerFacade.GetDistance2d(bot, obj);
@@ -3178,6 +3601,36 @@ bool RunAwayAction::Execute(Event& event)
 
 bool MoveToLootAction::Execute(Event& event)
 {
+    static constexpr float PLAYERBOT_STRICT_LOOT_RANGE = 2.0f;
+
+    Unit* currentTarget = AI_VALUE(Unit*, "current target");
+    const bool attachedLiveTarget =
+        currentTarget &&
+        currentTarget->IsInWorld() &&
+        !sServerFacade.UnitIsDead(currentTarget) &&
+        (bot->GetVictim() == currentTarget || bot->GetSelectionGuid() == currentTarget->GetObjectGuid());
+    const bool hasCombatPressure =
+        AI_VALUE2(bool, "combat", "self target") ||
+        AI_VALUE(bool, "has attackers") ||
+        attachedLiveTarget;
+
+    if (hasCombatPressure)
+    {
+        RESET_AI_VALUE(LootObject, "loot target");
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MoveToLootDeferredCombat", 2))
+        {
+            std::ostringstream out;
+            out << "combat=" << (AI_VALUE2(bool, "combat", "self target") ? 1 : 0)
+                << " attackers=" << (AI_VALUE(bool, "has attackers") ? 1 : 0)
+                << " currentTargetAlive=" << (currentTarget && !sServerFacade.UnitIsDead(currentTarget) ? 1 : 0)
+                << " currentTarget=" << (currentTarget ? currentTarget->GetName() : "none");
+            sPlayerbotAIConfig.logEvent(ai, "MoveToLootDeferredCombat", currentTarget ? std::to_string(currentTarget->GetGUIDLow()) : "none", out.str());
+        }
+
+        return false;
+    }
+
     LootObject loot = AI_VALUE(LootObject, "loot target");
     if (!loot.IsLootPossible(bot))
     {
@@ -3208,7 +3661,19 @@ bool MoveToLootAction::Execute(Event& event)
     }
 
     if(sServerFacade.IsWithinLOSInMap(bot, wo))
-        return MoveNear(wo, sPlayerbotAIConfig.contactDistance);
+    {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MoveToLootTrace", 2))
+        {
+            std::ostringstream out;
+            out << "target=" << ChatHelper::formatWorldobject(wo)
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, wo)
+                << " desired=" << PLAYERBOT_STRICT_LOOT_RANGE;
+            sPlayerbotAIConfig.logEvent(ai, "MoveToLootTrace", std::to_string(wo->GetGUIDLow()), out.str());
+        }
+
+        bot->SetWalk(false, false);
+        return MoveNear(wo, PLAYERBOT_STRICT_LOOT_RANGE);
+    }
 
     return MoveTo(WorldPosition(wo));
 }
@@ -3224,6 +3689,21 @@ bool MoveOutOfEnemyContactAction::Execute(Event& event)
 
 bool MoveOutOfEnemyContactAction::isUseful()
 {
+    if (IsCasterStyleRangedWithMana(ai, bot))
+    {
+        if (Unit* target = AI_VALUE(Unit*, "current target"))
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MoveOutSuppressed"))
+            {
+                std::ostringstream out;
+                out << "target=" << target->GetName()
+                    << " mana=" << static_cast<uint32>(AI_VALUE2(uint8, "mana", "self target"));
+                sPlayerbotAIConfig.logEvent(ai, "MoveOutSuppressed", std::to_string(target->GetGUIDLow()), out.str());
+            }
+        }
+        return false;
+    }
+
     return MovementAction::isUseful() && AI_VALUE2(bool, "inside target", "current target");
 }
 
@@ -3301,6 +3781,21 @@ bool SetBehindTargetAction::isUseful()
 {
     if(!MovementAction::isUseful())
         return false;
+
+    if (IsCasterStyleRangedWithMana(ai, bot))
+    {
+        if (Unit* target = AI_VALUE(Unit*, "current target"))
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "SetBehindSuppressed"))
+            {
+                std::ostringstream out;
+                out << "target=" << target->GetName()
+                    << " mana=" << static_cast<uint32>(AI_VALUE2(uint8, "mana", "self target"));
+                sPlayerbotAIConfig.logEvent(ai, "SetBehindSuppressed", std::to_string(target->GetGUIDLow()), out.str());
+            }
+        }
+        return false;
+    }
 
     Unit* target = AI_VALUE(Unit*, "current target");
     if (target && !bot->IsFacingTargetsBack(target))
@@ -3417,7 +3912,8 @@ bool MoveToAction::Execute(Event& event)
 
 bool JumpAction::isUseful()
 {
-    return bot->IsInWorld() && ai->HasPlayerNearby() && !ai->IsJumping();
+    const bool allowAutonomousRandomJump = getQualifier() == "random" && !ai->HasRealPlayerMaster();
+    return bot->IsInWorld() && !ai->IsJumping() && (allowAutonomousRandomJump || ai->HasPlayerNearby());
 }
 
 bool JumpAction::Execute(ai::Event &event)
@@ -3434,6 +3930,9 @@ bool JumpAction::Execute(ai::Event &event)
     bool showLanding = false;
     bool isRtsc = false;
     bool toPosition = false;
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        sPlayerbotAIConfig.logEvent(ai, "JumpAction", event.getParam(), getQualifier());
 
     // only show landing
     if (options.find("show") != std::string::npos && options.size() > 5)
@@ -4454,4 +4953,3 @@ WorldPosition JumpAction::GetPossibleJumpStartForInRange(const WorldPosition& sr
     sLog.outDetail("%s: GetPossibleJumpStartFor Failed to find jump point!", jumper->GetName());
     return WorldPosition();
 }
-

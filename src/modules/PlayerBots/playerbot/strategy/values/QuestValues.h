@@ -6,15 +6,6 @@ namespace ai
 {          
     class GuidPosition;
 
-    class QuestObjectMgr : ObjectMgr
-    {
-    public:
-        QuestRelationsMap& GetCreatureQuestRelationsMap() { return m_CreatureQuestRelations; }
-        QuestRelationsMap& GetCreatureQuestInvolvedRelationsMap() { return m_CreatureQuestInvolvedRelations; }
-        QuestRelationsMap& GetGOQuestRelationsMap() { return m_GOQuestRelations; }
-        QuestRelationsMap& GetGOQuestInvolvedRelationsMap() { return m_GOQuestInvolvedRelations; }
-    };
-
     enum class QuestRewardOptionType : uint8
     {
         QUEST_REWARD_CONFIG_DRIVEN = 0x00,

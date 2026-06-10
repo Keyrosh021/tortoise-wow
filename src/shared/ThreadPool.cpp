@@ -18,6 +18,7 @@
 
 #include "ThreadPool.h"
 #include "Log.h"
+#include <plugin_auth_common.h>
 #include <mysql.h>
 
 #ifdef WIN32

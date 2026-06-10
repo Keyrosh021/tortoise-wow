@@ -190,8 +190,21 @@ bool QuestRelationTravelDestination::IsActive(Player* bot, const PlayerTravelInf
     }
     else
     {
-        if (!AI_VALUE2(bool, "group or", "following party,can turn in quest npc::" + std::to_string(GetEntry())))
-            return false;
+        bool canTurnInNpc = AI_VALUE2(bool, "group or", "following party,can turn in quest npc::" + std::to_string(GetEntry()));
+        if (!canTurnInNpc)
+        {
+            Quest const* quest = sObjectMgr.GetQuestTemplate(GetQuestId());
+            bool canRewardSpecificQuest = quest && bot->CanRewardQuest(quest, false);
+
+            if (!canRewardSpecificQuest)
+                return false;
+
+            std::ostringstream out;
+            out << "entry=" << GetEntry()
+                << " questId=" << GetQuestId()
+                << " dialogGate=0 directReward=1";
+            sPlayerbotAIConfig.logEvent(ai, "QuestTurnInActiveFallback", GetTitle(), out.str());
+        }
     }
 
     if (GetEntry() > 0)
@@ -895,6 +908,14 @@ void TravelTarget::SetStatus(TravelStatus status) {
         break;
     case TravelStatus::TRAVEL_STATUS_COOLDOWN:
         statusTime = tDestination->GetCooldownDelay();
+        if (tDestination &&
+            (typeid(*tDestination) == typeid(QuestRelationTravelDestination) ||
+             typeid(*tDestination) == typeid(QuestObjectiveTravelDestination)))
+        {
+            // Quest travel is allowed to retry quickly. A long cooldown leaves low-level bots
+            // refusing grind targets because quest work exists, while also not choosing new travel.
+            statusTime = 1000;
+        }
     default: break;
     }
 }
@@ -988,6 +1009,11 @@ void TravelTarget::CheckStatus()
 
         if (HasArrived)
         {
+            sPlayerbotAIConfig.logEvent(ai, "TravelArrived", tDestination->GetTitle(), tDestination->GetShortName());
+
+            if (typeid(*tDestination) == typeid(ExploreTravelDestination))
+                sPlayerbotAIConfig.logEvent(ai, "ExploreAction", tDestination->GetTitle(), "Arrived");
+
             if (ai->HasStrategy("travel once", BotState::BOT_STATE_NON_COMBAT))
             {
                 ai->TellDebug(ai->GetMaster(), "The target is clearing because it was a travel once destination.", "debug travel");
@@ -1011,6 +1037,18 @@ void TravelTarget::CheckStatus()
         if (destinationInactive || conditionsInactive)
         {
             ai->TellDebug(ai->GetMaster(), "The target is cooling down because the destination was no longer active or the conditions are no longer true.", "debug travel");
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason=" << (destinationInactive ? "destination-inactive" : "conditions-inactive")
+                    << " status=" << static_cast<uint32>(GetStatus())
+                    << " destinationActive=" << (destinationInactive ? 0 : 1)
+                    << " conditionsActive=" << (conditionsInactive ? 0 : 1)
+                    << " forced=" << (IsForced() ? 1 : 0)
+                    << " entry=" << (tDestination ? tDestination->GetEntry() : 0)
+                    << " title=" << (tDestination ? tDestination->GetTitle() : "none");
+                sPlayerbotAIConfig.logEvent(ai, "TravelCooldownTrace", tDestination ? tDestination->GetTitle() : "travel", out.str());
+            }
             forced = false;
             SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
             return;
@@ -1318,20 +1356,25 @@ void TravelMgr::LoadQuestTravelTable()
     sLog.outString("Finding possible travel destinations.");
 
     EntryQuestRelationMap eMap = GAI_VALUE(EntryQuestRelationMap, "entry quest relation");
+    sLog.outString(">> Quest relation entries: %u", (uint32)eMap.size());
 
     sLog.outString("Creating travel destinations.");
 
     BarGoLink bar(eMap.size());
+    uint32 questRelationRows = 0;
+    uint32 questLocationMisses = 0;
+    uint32 questDestinationsCreated = 0;
+    uint32 questPointsAssigned = 0;
 
     for (auto& [entry, relation] : eMap)
     {
-
-
         bar.step();
         for (auto& [questId, flag] : relation)
         {
+            ++questRelationRows;
             if (guidpMap.find(entry) == guidpMap.end())
             {
+                ++questLocationMisses;
                 sLog.outDebug("Entry %d for quest %d has no valid location.", entry, questId);
                 continue;
             }
@@ -1350,6 +1393,7 @@ void TravelMgr::LoadQuestTravelTable()
                     else
                         loc = AddDestination<QuestObjectiveTravelDestination>(entry, purposeFlag, questId);
 
+                    ++questDestinationsCreated;
                     locs.push_back(loc);
                 }
             }
@@ -1359,6 +1403,7 @@ void TravelMgr::LoadQuestTravelTable()
                 for (auto& guidP : guidpMap.at(entry))
                 {
                     pointsMap.insert(std::make_pair(guidP.GetRawValue(), guidP));
+                    ++questPointsAssigned;
 
                     for (auto tLoc : locs)
                     {
@@ -1368,6 +1413,13 @@ void TravelMgr::LoadQuestTravelTable()
             }
         }
     }       
+
+    sLog.outString(
+        ">> Quest travel rows=%u created=%u missingLocations=%u pointAssignments=%u",
+        questRelationRows,
+        questDestinationsCreated,
+        questLocationMisses,
+        questPointsAssigned);
 
     sLog.outString("Loading all travel locations.");
 
@@ -2651,12 +2703,33 @@ bool TravelMgr::IsLocationLevelValid(const WorldPosition& position, const Player
     return true;
 }
 
+namespace
+{
+    bool ShouldBypassTravelLevelGate(uint32 purposeFlag)
+    {
+        const TravelDestinationPurpose purpose = static_cast<TravelDestinationPurpose>(purposeFlag);
+        switch (purpose)
+        {
+        case TravelDestinationPurpose::QuestGiver:
+        case TravelDestinationPurpose::QuestTaker:
+        case TravelDestinationPurpose::QuestObjective1:
+        case TravelDestinationPurpose::QuestObjective2:
+        case TravelDestinationPurpose::QuestObjective3:
+        case TravelDestinationPurpose::QuestObjective4:
+            return true;
+        default:
+            return false;
+        }
+    }
+}
+
 PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, const std::vector<uint32>& distancePartitions, const PlayerTravelInfo& info, uint32 purposeFlag, const std::vector<int32>& entries, bool onlyPossible, float maxDistance) const
 {
     sTravelMgr.GetPartitionsLock();
 
     PartitionedTravelList pointMap;
     DestinationList destinations = GetDestinations(info, purposeFlag, entries, onlyPossible, maxDistance);
+    const bool bypassLevelGate = ShouldBypassTravelLevelGate(purposeFlag);
 
 
 
@@ -2678,7 +2751,7 @@ PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, cons
 
         for (auto& position : points)
         {
-            if (!IsLocationLevelValid(*position, info))
+            if (!bypassLevelGate && !IsLocationLevelValid(*position, info))
                 continue;
 
             float distance = position->distance(center);

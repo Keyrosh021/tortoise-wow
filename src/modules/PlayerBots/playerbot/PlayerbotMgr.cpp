@@ -48,7 +48,49 @@ namespace {
         ObjectGuid botGuid;
         uint32 masterAccountId;
     };
+
+    struct CompletedBotLogin {
+        PlayerbotHolder* owner;
+        PendingBotLogin info;
+        SqlQueryHolder* holder;
+    };
+
     std::map<SqlQueryHolder*, PendingBotLogin> m_pendingBotLogins;
+    std::mutex m_pendingBotLoginsLock;
+    std::vector<CompletedBotLogin> m_completedBotLogins;
+    std::mutex m_completedBotLoginsLock;
+
+    void ResetRandomBotChallengeState(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        static const uint32 challengeSpells[] =
+        {
+            SPELL_SLOW_AND_STEADY,
+            SPELL_EXHAUSTION_MODE,
+            SPELL_WAR_MODE,
+            SPELL_HARDCORE,
+            SPELL_VARGANT_MODE,
+            SPELL_BOARING_MODE
+        };
+
+        bot->SetHardcoreStatus(HARDCORE_MODE_STATUS_NONE);
+
+        for (uint32 spellId : challengeSpells)
+        {
+            if (bot->HasAura(spellId))
+                bot->RemoveAurasDueToSpell(spellId);
+
+            if (bot->HasSpell(spellId))
+                bot->RemoveSpell(spellId, false, false, true);
+        }
+
+        CharacterDatabase.DirectPExecute("UPDATE `characters` SET `mortality_status` = 0 WHERE `guid` = %u", bot->GetGUIDLow());
+        CharacterDatabase.DirectPExecute("DELETE FROM `character_spell` WHERE `guid` = %u AND `spell` IN (50000, 50004, 50008, 50001, 50014, 50071)", bot->GetGUIDLow());
+        CharacterDatabase.DirectPExecute("DELETE FROM `character_aura` WHERE `guid` = %u AND `spell` IN (50000, 50004, 50008, 50001, 50014, 50071)", bot->GetGUIDLow());
+        CharacterDatabase.DirectPExecute("DELETE FROM `character_aura_suspended` WHERE `guid` = %u AND `spell` IN (50000, 50004, 50008, 50001, 50014, 50071)", bot->GetGUIDLow());
+    }
 }
 
 void PlayerbotHolder::AddPlayerBot(uint32 guidLow, uint32 masterAccountId)
@@ -107,7 +149,12 @@ void PlayerbotHolder::AddPlayerBot(uint32 guidLow, uint32 masterAccountId)
             // Near-teleport ACK uses MSG_MOVE_TELEPORT_ACK; less common but cover it.
             WorldPacket p(MSG_MOVE_TELEPORT_ACK, 8 + 4 + 4);
             p << ghost->GetObjectGuid();
-            p << uint32(0);
+            uint32 teleportCounter = 0;
+            if (PlayerbotAI* ai = ghost->GetPlayerbotAI())
+                teleportCounter = ai->GetPendingTeleportAckCounter();
+            if (!teleportCounter && ghost->GetMovementCounter() > 0)
+                teleportCounter = ghost->GetMovementCounter() - 1;
+            p << teleportCounter;
             p << uint32(time(0));
             ghost->GetSession()->HandleMoveTeleportAckOpcode(p);
         }
@@ -142,7 +189,10 @@ void PlayerbotHolder::AddPlayerBot(uint32 guidLow, uint32 masterAccountId)
         return;
     }
 
-    m_pendingBotLogins[holder] = { botGuid, masterAccountId };
+    {
+        std::lock_guard<std::mutex> guard(m_pendingBotLoginsLock);
+        m_pendingBotLogins[holder] = { botGuid, masterAccountId };
+    }
 
     CharacterDatabase.DelayQueryHolder(this, &PlayerbotHolder::HandlePlayerBotLoginCallback, holder);
 }
@@ -163,15 +213,27 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* /*dummy*/, SqlQu
     if (!holder)
         return;
 
-    auto it = m_pendingBotLogins.find(holder);
-    if (it == m_pendingBotLogins.end())
     {
-        // Not one of ours (likely a derived class's holder). Defensive — nothing to do.
-        return;
-    }
+        std::lock_guard<std::mutex> guard(m_pendingBotLoginsLock);
+        auto it = m_pendingBotLogins.find(holder);
+        if (it == m_pendingBotLogins.end())
+        {
+            // Not one of ours (likely a derived class's holder). Defensive — nothing to do.
+            return;
+        }
 
-    PendingBotLogin info = it->second;
-    m_pendingBotLogins.erase(it);
+        PendingBotLogin info = it->second;
+        m_pendingBotLogins.erase(it);
+
+        std::lock_guard<std::mutex> completedGuard(m_completedBotLoginsLock);
+        m_completedBotLogins.push_back({this, info, holder});
+    }
+}
+
+void PlayerbotHolder::FinalizePlayerBotLogin(SqlQueryHolder* holder, ObjectGuid botGuid)
+{
+    if (!holder)
+        return;
 
     LoginQueryHolder* lqh = static_cast<LoginQueryHolder*>(holder);
 
@@ -210,7 +272,7 @@ void PlayerbotHolder::HandlePlayerBotLoginCallback(QueryResult* /*dummy*/, SqlQu
     if (!bot || !bot->IsInWorld())
     {
         sLog.outError("[PlayerBots] HandlePlayerBotLoginCallback: bot %u failed to enter world",
-                      info.botGuid.GetCounter());
+                      botGuid.GetCounter());
         // botSession leaks here — but only on failure; LogoutPlayerBot would do the cleanup
         // in the success path normally. Acceptable for smoke testing; fix if needed.
         return;
@@ -318,6 +380,18 @@ void PlayerbotHolder::MovePlayerBot(uint32 guid, PlayerbotHolder* newHolder)
 
 void PlayerbotHolder::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
+    std::vector<CompletedBotLogin> completedBotLogins;
+    {
+        std::lock_guard<std::mutex> guard(m_completedBotLoginsLock);
+        completedBotLogins.swap(m_completedBotLogins);
+    }
+
+    for (const CompletedBotLogin& completed : completedBotLogins)
+    {
+        if (completed.owner)
+            completed.owner->FinalizePlayerBotLogin(completed.holder, completed.info.botGuid);
+    }
+
 #ifdef GenerateBotTests
     UpdatePendingTests(elapsed);
 #endif
@@ -325,8 +399,20 @@ void PlayerbotHolder::UpdateAIInternal(uint32 elapsed, bool minimal)
 
 void PlayerbotHolder::UpdateSessions(uint32 elapsed)
 {
+    const uint32 updateStart = WorldTimer::getMSTime();
+    uint32 botCount = 0;
+    uint32 teleportAckCount = 0;
+    uint32 packetUpdateCount = 0;
+    uint32 ghostRecoveryCount = 0;
+    uint32 logoutCount = 0;
+    uint32 teleportAckTime = 0;
+    uint32 packetUpdateTime = 0;
+    uint32 ghostRecoveryTime = 0;
+    uint32 logoutTime = 0;
+
     ForEachPlayerbot([&](Player* bot)
     {
+        ++botCount;
         // Per-iteration diagnostic snapshot. We only emit it for "interesting"
         // states (mid-teleport, ghost, logout-pending) to keep log volume sane —
         // a healthy in-world bot looks identical every tick. If a bot is stuck
@@ -352,11 +438,17 @@ void PlayerbotHolder::UpdateSessions(uint32 elapsed)
 
         if (bot->GetPlayerbotAI() && bot->IsBeingTeleported())
         {
+            const uint32 branchStart = WorldTimer::getMSTime();
             bot->GetPlayerbotAI()->HandleTeleportAck();
+            teleportAckTime += WorldTimer::getMSTimeDiffToNow(branchStart);
+            ++teleportAckCount;
         }
         else if (bot->IsInWorld())
         {
+            const uint32 branchStart = WorldTimer::getMSTime();
             bot->GetSession()->HandleBotPackets();
+            packetUpdateTime += WorldTimer::getMSTimeDiffToNow(branchStart);
+            ++packetUpdateCount;
         }
         else
         {
@@ -374,20 +466,36 @@ void PlayerbotHolder::UpdateSessions(uint32 elapsed)
             // *somewhere* in-world. Better than ghost-state forever.
             if (bot->GetPlayerbotAI())
             {
+                const uint32 branchStart = WorldTimer::getMSTime();
                 SC_LOG("UpdateSessions GHOST RECOVERY bot=%s guid=%u — driving "
                        "TeleportToHomebind to break out of limbo",
                        bot->GetName(), bot->GetGUIDLow());
                 bot->TeleportToHomebind();
+                ghostRecoveryTime += WorldTimer::getMSTimeDiffToNow(branchStart);
+                ++ghostRecoveryCount;
             }
         }
 
         if (bot->GetPlayerbotAI() && bot->GetPlayerbotAI()->GetShouldLogOut() && !bot->IsStunnedByLogout() && !bot->GetSession()->isLogingOut())
         {
+            const uint32 branchStart = WorldTimer::getMSTime();
             LogoutPlayerBot(bot->GetObjectGuid().GetRawValue());
+            logoutTime += WorldTimer::getMSTimeDiffToNow(branchStart);
+            ++logoutCount;
         }
     });
 
     Cleanup();
+
+    const uint32 updateTime = WorldTimer::getMSTimeDiffToNow(updateStart);
+    if (sWorld.getConfig(CONFIG_UINT32_PERFLOG_SLOW_SESSIONS_UPDATE) &&
+        updateTime > sWorld.getConfig(CONFIG_UINT32_PERFLOG_SLOW_SESSIONS_UPDATE))
+    {
+        sLog.out(LOG_PERFORMANCE,
+            "Playerbot sessions: %ums [bots %u|teleAck %u/%ums|botPackets %u/%ums|ghostRecovery %u/%ums|logout %u/%ums]",
+            updateTime, botCount, teleportAckCount, teleportAckTime, packetUpdateCount, packetUpdateTime,
+            ghostRecoveryCount, ghostRecoveryTime, logoutCount, logoutTime);
+    }
 }
 
 void PlayerbotHolder::Cleanup()
@@ -600,6 +708,10 @@ Player* PlayerbotHolder::GetPlayerBot(uint32 playerGuid) const
 
 void PlayerbotHolder::JoinChatChannels(Player* bot)
 {
+    WorldSession* session = bot ? bot->GetSession() : nullptr;
+    if (!session || session->GetSocket() == nullptr)
+        return;
+
     // bots join World chat if not solo oriented
     if (bot->GetLevel() >= 10 && sRandomPlayerbotMgr.IsFreeBot(bot) && bot->GetPlayerbotAI() && bot->GetPlayerbotAI()->GetGrouperType() != GrouperType::SOLO)
     {
@@ -611,7 +723,7 @@ void PlayerbotHolder::JoinChatChannels(Player* bot)
 #endif
         pkt << std::string("World");
         pkt << ""; // Pass
-        bot->GetSession()->HandleJoinChannelOpcode(pkt);
+        session->HandleJoinChannelOpcode(pkt);
     }
     // join standard channels
     uint8 locale = BroadcastHelper::GetLocale();
@@ -699,6 +811,26 @@ void PlayerbotHolder::OnBotLogin(Player * const bot)
 	    OnBotLoginInternal(bot);
 
     playerBots[bot->GetGUIDLow()] = bot;
+
+    if (sRandomPlayerbotMgr.IsRandomBot(bot))
+    {
+        ResetRandomBotChallengeState(bot);
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "login"
+                << ",hardcoreStatus=" << static_cast<uint32>(bot->GetHardcoreStatus())
+                << ",hcSpell=" << (bot->HasSpell(SPELL_HARDCORE) ? 1 : 0)
+                << ",hcChallenge=" << (bot->HasChallenge(CHALLENGE_HARDCORE) ? 1 : 0)
+                << ",slow=" << (bot->HasChallenge(CHALLENGE_SLOW_AND_STEADY) ? 1 : 0)
+                << ",exhaustion=" << (bot->HasChallenge(CHALLENGE_EXHAUSTION_MODE) ? 1 : 0)
+                << ",war=" << (bot->HasChallenge(CHALLENGE_WAR_MODE) ? 1 : 0)
+                << ",vagrant=" << (bot->HasChallenge(CHALLENGE_VAGRANT_MODE) ? 1 : 0)
+                << ",boaring=" << (bot->HasChallenge(CHALLENGE_BOARING_MODE) ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "RandomBotChallengeReset", std::to_string(bot->GetGUIDLow()), out.str());
+        }
+    }
 
     Player* master = ai->GetMaster();
     if (!master && sPlayerbotAIConfig.IsFreeAltBot(bot))
@@ -1205,6 +1337,7 @@ PlayerbotMgr::~PlayerbotMgr()
 void PlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
     SetAIInternalUpdateDelay(sPlayerbotAIConfig.reactDelay);
+    PlayerbotHolder::UpdateAIInternal(elapsed, minimal);
     CheckTellErrors(elapsed);
 
     // Tick our bots' sessions so any queued bot-only handling fires per

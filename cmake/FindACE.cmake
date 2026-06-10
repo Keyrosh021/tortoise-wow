@@ -33,8 +33,11 @@ if (UNIX)
       ace ACE
     PATHS
       /usr/lib
+      /usr/lib/x86_64-linux-gnu
+      /usr/lib64
       /usr/lib/ace
       /usr/local/lib
+      /usr/local/lib64
       /usr/local/lib/ace
       /usr/local/ace/lib
       ${ACE_ROOT}
@@ -60,6 +63,8 @@ if (WIN32)
     NAMES
       ace ACE ACEd
     PATHS
+      /usr/lib/x86_64-linux-gnu
+      /usr/lib64
       ${ACE_ROOT}
       ${ACE_ROOT}/lib
       $ENV{ACE_ROOT}/lib

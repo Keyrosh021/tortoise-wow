@@ -5,6 +5,8 @@
 #include "playerbot/strategy/generic/CombatStrategy.h"
 #include "playerbot/strategy/values/PossibleAttackTargetsValue.h"
 #include "playerbot/strategy/values/Formations.h"
+#include <mutex>
+#include <unordered_map>
 
 namespace ai
 {
@@ -18,6 +20,34 @@ namespace ai
             Unit* target = AI_VALUE(Unit*, "current target");
             if (target)
             {
+                AiObjectContext* context = ai->GetAiObjectContext();
+                const bool hasManaBar = context && context->GetValue<bool>("has mana", "self target")->Get();
+                const uint8 manaPct = (context && hasManaBar) ? context->GetValue<uint8>("mana", "self target")->Get() : 0;
+                const bool isCasterStyleRanged = ai->IsRanged(bot) && bot->getClass() != CLASS_HUNTER;
+
+                if (isCasterStyleRanged && hasManaBar && manaPct > sPlayerbotAIConfig.lowMana)
+                {
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                    {
+                        static std::mutex s_closeSpellSuppressMutex;
+                        static std::unordered_map<uint32, time_t> s_nextCloseSpellSuppressLog;
+                        time_t now = time(0);
+                        std::lock_guard<std::mutex> guard(s_closeSpellSuppressMutex);
+                        time_t& nextLog = s_nextCloseSpellSuppressLog[bot->GetGUIDLow()];
+                        if (nextLog <= now)
+                        {
+                            std::ostringstream out;
+                            out << "target=" << target->GetName()
+                                << " mana=" << static_cast<uint32>(manaPct)
+                                << " ranged=1 casterRanged=1";
+                            sPlayerbotAIConfig.logEvent(ai, "EnemyTooCloseSuppressed", std::to_string(target->GetGUIDLow()), out.str());
+                            nextLog = now + 10;
+                        }
+                    }
+
+                    return false;
+                }
+
                 if (ai->HasStrategy("follow", BotState::BOT_STATE_COMBAT) ||
                     ai->HasStrategy("guard", BotState::BOT_STATE_COMBAT) ||
                     ai->HasStrategy("wander", BotState::BOT_STATE_COMBAT))

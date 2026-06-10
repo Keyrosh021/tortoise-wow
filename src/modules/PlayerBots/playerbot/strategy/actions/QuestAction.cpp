@@ -6,6 +6,23 @@
 
 using namespace ai;
 
+namespace
+{
+    bool IsBotBlockedQuest(Quest const* quest)
+    {
+        if (!quest)
+            return false;
+
+        if (quest->GetQuestId() == 80388) // "Stay Awhile and Listen..." enables hardcore mode.
+            return true;
+
+        if (quest->HasSpecialFlag(QUEST_SPECIAL_FLAG_HARDCORE_ONLY))
+            return true;
+
+        return false;
+    }
+}
+
 bool QuestAction::Execute(Event& event)
 {
     ObjectGuid guid = event.getObject();
@@ -188,6 +205,12 @@ bool QuestAction::ProcessQuests(WorldObject* questGiver)
             continue;
         }
 
+        if (ShouldSkipQuestForBot(quest))
+        {
+            sPlayerbotAIConfig.logEvent(ai, "ChallengeQuestSkipped", quest->GetTitle(), std::to_string(quest->GetQuestId()));
+            continue;
+        }
+
         hasAccept |= ProcessQuest(GetMaster(), quest, questGiver);
     }
 
@@ -196,6 +219,12 @@ bool QuestAction::ProcessQuests(WorldObject* questGiver)
 
 bool QuestAction::AcceptQuest(Player* requester, Quest const* quest, uint64 questGiver)
 {
+    if (ShouldSkipQuestForBot(quest))
+    {
+        sPlayerbotAIConfig.logEvent(ai, "ChallengeQuestSkipped", quest ? quest->GetTitle() : "unknown", quest ? std::to_string(quest->GetQuestId()) : "0");
+        return false;
+    }
+
     bool success = false;
     const uint32 questId = quest->GetQuestId();
 
@@ -254,6 +283,11 @@ bool QuestAction::AcceptQuest(Player* requester, Quest const* quest, uint64 ques
         ai->TellPlayer(requester, outputMessage, PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL, false);
 
     return success;
+}
+
+bool QuestAction::ShouldSkipQuestForBot(Quest const* quest) const
+{
+    return IsBotBlockedQuest(quest);
 }
 
 /*

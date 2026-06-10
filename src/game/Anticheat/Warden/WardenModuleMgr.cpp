@@ -60,6 +60,9 @@ WardenModuleMgr::WardenModuleMgr()
 
 void WardenModuleMgr::LoadWardenModules()
 {
+    _winModules.clear();
+    _macModules.clear();
+
     auto const moduleDir = sAnticheatConfig.GetWardenModuleDirectory();
     auto const modules = GetModuleNames(moduleDir);
 
@@ -82,6 +85,12 @@ void WardenModuleMgr::LoadWardenModules()
             continue;
         }
     }
+
+    if (_winModules.empty())
+        sLog.outError("[Anticheat] No Windows Warden modules loaded from %s", moduleDir.c_str());
+
+    if (_macModules.empty())
+        sLog.outError("[Anticheat] No Mac Warden modules loaded from %s", moduleDir.c_str());
 }
 
 const WardenModule *WardenModuleMgr::GetWindowsModule() const

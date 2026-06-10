@@ -9,6 +9,7 @@
 #include "playerbot/strategy/actions/ChooseTargetActions.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "Formulas.h"
+#include <iomanip>
 
 using namespace ai;
 
@@ -65,11 +66,79 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
     float distance = 0;
     Unit* result = NULL;
+    ObjectGuid resultGuid;
+    float fallbackDistance = 0;
+    Unit* fallbackResult = NULL;
+    ObjectGuid fallbackGuid;
 
     bool travelTargetWorking = AI_VALUE(bool, "travel target working");
     bool travelTargetTraveling = AI_VALUE(bool, "travel target traveling");
     TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
-    bool isGrindTravelDest = travelTarget && typeid(travelTarget->GetDestination()) == typeid(GrindTravelDestination);
+    TravelDestination* travelDestination = travelTarget ? travelTarget->GetDestination() : nullptr;
+    bool isGrindTravelDest = travelDestination && dynamic_cast<GrindTravelDestination*>(travelDestination);
+    bool hasNullTravelDest = travelDestination && dynamic_cast<NullTravelDestination*>(travelDestination);
+    const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
+    TravelStatus travelStatus = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+    const bool hasActiveNonGrindTravelTarget =
+        travelTarget &&
+        travelStatus != TravelStatus::TRAVEL_STATUS_NONE &&
+        travelStatus != TravelStatus::TRAVEL_STATUS_COOLDOWN &&
+        travelStatus != TravelStatus::TRAVEL_STATUS_EXPIRED &&
+        !isGrindTravelDest &&
+        !hasNullTravelDest;
+    bool hasQuestObjectivesPending = false;
+    bool hasQuestTurnInsPending = false;
+    bool hasUnrewardedQuestStatus = false;
+    for (const auto& questEntry : bot->getQuestStatusMap())
+    {
+        uint32 questId = questEntry.first;
+        QuestStatus questStatus = bot->GetQuestStatus(questId);
+        bool rewarded = bot->GetQuestRewardStatus(questId);
+        if (!rewarded)
+            hasUnrewardedQuestStatus = true;
+
+        if (questStatus == QUEST_STATUS_INCOMPLETE)
+            hasQuestObjectivesPending = true;
+        else if (questStatus == QUEST_STATUS_COMPLETE && !rewarded)
+            hasQuestTurnInsPending = true;
+
+        if (hasQuestObjectivesPending && hasQuestTurnInsPending)
+            break;
+    }
+
+    // Quest pickup routing is owned by the travel/quest actions. Do not scan
+    // quest giver maps from grind target selection; this runs in the combat hot
+    // path and can observe stale world-position data during bot churn. Still,
+    // low-level autonomous bots with no live quest work should not settle into
+    // starter-zone grinding; keep them committed to finding a quest giver.
+    bool hasQuestPickupsPending =
+        autonomousRandomBot &&
+        bot->GetLevel() <= 12 &&
+        !hasUnrewardedQuestStatus &&
+        !hasQuestObjectivesPending &&
+        !hasQuestTurnInsPending;
+
+    const bool questPickupOnlyPending =
+        hasQuestPickupsPending && !hasQuestObjectivesPending && !hasQuestTurnInsPending;
+    const bool hasQueuedQuestWork = hasQuestObjectivesPending || hasQuestTurnInsPending;
+    const bool mustCommitToQuestTravel =
+        autonomousRandomBot &&
+        (hasQuestPickupsPending || hasQuestTurnInsPending || hasActiveNonGrindTravelTarget);
+
+    struct RejectStats
+    {
+        uint32 z = 0;
+        uint32 free = 0;
+        uint32 farMaster = 0;
+        uint32 highLevel = 0;
+        uint32 elite = 0;
+        uint32 invalid = 0;
+        uint32 impossible = 0;
+        uint32 critter = 0;
+        uint32 notQuest = 0;
+        uint32 noXp = 0;
+        uint32 crowded = 0;
+    } rejectStats;
 
     struct MemberInfo {
         Player* player;
@@ -152,8 +221,24 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
         }
 #endif
 
-        if (abs(bot->GetPositionZ() - unit->GetPositionZ()) > sPlayerbotAIConfig.spellDistance)
+        const float zDistance = std::abs(bot->GetPositionZ() - unit->GetPositionZ());
+        float maxZDistance = sPlayerbotAIConfig.spellDistance;
+
+        // Starter-zone terrain regularly puts valid nearby mobs a few extra yards above/below
+        // autonomous random bots. Let them tolerate a bit more vertical variance so they do not
+        // deadlock on a single visible target.
+        if (autonomousRandomBot)
         {
+            maxZDistance = std::max(maxZDistance, 12.0f);
+
+            const float planarDistance = sServerFacade.GetDistance2d(bot, unit);
+            if (planarDistance <= std::max(12.0f, sPlayerbotAIConfig.grindDistance * 0.5f))
+                maxZDistance = std::max(maxZDistance, 18.0f);
+        }
+
+        if (zDistance > maxZDistance)
+        {
+            ++rejectStats.z;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (to far above/below).");
             continue;
@@ -161,6 +246,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
         if (!bot->InBattleGround() && !CanFreeMoveValue::CanFreeTarget(ai, GuidPosition(unit))) //Do not grind mobs far away from master.
         {
+            ++rejectStats.free;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (out of free range).");
             continue;
@@ -171,6 +257,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
              ai->HasStrategy("wander", BotState::BOT_STATE_NON_COMBAT)) &&
             sServerFacade.GetDistance2d(master, unit) > sPlayerbotAIConfig.proximityDistance)
         {
+            ++rejectStats.farMaster;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (far from master).");
             continue;
@@ -178,6 +265,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
         if (!bot->InBattleGround() && (int)unit->GetLevel() - (int)bot->GetLevel() > 4 && !unit->GetObjectGuid().IsPlayer())
         {
+            ++rejectStats.highLevel;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (" + std::to_string((int)unit->GetLevel() - (int)bot->GetLevel()) + " levels above bot).");
             continue;
@@ -187,6 +275,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
         if (creature && creature->GetCreatureInfo() && creature->GetCreatureInfo()->Rank > CREATURE_ELITE_NORMAL && !AI_VALUE(bool, "can fight elite") &&
             !AI_VALUE2(bool, "trigger active", "in vehicle"))
         {
+            ++rejectStats.elite;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (can not fight elites currently).");
             continue;
@@ -194,6 +283,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
         if (!AttackersValue::IsValid(unit, bot, nullptr, false, false))
         {
+            ++rejectStats.invalid;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (is pet or evading/unkillable).");
             continue;
@@ -201,6 +291,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
         if (!PossibleAttackTargetsValue::IsPossibleTarget(unit, bot, sPlayerbotAIConfig.sightDistance, false))
         {
+            ++rejectStats.impossible;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (tapped, cced or out of range).");
             continue;
@@ -208,6 +299,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
         if (creature && creature->IsCritter() && urand(0, 10))
         {
+            ++rejectStats.critter;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (ignore critters).");
             continue;
@@ -233,37 +325,79 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
         if (entry && !needForQuest)
         {
-            if (urand(0, 100) < 99 && travelTargetWorking && !isGrindTravelDest)
+            if (autonomousRandomBot && mustCommitToQuestTravel)
             {
+                ++rejectStats.notQuest;
+                if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
+                    ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (must commit to quest travel before grind).");
+
+                continue;
+            }
+            else if (autonomousRandomBot && hasQueuedQuestWork)
+            {
+                ++rejectStats.notQuest;
+                if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
+                    ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (queued quest work takes priority).");
+
+                continue;
+            }
+            else if (hasActiveNonGrindTravelTarget)
+            {
+                ++rejectStats.notQuest;
                 if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                     ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (not needed for active quest).");
 
                 continue;
             }
-            else if (creature && !MaNGOS::XP::Gain(bot, creature) && urand(0, 50))
+            else if (urand(0, 100) < 99 && travelTargetWorking && !isGrindTravelDest)
             {
+                ++rejectStats.notQuest;
                 if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
-                    if ((AI_VALUE(bool, "travel target traveling") && typeid(AI_VALUE(TravelTarget*, "travel target")->GetDestination()) != typeid(GrindTravelDestination)))
-                        ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (not xp and not needed for quest).");
+                    ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (not needed for active quest).");
 
                 continue;
+            }
+            else if (creature && !MaNGOS::XP::Gain(bot, creature))
+            {
+                if (!autonomousRandomBot && urand(0, 50))
+                {
+                    ++rejectStats.noXp;
+                    if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
+                        if (travelTargetTraveling && !isGrindTravelDest)
+                            ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (not xp and not needed for quest).");
+
+                    continue;
+                }
+
+                // For autonomous random bots, keep activity high: prefer better mobs,
+                // but still allow low/zero-xp targets as a fallback instead of idling.
+                ++rejectStats.noXp;
+                newdistance += autonomousRandomBot ? 6.0f : 12.0f;
             }
             else if (urand(0, 100) < 75)
             {
                 if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
-                    if (AI_VALUE(bool, "travel target traveling") && typeid(AI_VALUE(TravelTarget*, "travel target")->GetDestination()) != typeid(GrindTravelDestination))
+                    if (travelTargetTraveling && !isGrindTravelDest)
                         ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " increased distance (not needed for quest).");
 
                 newdistance += 20;
             }
+
+            // Starter areas can produce a stable but unhealthy local-farm loop where autonomous
+            // bots keep choosing the closest non-quest mob and never commit to their queued
+            // travel target. Favor spreading out by penalizing short-hop fallback grinding.
+            if (autonomousRandomBot && !travelTargetTraveling && newdistance < 12.0f)
+                newdistance += (12.0f - newdistance) * 2.5f;
         }
 
-        if (!bot->InBattleGround() && GetTargetingPlayerCount(unit) > assistCount)
+        int targetingPlayerCount = GetTargetingPlayerCount(unit);
+        if (!bot->InBattleGround() && targetingPlayerCount > assistCount)
         {
+            ++rejectStats.crowded;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
-                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " increased distance (" + std::to_string(GetTargetingPlayerCount(unit)) + " bots already targeting).");
+                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " increased distance (" + std::to_string(targetingPlayerCount) + " bots already targeting).");
 
-            newdistance =+ GetTargetingPlayerCount(unit) * 5;
+            newdistance += targetingPlayerCount * (autonomousRandomBot ? 12.0f : 5.0f);
         }
 
         if (group)
@@ -280,6 +414,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
                 {
                     distance = newdistance;
                     result = unit;
+                    resultGuid = unit->GetObjectGuid();
                 }
             }
         }
@@ -289,9 +424,30 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             {
                 distance = newdistance;
                 result = unit;
+                resultGuid = unit->GetObjectGuid();
             }
         }
+
+        if (!fallbackResult || newdistance < fallbackDistance)
+        {
+            fallbackDistance = newdistance;
+            fallbackResult = unit;
+            fallbackGuid = unit->GetObjectGuid();
+        }
     }
+
+    if (!result && fallbackResult && autonomousRandomBot)
+    {
+        result = ai->GetUnit(fallbackGuid);
+        resultGuid = fallbackGuid;
+        distance = fallbackDistance;
+    }
+
+    if (resultGuid)
+        result = ai->GetUnit(resultGuid);
+
+    if (result && (!result->IsInWorld() || result->GetMapId() != bot->GetMapId() || !sServerFacade.IsAlive(result)))
+        result = nullptr;
 
     if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
     {
@@ -302,6 +458,55 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
         else
         {
             ai->TellPlayer(GetMaster(), "No grind target found.");
+        }
+    }
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "attackers=" << attackers.size()
+            << " possible=" << targets.size()
+            << " assistCount=" << assistCount;
+
+        if (result)
+        {
+            out << " target=" << result->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, result)
+                << " targetedBy=" << GetTargetingPlayerCount(result)
+                << " questPickups=" << (hasQuestPickupsPending ? 1 : 0)
+                << " questTurnIns=" << (hasQuestTurnInsPending ? 1 : 0)
+                << " questObjectives=" << (hasQuestObjectivesPending ? 1 : 0)
+                << " questPickupOnly=" << (questPickupOnlyPending ? 1 : 0)
+                << " mustCommitQuestTravel=" << (mustCommitToQuestTravel ? 1 : 0)
+                << " queuedQuestWork=" << (hasQueuedQuestWork ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "GrindTargetSelect", std::to_string(result->GetGUIDLow()), out.str());
+        }
+        else
+        {
+            out << " rejectZ=" << rejectStats.z
+                << " rejectFree=" << rejectStats.free
+                << " rejectFarMaster=" << rejectStats.farMaster
+                << " rejectHighLevel=" << rejectStats.highLevel
+                << " rejectElite=" << rejectStats.elite
+                << " rejectInvalid=" << rejectStats.invalid
+                << " rejectImpossible=" << rejectStats.impossible
+                << " rejectCritter=" << rejectStats.critter
+                << " rejectNotQuest=" << rejectStats.notQuest
+                << " rejectNoXp=" << rejectStats.noXp
+                << " penalizedCrowded=" << rejectStats.crowded
+                << " travelStatus=" << static_cast<uint32>(travelStatus)
+                << " travelWorking=" << (travelTargetWorking ? 1 : 0)
+                << " travelTraveling=" << (travelTargetTraveling ? 1 : 0)
+                << " activeNonGrindTravel=" << (hasActiveNonGrindTravelTarget ? 1 : 0)
+                << " questPickups=" << (hasQuestPickupsPending ? 1 : 0)
+                << " questTurnIns=" << (hasQuestTurnInsPending ? 1 : 0)
+                << " questObjectives=" << (hasQuestObjectivesPending ? 1 : 0)
+                << " questPickupOnly=" << (questPickupOnlyPending ? 1 : 0)
+                << " mustCommitQuestTravel=" << (mustCommitToQuestTravel ? 1 : 0)
+                << " queuedQuestWork=" << (hasQueuedQuestWork ? 1 : 0)
+                << " nullTravel=" << (hasNullTravelDest ? 1 : 0)
+                << " grindDest=" << (isGrindTravelDest ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "GrindTargetSelectFailed", "none", out.str());
         }
     }
 
@@ -323,7 +528,14 @@ int GrindTargetValue::GetTargetingPlayerCount( Unit* unit )
             continue;
 
         PlayerbotAI* ai = member->GetPlayerbotAI();
-        if ((ai && *ai->GetAiObjectContext()->GetValue<Unit*>("current target") == unit) ||
+        Unit* currentTarget = nullptr;
+        if (ai && ai->GetAiObjectContext())
+        {
+            if (Value<Unit*>* value = dynamic_cast<Value<Unit*>*>(ai->GetAiObjectContext()->GetUntypedValue("current target")))
+                currentTarget = value->Get();
+        }
+
+        if ((ai && currentTarget == unit) ||
             (!ai && member->GetSelectionGuid() == unit->GetObjectGuid()))
             count++;
     }

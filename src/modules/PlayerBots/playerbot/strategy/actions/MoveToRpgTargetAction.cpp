@@ -11,6 +11,29 @@
 
 using namespace ai;
 
+namespace
+{
+    bool BuildRpgApproachPosition(Player* bot, WorldObject* wo, WorldPosition& movePos)
+    {
+        if (!bot || !wo)
+            return false;
+
+        const float baseAngle = wo->GetAngle(bot);
+        const uint32 seed = bot->GetGUIDLow() ^ wo->GetGUIDLow();
+        const float angleOffset = ((seed % 9) - 4) * (static_cast<float>(M_PI) / 10.0f);
+        const float distance = std::max(0.8f, std::min(2.25f, INTERACTION_DISTANCE * 0.75f));
+        const float angle = baseAngle + angleOffset;
+
+        movePos = WorldPosition(
+            wo->GetMapId(),
+            wo->GetPositionX() + std::cos(angle) * distance,
+            wo->GetPositionY() + std::sin(angle) * distance,
+            wo->GetPositionZ());
+
+        return true;
+    }
+}
+
 bool MoveToRpgTargetAction::Execute(Event& event)
 {
     GuidPosition guidP = AI_VALUE(GuidPosition, "rpg target");
@@ -127,37 +150,13 @@ bool MoveToRpgTargetAction::Execute(Event& event)
 
         ai->Poi(x, y, name);
     }
-	
-	if (sPlayerbotAIConfig.RandombotsWalkingRPG)
-        if (!bot->GetTerrain()->IsOutdoors(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()))
-            bot->m_movementInfo.AddMovementFlag(MOVEFLAG_WALK_MODE);
-
-    float angle;
-    float distance = 1.0f;
-    
-    if (bot->IsWithinLOS(x, y, z, true))
-    {
-        if (!unit || !unit->IsMoving())
-            angle = wo->GetAngle(bot) + (M_PI * irand(-25, 25) / 100.0); //Closest 45 degrees towards the target
-        else if (!unit->HasInArc(bot))
-            angle = wo->GetOrientation() + (M_PI * irand(-10, 10) / 100.0); //20 degrees infront of target (leading it's movement)
-        else
-            angle = wo->GetAngle(bot); //Current approuch angle.
-
-        if (guidP.sqDistance2d(bot) < INTERACTION_DISTANCE * INTERACTION_DISTANCE)
-            distance = sqrt(guidP.sqDistance2d(bot)); //Stay at this distance.
-        else if(unit || !urand(0, 5)) //Stay futher away from npc's and sometimes gameobjects (for large hitbox objects).
-            distance = frand(0.5, 1);
-        else
-            distance = frand(0, 0.5);
-    }
-    else
-        angle = 2 * M_PI * urand(0, 100) / 100.0; //A circle around the target.
-
-    x += cos(angle) * INTERACTION_DISTANCE * distance;
-    y += sin(angle) * INTERACTION_DISTANCE * distance;
+    // Never use special indoor RPG walk behavior for autonomous bots.
+    // It produces the unnatural slow crawl the user is seeing around buildings/NPC hubs.
+    bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_WALK_MODE);
+    bot->SetWalk(false, !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster());
 
     WorldPosition movePos(mapId, x, y, z);
+    BuildRpgApproachPosition(bot, wo, movePos);
     
     if (movePos.distance(bot) < sPlayerbotAIConfig.sightDistance)
     {
@@ -181,7 +180,7 @@ bool MoveToRpgTargetAction::Execute(Event& event)
             if (uint32 pauseTimer = creature->GetInteractionPauseTimer())
                 creature->GetMotionMaster()->PauseWaypoints(pauseTimer);
     }
-        couldMove = MoveTo(mapId, x, y, z, false, false);
+        couldMove = MoveTo(mapId, movePos.getX(), movePos.getY(), movePos.getZ(), false, false, false, false, false);
 
     if (!couldMove && movePos.distance(bot) > INTERACTION_DISTANCE)
     {
@@ -214,6 +213,9 @@ bool MoveToRpgTargetAction::Execute(Event& event)
             ai->TellPlayerNoFacing(GetMaster(), out);
         }
     }
+
+    if (couldMove)
+        WaitForReach(std::max<float>(movePos.distance(bot), 1.0f));
 
     return couldMove;
 }
@@ -260,5 +262,3 @@ bool MoveToRpgTargetAction::isUseful()
 
     return true;
 }
-
-

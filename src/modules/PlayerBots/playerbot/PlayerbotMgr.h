@@ -63,6 +63,8 @@ protected:
     virtual uint32 GetOrCreateAccount(Player* master, std::string& error);
     void Cleanup();   
 private:
+    void FinalizePlayerBotLogin(SqlQueryHolder* holder, ObjectGuid botGuid);
+
     typedef std::list<std::string> (PlayerbotHolder::*HolderCommandHandler)(Player* master, const std::string param, AccountTypes security);
     typedef std::string (PlayerbotHolder::*BotCommandHandler)(Player* bot, Player* master, const std::string param);
 

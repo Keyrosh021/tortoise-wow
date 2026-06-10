@@ -173,6 +173,7 @@ enum eConfigUInt32Values
     CONFIG_UINT32_DYN_RESPAWN_MIN_RESPAWN_TIME_INDOORS,
     CONFIG_UINT32_DYN_RESPAWN_AFFECT_RESPAWN_TIME_BELOW,
     CONFIG_UINT32_DYN_RESPAWN_AFFECT_LEVEL_BELOW,
+    CONFIG_UINT32_DYN_RESPAWN_CORPSE_CLONE_MAX,
     CONFIG_UINT32_MTCELLS_THREADS,
     CONFIG_UINT32_MTCELLS_SAFEDISTANCE,
     CONFIG_UINT32_MAPUPDATE_INSTANCED_UPDATE_THREADS,
@@ -910,6 +911,9 @@ class World
         void UpdatePlayerbotsTick(uint32 diff);
         // One-shot startup hook (called from World::SetInitialWorldSettings) — loads bot config + mgrs.
         void InitPlayerbotsAtStartup();
+        // Second-stage hook after player templates/cache are loaded.
+        void InitPlayerbotsAfterPlayerInfo();
+        bool m_pendingRandomBotAutoCreate = false;
         uint32 GetCurrentMSTime() const;
         // GetMaxDiff: cmangos exposes max diff for performance dashboard. Stub returns 0.
         uint32 GetMaxDiff() const { return 0; }

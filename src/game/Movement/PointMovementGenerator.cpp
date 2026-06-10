@@ -27,6 +27,7 @@
 #include "MoveSplineInit.h"
 #include "MoveSpline.h"
 #include "Anticheat.h"
+#include "Player.h"
 
 //----- Point Movement Generator
 template<class T>
@@ -52,6 +53,35 @@ void PointMovementGenerator<T>::Initialize(T& unit)
         init.SetCyclic();
     if (m_o > -7.0f)
         init.SetFacing(m_o);
+
+    if constexpr (std::is_same_v<T, Player>)
+    {
+        if (unit.GetPlayerbotAI())
+        {
+            const bool walkMode = (m_options & MOVE_WALK_MODE) != 0;
+            const bool runMode = (m_options & MOVE_RUN_MODE) != 0;
+            const bool lowSpeed = m_speed > 0.0f && m_speed < 2.5f;
+
+            if (walkMode || lowSpeed || !runMode)
+            {
+                sLog.outString(
+                    "[BotMoveInit] bot=%s id=%u opts=%u walk=%u run=%u fly=%u path=%u speed=%.2f dest=(%.2f,%.2f,%.2f) facing=%.2f",
+                    unit.GetName(),
+                    m_id,
+                    m_options,
+                    walkMode ? 1u : 0u,
+                    runMode ? 1u : 0u,
+                    (m_options & MOVE_FLY_MODE) ? 1u : 0u,
+                    (m_options & MOVE_PATHFINDING) ? 1u : 0u,
+                    m_speed,
+                    m_x,
+                    m_y,
+                    m_z,
+                    m_o);
+            }
+        }
+    }
+
     init.Launch();
 }
 

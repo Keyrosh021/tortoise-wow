@@ -22,7 +22,35 @@
 #endif
 #endif
 
+#include <cstdlib>
 #include <random>
+
+namespace
+{
+    void ResetRandomBotChallengeState(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        bot->SetHardcoreStatus(HARDCORE_MODE_STATUS_NONE);
+
+        static const uint32 challengeSpells[] =
+        {
+            SPELL_SLOW_AND_STEADY,
+            SPELL_EXHAUSTION_MODE,
+            SPELL_WAR_MODE,
+            SPELL_HARDCORE,
+            SPELL_VARGANT_MODE,
+            SPELL_BOARING_MODE
+        };
+
+        for (uint32 spellId : challengeSpells)
+        {
+            if (bot->HasSpell(spellId))
+                bot->RemoveSpell(spellId, false, false, true);
+        }
+    }
+}
 
 std::map<uint8, std::vector<uint8> > RandomPlayerbotFactory::availableRaces;
 
@@ -169,6 +197,7 @@ bool RandomPlayerbotFactory::isAvailableRole(uint8 cls, BotRoles role)
 uint8 RandomPlayerbotFactory::GetRandomClass(uint8 useRace, BotRoles role)
 {
     uint32 classProb[MAX_CLASSES] = { 0 };
+    uint32 totalProb = 0;
 
 
     for (uint32 race = 1; race < MAX_RACES; ++race)
@@ -185,7 +214,18 @@ uint8 RandomPlayerbotFactory::GetRandomClass(uint8 useRace, BotRoles role)
         }
     }
 
-    uint32 randomProb = urand(0, sPlayerbotAIConfig.classRaceProbabilityTotal);
+    for (uint32 cls = 1; cls < MAX_CLASSES; ++cls)
+    {
+        if (!isAvailableRole(cls, role))
+            continue;
+
+        totalProb += classProb[cls];
+    }
+
+    if (!totalProb)
+        return 1;
+
+    uint32 randomProb = urand(0, totalProb - 1);
 
     for (uint32 cls = 1; cls < MAX_CLASSES; ++cls)
     {
@@ -236,7 +276,10 @@ uint8 RandomPlayerbotFactory::GetRandomRace(uint8 cls, Team team)
         totalClassProb += sPlayerbotAIConfig.classRaceProbability[cls][race];
     }
 
-    uint32 randomProb = urand(0, totalClassProb);
+    if (!totalClassProb)
+        return !availableRaces[cls].empty() ? availableRaces[cls].front() : RACE_HUMAN;
+
+    uint32 randomProb = urand(0, totalClassProb - 1);
 
     for (uint32 race = 1; race < MAX_RACES; ++race)
     {
@@ -330,13 +373,14 @@ bool RandomPlayerbotFactory::CreateRandomBot(uint8 cls, uint8 inputRace)
 #endif
     }
 
-    uint8 skinColor = skinColors[urand(0, skinColors.size() - 1)];
-    std::pair<uint8,uint8> face = faces[urand(0, faces.size() - 1)];
-    std::pair<uint8,uint8> hair = hairs[urand(0, hairs.size() - 1)];
+    // This branch may ship without CharSections.dbc; fall back to default appearance values.
+    uint8 skinColor = skinColors.empty() ? 0 : skinColors[urand(0, skinColors.size() - 1)];
+    std::pair<uint8, uint8> face = faces.empty() ? std::make_pair(uint8(0), skinColor) : faces[urand(0, faces.size() - 1)];
+    std::pair<uint8, uint8> hair = hairs.empty() ? std::make_pair(uint8(0), uint8(0)) : hairs[urand(0, hairs.size() - 1)];
 
 	bool excludeCheck = (race == RACE_TAUREN) || (gender == GENDER_FEMALE && race != RACE_NIGHTELF && race != RACE_UNDEAD);
 #ifndef MANGOSBOT_TWO
-	uint8 facialHair = excludeCheck ? 0 : facialHairTypes[urand(0, facialHairTypes.size() - 1)];
+	uint8 facialHair = (excludeCheck || facialHairTypes.empty()) ? 0 : facialHairTypes[urand(0, facialHairTypes.size() - 1)];
 #else
 	uint8 facialHair = 0;
 #endif
@@ -381,6 +425,7 @@ bool RandomPlayerbotFactory::CreateRandomBot(uint8 cls, uint8 inputRace)
 
     player->setCinematic(2);
     player->SetAtLoginFlag(AT_LOGIN_NONE);
+    ResetRandomBotChallengeState(player);
     //player->SetSemaphoreTeleportFar(true); //Fake teleport to delay sql save
     //player->SaveToDB();
     //player->SetSemaphoreTeleportFar(false);
@@ -668,7 +713,7 @@ void RandomPlayerbotFactory::CreateRandomBots()
     CharacterDatabase.PExecute("DELETE FROM ai_playerbot_random_bots WHERE ai_playerbot_random_bots.event = 'temporary'");
 
     //Loop over randombot accounts that have no characters and delete them as well, to clean up after temporary bots.
-    auto temporaryAccounts = LoginDatabase.PQuery("SELECT id FROM account WHERE username like '%s%%' and id >= %u", sPlayerbotAIConfig.randomBotAccountPrefix.c_str(), sPlayerbotAIConfig.randomBotAccountCount);
+    auto temporaryAccounts = LoginDatabase.PQuery("SELECT id, username FROM account WHERE username like '%s%%'", sPlayerbotAIConfig.randomBotAccountPrefix.c_str());
 
     if (temporaryAccounts)
     {
@@ -677,6 +722,24 @@ void RandomPlayerbotFactory::CreateRandomBots()
         {
             Field* fields = temporaryAccounts->Fetch();
             uint32 accountId = fields[0].GetUInt32();
+            std::string accountName = fields[1].GetCppString();
+
+            std::string prefix = sPlayerbotAIConfig.randomBotAccountPrefix;
+            if (accountName.size() < prefix.size() || accountName.compare(0, prefix.size(), prefix) != 0)
+                continue;
+
+            const std::string suffix = accountName.substr(prefix.size());
+            if (suffix.empty())
+                continue;
+
+            char* endPtr = nullptr;
+            unsigned long suffixNumber = std::strtoul(suffix.c_str(), &endPtr, 10);
+            if (!endPtr || *endPtr != '\0')
+                continue;
+
+            if (suffixNumber < sPlayerbotAIConfig.randomBotAccountCount)
+                continue;
+
             sAccountMgr.GetCharactersCount(accountId);
 
             if (sAccountMgr.GetCharactersCount(accountId) == 0)
@@ -709,8 +772,6 @@ void RandomPlayerbotFactory::CreateRandomBots()
     int totalAccCount = sPlayerbotAIConfig.randomBotAccountCount;
     sLog.outString("Creating random bot accounts...");
 
-    std::vector<std::future<void>> account_creations;
-
     BarGoLink bar(totalAccCount);
     for (uint32 accountNumber = 0; accountNumber < sPlayerbotAIConfig.randomBotAccountCount; ++accountNumber)
     {
@@ -735,20 +796,19 @@ void RandomPlayerbotFactory::CreateRandomBots()
 
 #ifndef MANGOSBOT_ZERO
         uint8 max_expansion = MAX_EXPANSION;
-        account_creations.push_back(std::async([accountName, password, max_expansion] {sAccountMgr.CreateAccount(accountName, password, max_expansion); }));
+        AccountOpResult createResult = sAccountMgr.CreateAccount(accountName, password, max_expansion);
 #else
-        account_creations.push_back(std::async([accountName, password] {sAccountMgr.CreateAccount(accountName, password); }));
+        AccountOpResult createResult = sAccountMgr.CreateAccount(accountName, password);
 #endif
+
+        if (createResult != AOR_OK && createResult != AOR_NAME_ALREDY_EXIST)
+        {
+            sLog.outError("Failed to create random bot account %s (result=%u)", accountName.c_str(), uint32(createResult));
+            continue;
+        }
 
         sLog.outDebug("Account %s created for random bots", accountName.c_str());
         bar.step();
-    }
-
-    BarGoLink bar3(account_creations.size());
-    for (uint32 i = 0; i < account_creations.size(); i++)
-    {
-        bar3.step();
-        account_creations[i].wait();
     }
 
     //LoginDatabase.PExecute("UPDATE account SET expansion = '%u' where username like '%s%%'", 2, sPlayerbotAIConfig.randomBotAccountPrefix.c_str());
@@ -926,9 +986,11 @@ void RandomPlayerbotFactory::CreateRandomBots()
 #endif
                 {
                     uint8 rclss = factory.GetRandomClass();
-                    botsCreated++;
-                    factory.CreateRandomBot(rclss);
-                    bar1.step();
+                    if (factory.CreateRandomBot(rclss))
+                    {
+                        botsCreated++;
+                        bar1.step();
+                    }
                 }
             }
 	}
@@ -966,19 +1028,19 @@ void RandomPlayerbotFactory::CreateRandomBots()
         return;
     }
 
-    std::vector<std::future<void>> bot_creations;
+    std::vector<std::future<void>> save_tasks;
 
     BarGoLink bar2(sObjectAccessor.GetPlayers().size());
     for (auto pl : sObjectAccessor.GetPlayers())
     {
         Player* player = pl.second;
-        account_creations.push_back(std::async([player] {player->SaveToDB(); }));
+        save_tasks.push_back(std::async([player] {player->SaveToDB(); }));
     }
 
-    for (uint32 i = 0; i < account_creations.size(); i++)
+    for (uint32 i = 0; i < save_tasks.size(); i++)
     {
         bar2.step();
-        account_creations[i].wait();
+        save_tasks[i].wait();
     }
 
     std::vector<Player*> players;
@@ -994,6 +1056,10 @@ void RandomPlayerbotFactory::CreateRandomBots()
         delete player;
         delete session;
     }
+
+    // Refresh cache so later random-bot account/guid lookups see the newly created bots.
+    sObjectMgr.LoadPlayerCacheData();
+
     sLog.outString("%zu random bot accounts with %d characters available", sPlayerbotAIConfig.randomBotAccounts.size(), totalRandomBotChars+botsCreated);
 }
 
@@ -1402,4 +1468,3 @@ std::string RandomPlayerbotFactory::CreateRandomArenaTeamName()
     return aname;
 }
 #endif
-

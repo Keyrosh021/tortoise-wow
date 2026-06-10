@@ -45,7 +45,15 @@ void PossibleTargetsValue::FindUnits(std::list<Unit*> &targets)
 
 bool PossibleTargetsValue::AcceptUnit(Unit* unit)
 {
-    return IsValid(unit, bot, ignoreLos);
+    if (!IsValid(unit, bot, ignoreLos))
+        return false;
+
+    // Keep the generic hostile scan aligned with later grind selection so we do not
+    // advertise "possible" targets that are already tapped/cced/otherwise unusable.
+    if (!PossibleAttackTargetsValue::IsPossibleTarget(unit, bot, range, false))
+        return false;
+
+    return true;
 }
 
 void PossibleTargetsValue::FindPossibleTargets(Player* player, std::list<Unit*>& targets, float range)

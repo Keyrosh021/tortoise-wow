@@ -39,7 +39,7 @@ bool ReachAreaTriggerAction::Execute(Event& event)
     }
 
     MotionMaster &mm = *bot->GetMotionMaster();
-	mm.MovePoint(atEntry->mapid, atEntry->x, atEntry->y, atEntry->z, FORCED_MOVEMENT_RUN);
+	mm.MovePoint(atEntry->mapid, atEntry->x, atEntry->y, atEntry->z, MOVE_RUN_MODE, 0.0f, -10.0f);
     const float distance = sqrt(bot->GetDistance(atEntry->x, atEntry->y, atEntry->z));
     const float duration = 1000.0f * distance / bot->GetSpeed(MOVE_RUN) + sPlayerbotAIConfig.reactDelay;
     ai->TellError(requester, "Wait for me");

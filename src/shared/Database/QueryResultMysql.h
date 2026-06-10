@@ -29,6 +29,7 @@
 #ifdef WIN32
 #include <winsock2.h>
 #endif
+#include <plugin_auth_common.h>
 #include <mysql.h>
 
 class QueryResultMysql : public QueryResult

@@ -419,6 +419,7 @@ namespace ai
 		TravelMgr() {};
         ~TravelMgr() { Clear(); };
 		void LoadQuestTravelTable();
+		void ReloadQuestTravelTable() { Clear(); LoadQuestTravelTable(); }
 
 		void GetPopulatedGrids();
 		void GetPopulatedGrids(uint32 mapId);
@@ -505,4 +506,3 @@ namespace ai
 }
 
 #define sTravelMgr MaNGOS::Singleton<TravelMgr>::Instance()
-

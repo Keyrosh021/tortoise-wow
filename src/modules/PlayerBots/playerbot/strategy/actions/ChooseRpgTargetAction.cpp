@@ -15,6 +15,23 @@
 
 using namespace ai;
 
+namespace
+{
+    bool IsBlockedChallengeNpc(Creature* creature)
+    {
+        if (!creature)
+            return false;
+
+        if (creature->GetName() == "Mysterious Stranger")
+            return true;
+
+        if (creature->HasQuest(80388))
+            return true;
+
+        return false;
+    }
+}
+
 bool ChooseRpgTargetAction::HasSameTarget(ObjectGuid guid, uint32 max, std::list<ObjectGuid>& nearGuids)
 {
     if (ai->HasRealPlayerMaster())
@@ -200,6 +217,12 @@ std::unordered_map<ObjectGuid, float> ChooseRpgTargetAction::GetTargets(Player* 
                     SkipRpgTarget("Player is group member and I am leader of same group.");
             }
         }
+        else if (guidP.IsCreature())
+        {
+            Creature* creature = guidP.GetCreature(bot->GetInstanceId());
+            if (IsBlockedChallengeNpc(creature))
+                SkipRpgTarget("Blocked challenge giver NPC.");
+        }
 
         //Limit the amount of bots that can rpg with 1 target. Only if the calculation doesn't involve checking 200+ players.
         if (possiblePlayers.size() < 200 && HasSameTarget(guidP, urand(5, 15), possiblePlayers))
@@ -300,7 +323,8 @@ float ChooseRpgTargetAction::getMaxRelevance(GuidPosition guidP)
             {
                 triggerNode->setTrigger(trigger);
 
-                if (triggerNode->getFirstRelevance() < maxRelevance || triggerNode->getFirstRelevance() > 2.0f)
+                float firstRelevance = triggerNode->getFirstRelevance();
+                if (firstRelevance < maxRelevance || firstRelevance > 2.0f)
                     continue;
 
                 Trigger* trigger = triggerNode->getTrigger();
@@ -332,7 +356,7 @@ float ChooseRpgTargetAction::getMaxRelevance(GuidPosition guidP)
                 //Note the highest relevance of this node and the reason it triggers.
                 if (isRpg)
                 {
-                    maxRelevance = triggerNode->getFirstRelevance();
+                    maxRelevance = firstRelevance;
                     if (rgpActionReason[guidP].empty())
                         rgpActionReason[guidP] = triggerNode->getName();
                 }

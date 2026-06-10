@@ -478,8 +478,22 @@ bool PlayerbotAIConfig::Initialize()
     botActiveAlone = config.GetIntDefault("AiPlayerbot.botActiveAlone", 10);
     diffWithPlayer = config.GetIntDefault("AiPlayerbot.DiffWithPlayer", 100);
     diffEmpty = config.GetIntDefault("AiPlayerbot.DiffEmpty", 200);
-    RandombotsWalkingRPG = config.GetBoolDefault("AiPlayerbot.RandombotsWalkingRPG", false);
-    RandombotsWalkingRPGInDoors = config.GetBoolDefault("AiPlayerbot.RandombotsWalkingRPG.InDoors", false);
+    // Disabled in this port: indoor/outdoor RPG walking creates visibly broken slow-crawl behavior.
+    RandombotsWalkingRPG = false;
+    RandombotsWalkingRPGInDoors = false;
+    humanLikeMovement = config.GetBoolDefault("AiPlayerbot.HumanLikeMovement", false);
+    humanLikePathJitterChance = config.GetFloatDefault("AiPlayerbot.HumanLikePathJitterChance", 0.30f);
+    humanLikePathJitterRadius = config.GetFloatDefault("AiPlayerbot.HumanLikePathJitterRadius", 1.25f);
+    humanLikePathForwardJitterRadius = config.GetFloatDefault("AiPlayerbot.HumanLikePathForwardJitterRadius", 0.60f);
+    humanLikeFollowAngleJitter = config.GetFloatDefault("AiPlayerbot.HumanLikeFollowAngleJitter", 0.18f);
+    humanLikeFollowDistanceJitter = config.GetFloatDefault("AiPlayerbot.HumanLikeFollowDistanceJitter", 0.75f);
+    humanLikePauseChance = config.GetFloatDefault("AiPlayerbot.HumanLikePauseChance", 0.03f);
+    humanLikePauseMinMs = config.GetIntDefault("AiPlayerbot.HumanLikePauseMinMs", 3000);
+    humanLikePauseMaxMs = config.GetIntDefault("AiPlayerbot.HumanLikePauseMaxMs", 25000);
+    humanLikePauseCooldownMs = config.GetIntDefault("AiPlayerbot.HumanLikePauseCooldownMs", 85000);
+    humanLikeJumpChance = config.GetFloatDefault("AiPlayerbot.HumanLikeJumpChance", 0.12f);
+    humanLikeSpinChance = config.GetFloatDefault("AiPlayerbot.HumanLikeSpinChance", 0.20f);
+    humanLikeJumpCooldownMs = config.GetIntDefault("AiPlayerbot.HumanLikeJumpCooldownMs", 12000);
     minEnchantingBotLevel = config.GetIntDefault("AiPlayerbot.minEnchantingBotLevel", 60);
     randombotStartingLevel = config.GetIntDefault("AiPlayerbot.randombotStartingLevel", 5);
     gearscorecheck = config.GetBoolDefault("AiPlayerbot.GearScoreCheck", false);
@@ -601,6 +615,7 @@ bool PlayerbotAIConfig::Initialize()
     respawnModHostile = config.GetFloatDefault("AiPlayerbot.RespawnModHostile", 5.0f);
     respawnModThreshold = config.GetIntDefault("AiPlayerbot.RespawnModThreshold", 10);
     respawnModMax = config.GetIntDefault("AiPlayerbot.RespawnModMax", 18);
+    respawnCorpseCloneMax = config.GetIntDefault("AiPlayerbot.RespawnCorpseCloneMax", 5);
     respawnModForPlayerBots = config.GetBoolDefault("AiPlayerbot.RespawnModForPlayerBots", false);
     respawnModForInstances = config.GetBoolDefault("AiPlayerbot.RespawnModForInstances", false);
 
@@ -755,7 +770,6 @@ bool PlayerbotAIConfig::Initialize()
     ItemUsageValue::PopulateSoldByVendorItemIds();
     ItemUsageValue::PopulateReagentItemIdsForCraftableItemIds();
 
-    RandomPlayerbotFactory::CreateRandomBots();
     PlayerbotFactory::Init();
     sRandomItemMgr.Init();
     sPlayerbotTextMgr.LoadBotTexts();
@@ -1010,13 +1024,19 @@ bool PlayerbotAIConfig::openLog(std::string fileName, char const* mode, bool has
     }
 
 
-    file = fopen((m_logsDir + fileName).c_str(), mode);
-    fileOpen = true;
+    const std::string logPath = m_logsDir + fileName;
+    file = fopen(logPath.c_str(), mode);
+    fileOpen = (file != nullptr);
+
+    if (!fileOpen)
+    {
+        sLog.outError("PlayerbotAIConfig::openLog: failed to open %s with mode %s", logPath.c_str(), mode);
+    }
 
     logFileIt->second.first = file;
     logFileIt->second.second = fileOpen;
 
-    return true;
+    return fileOpen;
 }
 
 void PlayerbotAIConfig::log(std::string fileName, const char* str, ...)
@@ -1031,6 +1051,8 @@ void PlayerbotAIConfig::log(std::string fileName, const char* str, ...)
             return;
 
     FILE* file = logFiles.find(fileName)->second.first;
+    if (!file)
+        return;
 
     va_list ap;
     va_start(ap, str);

@@ -15,8 +15,11 @@
 #include "Objects/Player.h"
 #include "World.h"
 #include "playerbot/RandomPlayerbotMgr.h"
+#include "playerbot/RandomPlayerbotFactory.h"
 #include "playerbot/PlayerbotAIConfig.h"
+#include "playerbot/TravelMgr.h"
 #include "BotDiagnostics.h"
+#include "strategy/values/SharedValueContext.h"
 
 void Player::CreatePlayerbotAI()
 {
@@ -62,6 +65,18 @@ void World::UpdatePlayerbotsTick(uint32 diff)
 {
     if (!sPlayerbotAIConfig.enabled)
         return;
+
+    if (m_pendingRandomBotAutoCreate)
+    {
+        m_pendingRandomBotAutoCreate = false;
+        sLog.outString("Playerbots first world tick refreshing shared travel caches");
+        sSharedObjectContext.Reset();
+        sTravelMgr.ReloadQuestTravelTable();
+        sLog.outString("Playerbots first world tick invoking RandomPlayerbotFactory::CreateRandomBots()");
+        RandomPlayerbotFactory::CreateRandomBots();
+        return;
+    }
+
     sRandomPlayerbotMgr.UpdateAI(diff);
 }
 
@@ -94,6 +109,21 @@ void Player::UpdatePlayerbotHooks(uint32 diff)
 void World::InitPlayerbotsAtStartup()
 {
     sPlayerbotAIConfig.Initialize();
+}
+
+void World::InitPlayerbotsAfterPlayerInfo()
+{
+    if (!sPlayerbotAIConfig.enabled)
+        return;
+
+    sLog.outString("Playerbots post-player-info init reached: enabled=%u randomBotAutoCreate=%u",
+        sPlayerbotAIConfig.enabled ? 1u : 0u, sPlayerbotAIConfig.randomBotAutoCreate ? 1u : 0u);
+
+    if (!sPlayerbotAIConfig.randomBotAutoCreate)
+        return;
+
+    m_pendingRandomBotAutoCreate = true;
+    sLog.outString("Playerbots post-player-info init armed random bot auto-create for first world tick");
 }
 
 // Outgoing-packet interceptor (called from WorldSession::SendPacket). For a

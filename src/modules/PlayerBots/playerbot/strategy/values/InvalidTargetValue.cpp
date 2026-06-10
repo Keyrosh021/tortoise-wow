@@ -31,6 +31,11 @@ bool InvalidTargetValue::Calculate()
     }
 
     const bool validTarget = PossibleAttackTargetsValue::IsValid(target, bot);
+    if (qualifier == "current target" && !validTarget)
+    {
+        return true;
+    }
+
     if (!validTarget)
     {
         std::list<ObjectGuid> attackers = AI_VALUE(std::list<ObjectGuid>, "possible attack targets");

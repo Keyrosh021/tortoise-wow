@@ -5017,6 +5017,13 @@ void Spell::SendSpellStart()
 
 void Spell::SendSpellGo(bool bSendToCaster)
 {
+    {
+        extern void BotActionLog_LogSpellGo(WorldObject* caster, uint32 spellId, uint64 targetGuidRaw, uint8 sendToCaster);
+        ObjectGuid tgt = m_targets.getUnitTargetGuid();
+        if (!tgt) tgt = m_targets.getGOTargetGuid();
+        BotActionLog_LogSpellGo(m_caster, m_spellInfo->Id, tgt.GetRawValue(), bSendToCaster ? 1u : 0u);
+    }
+
     // not send invisible spell casting
     if (!IsNeedSendToClient())
     {

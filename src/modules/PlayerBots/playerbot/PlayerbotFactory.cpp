@@ -29,6 +29,33 @@ using namespace ai;
 
 #define PLAYER_SKILL_INDEX(x)       (PLAYER_SKILL_INFO_1_1 + ((x)*3))
 
+namespace
+{
+    void ResetRandomBotChallengeState(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        bot->SetHardcoreStatus(HARDCORE_MODE_STATUS_NONE);
+
+        static const uint32 challengeSpells[] =
+        {
+            SPELL_SLOW_AND_STEADY,
+            SPELL_EXHAUSTION_MODE,
+            SPELL_WAR_MODE,
+            SPELL_HARDCORE,
+            SPELL_VARGANT_MODE,
+            SPELL_BOARING_MODE
+        };
+
+        for (uint32 spellId : challengeSpells)
+        {
+            if (bot->HasSpell(spellId))
+                bot->RemoveSpell(spellId, false, false, true);
+        }
+    }
+}
+
 uint32 PlayerbotFactory::tradeSkills[] =
 {
     SKILL_ALCHEMY,
@@ -178,6 +205,9 @@ void PlayerbotFactory::Randomize(bool incremental, bool syncWithMaster)
     }
     bool isRealRandomBot = sRandomPlayerbotMgr.IsRandomBot(bot);
     bool isRandomBot = sRandomPlayerbotMgr.IsRandomBot(bot) && bot->GetPlayerbotAI() && !bot->GetPlayerbotAI()->HasRealPlayerMaster() && !bot->GetPlayerbotAI()->IsInRealGuild();
+
+    if (isRealRandomBot)
+        ResetRandomBotChallengeState(bot);
 
     sLog.outDetail("Resetting player...");
     auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "PlayerbotFactory_Reset");
@@ -4447,6 +4477,12 @@ ObjectGuid PlayerbotFactory::GetRandomBot()
 void PlayerbotFactory::AddPrevQuests(uint32 questId, std::list<uint32>& questIds)
 {
     Quest const *quest = sObjectMgr.GetQuestTemplate(questId);
+    if (!quest)
+    {
+        sLog.outError("[PlayerBots] AddPrevQuests: missing quest template for quest %u", questId);
+        return;
+    }
+
     for (Quest::PrevQuests::const_iterator iter = quest->prevQuests.begin(); iter != quest->prevQuests.end(); ++iter)
     {
         uint32 prevId = abs(*iter);

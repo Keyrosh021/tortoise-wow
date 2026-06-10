@@ -77,6 +77,7 @@ namespace ai
             this->name = name;
             this->handlers = handlers;
             this->trigger = NULL;
+            this->firstRelevance = (handlers && handlers[0]) ? handlers[0]->getRelevance() : -1.0f;
         }
         virtual ~TriggerNode();
 
@@ -92,5 +93,6 @@ namespace ai
         std::string name;
         Trigger* trigger;
         NextAction** handlers;
+        float firstRelevance;
     };
 }

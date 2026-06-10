@@ -66,6 +66,18 @@ bool TalkToQuestGiverAction::ProcessQuest(Player* requester, Quest const* quest,
         }
     }
 
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "questId=" << quest->GetQuestId()
+            << " status=" << status
+            << " rewarded=" << (bot->GetQuestRewardStatus(quest->GetQuestId()) ? 1 : 0)
+            << " canReward=" << (bot->CanRewardQuest(quest, false) ? 1 : 0)
+            << " giver=" << (questGiver ? questGiver->GetName() : "none")
+            << " completed=" << (isCompleted ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(ai, "QuestTurnInProcessTrace", quest->GetTitle(), out.str());
+    }
+
     ai->TellPlayer(requester, outputMessage, PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL, false);
 
     return isCompleted;
@@ -76,6 +88,11 @@ bool TalkToQuestGiverAction::TurnInQuest(Player* requester, Quest const* quest, 
     uint32 questID = quest->GetQuestId();
     if (bot->GetQuestRewardStatus(questID))
     {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            sPlayerbotAIConfig.logEvent(ai, "QuestTurnInSkipped", quest->GetTitle(),
+                "questId=" + std::to_string(questID) + " reason=already-rewarded");
+        }
         return false;
     }
     
@@ -119,6 +136,11 @@ void TalkToQuestGiverAction::RewardNoItem(Quest const* quest, WorldObject* quest
     }
     else
     {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            sPlayerbotAIConfig.logEvent(ai, "QuestTurnInBlocked", quest->GetTitle(),
+                "questId=" + std::to_string(quest->GetQuestId()) + " rewardType=no-choice canReward=0");
+        }
         out = BOT_TEXT2("quest_status_unable_to_complete", args);
     }
 }
@@ -141,6 +163,11 @@ void TalkToQuestGiverAction::RewardSingleItem(Quest const* quest, WorldObject* q
     }
     else
     {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            sPlayerbotAIConfig.logEvent(ai, "QuestTurnInBlocked", quest->GetTitle(),
+                "questId=" + std::to_string(quest->GetQuestId()) + " rewardType=single-choice canReward=0");
+        }
         out = BOT_TEXT2("quest_status_unable_to_complete", args);
     }
 }
@@ -201,6 +228,7 @@ ItemIds TalkToQuestGiverAction::BestRewards(Quest const* quest)
 
 void TalkToQuestGiverAction::RewardMultipleItem(Player* requester, Quest const* quest, WorldObject* questGiver, std::string& out)
 {
+    AiObjectContext* context = ai->GetAiObjectContext();
     std::map<std::string, std::string> args;
     args["%quest"] = chat->formatQuest(quest);
 
@@ -252,6 +280,16 @@ void TalkToQuestGiverAction::RewardMultipleItem(Player* requester, Quest const* 
 
             bot->RewardQuest(quest, rewardIndex, questGiver, true);
         }
+    }
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream trace;
+        trace << "questId=" << quest->GetQuestId()
+              << " rewardChoices=" << (uint32)quest->GetRewChoiceItemsCount()
+              << " bestCount=" << bestIds.size()
+              << " option=" << (uint32)AI_VALUE(uint8, "quest reward");
+        sPlayerbotAIConfig.logEvent(ai, "QuestTurnInRewardPath", quest->GetTitle(), trace.str());
     }
 }
 

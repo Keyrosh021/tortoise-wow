@@ -25,6 +25,9 @@ public:
     WardenModuleMgr();
     void LoadWardenModules();
 
+    bool HasWindowsModule() const { return !_winModules.empty(); }
+    bool HasMacModule() const { return !_macModules.empty(); }
+
     const WardenModule *GetWindowsModule() const;
     const WardenModule *GetMacModule() const;
 };

@@ -31,6 +31,7 @@
 #ifdef WIN32
 #include <winsock2.h>
 #endif
+#include <plugin_auth_common.h>
 #include <mysql.h>
 
 #if MYSQL_VERSION_ID >= 80000

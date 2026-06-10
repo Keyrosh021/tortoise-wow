@@ -11,7 +11,7 @@ bool MeleeAction::isUseful()
     if (ai->IsInVehicle() && !ai->IsInVehicle(false, false, true))
         return false;
 
-    return true;
+    return AttackAction::isUseful();
 }
 
 bool UpdateStrategyDependenciesAction::Execute(Event& event)

@@ -11,6 +11,7 @@ namespace ai
     public:
         LootStoreItemList ExplicitlyChanced;                // Entries with chances defined in DB
         LootStoreItemList EqualChanced;                     // Zero chances - every entry takes the same chance
+        bool hasConditionalEqualChancedItem = false;        // Keep layout aligned with core LootTemplate::LootGroup
     };
 
     class LootTemplateAccess
@@ -260,4 +261,3 @@ namespace ai
 #endif 
     };
 }
-

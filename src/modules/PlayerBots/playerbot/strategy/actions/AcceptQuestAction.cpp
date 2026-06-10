@@ -58,6 +58,9 @@ bool AcceptQuestAction::Execute(Event& event)
             if (go && text == "*" && bot->GetDistance(go) <= INTERACTION_DISTANCE)
                 hasAccept |= QuestAction::ProcessQuests(go);
         }
+
+        if (text == "*")
+            return hasAccept;
     }
     else
     {

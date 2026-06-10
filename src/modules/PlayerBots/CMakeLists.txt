@@ -180,7 +180,7 @@ target_link_libraries(${LIBRARY_NAME}
   PRIVATE shared
   PRIVATE Detour
   PRIVATE g3dlite
-  PRIVATE zlib
+  PRIVATE ${ZLIB_LIBRARIES}
 )
 if(WIN32)
   target_link_libraries(${LIBRARY_NAME}
@@ -192,21 +192,21 @@ target_include_directories(${LIBRARY_NAME}
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
   # include paths for transitive Penqle headers
   # (MapNodes/AbstractPlayer.h, Detour navmesh, framework Network).
+  PRIVATE ${Boost_INCLUDE_DIRS}
+  PRIVATE ${MYSQL_INCLUDE_DIR}
   PRIVATE ${CMAKE_SOURCE_DIR}/src/game/MapNodes
   PRIVATE ${CMAKE_SOURCE_DIR}/dep/recastnavigation
   PRIVATE ${CMAKE_SOURCE_DIR}/src/framework/Network
 )
 
 # Install config files
-if ( ${CMAKE_PROJECT_NAME} MATCHES "Classic")
-	configure_file(${CMAKE_CURRENT_SOURCE_DIR}/playerbot/aiplayerbot.conf.dist.in ${CMAKE_CURRENT_BINARY_DIR}/aiplayerbot.conf.dist)
-endif()	
+set(PLAYERBOT_CONF_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/playerbot/aiplayerbot.conf.dist.in)
 if ( ${CMAKE_PROJECT_NAME} MATCHES "TBC")
-	configure_file(${CMAKE_CURRENT_SOURCE_DIR}/playerbot/aiplayerbot.conf.dist.in.tbc ${CMAKE_CURRENT_BINARY_DIR}/aiplayerbot.conf.dist)
-endif()	
-if ( ${CMAKE_PROJECT_NAME} MATCHES "WoTLK")
-	configure_file(${CMAKE_CURRENT_SOURCE_DIR}/playerbot/aiplayerbot.conf.dist.in.wotlk ${CMAKE_CURRENT_BINARY_DIR}/aiplayerbot.conf.dist)
+	set(PLAYERBOT_CONF_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/playerbot/aiplayerbot.conf.dist.in.tbc)
+elseif ( ${CMAKE_PROJECT_NAME} MATCHES "WoTLK")
+	set(PLAYERBOT_CONF_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/playerbot/aiplayerbot.conf.dist.in.wotlk)
 endif()
+configure_file(${PLAYERBOT_CONF_SOURCE} ${CMAKE_CURRENT_BINARY_DIR}/aiplayerbot.conf.dist)
 if (NOT CONF_INSTALL_DIR)
   set(CONF_INSTALL_DIR ${CONF_DIR})
 endif()

@@ -121,11 +121,37 @@ AuctionHouseMgr::~AuctionHouseMgr()
 
 AuctionHouseObject * AuctionHouseMgr::GetAuctionsMap(AuctionHouseEntry const* house)
 {
+    if (!house)
+        return nullptr;
+
     auto itr = m_mAuctionHouses.find(house->houseId);
     if (itr != m_mAuctionHouses.end())
         return itr->second;
 
     return nullptr;
+}
+
+AuctionHouseObject* AuctionHouseMgr::GetAuctionsMap(uint32 type)
+{
+    uint32 houseId = 7;
+
+    switch (type)
+    {
+        case 0:
+            houseId = 1;
+            break;
+        case 1:
+            houseId = 6;
+            break;
+        case 2:
+            houseId = 7;
+            break;
+        default:
+            sLog.outError("AuctionHouseMgr::GetAuctionsMap: unknown auction house type %u", type);
+            break;
+    }
+
+    return GetAuctionsMap(sAuctionHouseStore.LookupEntry(houseId));
 }
 
 uint32 AuctionHouseMgr::GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time, Item *pItem)

@@ -217,6 +217,19 @@ public:
     std::list<uint32> randomBotArenaTeams;
 	bool RandombotsWalkingRPG;
 	bool RandombotsWalkingRPGInDoors;
+    bool humanLikeMovement;
+    float humanLikePathJitterChance;
+    float humanLikePathJitterRadius;
+    float humanLikePathForwardJitterRadius;
+    float humanLikeFollowAngleJitter;
+    float humanLikeFollowDistanceJitter;
+    float humanLikePauseChance;
+    uint32 humanLikePauseMinMs;
+    uint32 humanLikePauseMaxMs;
+    uint32 humanLikePauseCooldownMs;
+    float humanLikeJumpChance;
+    float humanLikeSpinChance;
+    uint32 humanLikeJumpCooldownMs;
     bool boostFollow;
     bool turnInRpg;
     bool globalSoundEffects;
@@ -347,6 +360,7 @@ public:
     uint32 tweakValue; //Debugging config
     float respawnModNeutral, respawnModHostile;
     uint32 respawnModThreshold, respawnModMax;
+    uint32 respawnCorpseCloneMax;
     bool respawnModForPlayerBots, respawnModForInstances;
 
     bool randomBotLoginWithPlayer;
@@ -434,4 +448,3 @@ private:
 };
 
 #define sPlayerbotAIConfig MaNGOS::Singleton<PlayerbotAIConfig>::Instance()
-

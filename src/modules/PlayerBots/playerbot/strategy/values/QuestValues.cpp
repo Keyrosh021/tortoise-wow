@@ -14,20 +14,33 @@ EntryQuestRelationMap EntryQuestRelationMapValue::Calculate()
 {
 	EntryQuestRelationMap rMap;
 
-	//Quest givers takers
-	QuestObjectMgr* questObjectMgr = (QuestObjectMgr*)&sObjectMgr;
+	EntryGuidps guidpMap = GAI_VALUE(EntryGuidps, "entry guidps");
 
-	for (auto [entry, questId] : questObjectMgr->GetCreatureQuestRelationsMap())
-		rMap[entry][questId] |= (uint8)TravelDestinationPurpose::QuestGiver;
+	for (auto const& [entry, guidps] : guidpMap)
+	{
+		if (entry > 0)
+		{
+			QuestRelationsMapBounds rbounds = sObjectMgr.GetCreatureQuestRelationsMapBounds(entry);
+			for (QuestRelationsMap::const_iterator itr = rbounds.first; itr != rbounds.second; ++itr)
+				rMap[entry][itr->second] |= (uint8)TravelDestinationPurpose::QuestGiver;
 
-	for (auto [entry, questId] : questObjectMgr->GetCreatureQuestInvolvedRelationsMap())
-		rMap[entry][questId] |= (uint8)TravelDestinationPurpose::QuestTaker;
+			QuestRelationsMapBounds irbounds = sObjectMgr.GetCreatureQuestInvolvedRelationsMapBounds(entry);
+			for (QuestRelationsMap::const_iterator itr = irbounds.first; itr != irbounds.second; ++itr)
+				rMap[entry][itr->second] |= (uint8)TravelDestinationPurpose::QuestTaker;
+		}
+		else if (entry < 0)
+		{
+			uint32 goEntry = uint32(-entry);
 
-	for (auto [entry, questId] : questObjectMgr->GetGOQuestRelationsMap())
-		rMap[-(int32)entry][questId] |= (uint8)TravelDestinationPurpose::QuestGiver;
+			QuestRelationsMapBounds rbounds = sObjectMgr.GetGOQuestRelationsMapBounds(goEntry);
+			for (QuestRelationsMap::const_iterator itr = rbounds.first; itr != rbounds.second; ++itr)
+				rMap[entry][itr->second] |= (uint8)TravelDestinationPurpose::QuestGiver;
 
-	for (auto [entry, questId] : questObjectMgr->GetGOQuestInvolvedRelationsMap())
-		rMap[-(int32)entry][questId] |= (uint8)TravelDestinationPurpose::QuestTaker;
+			QuestRelationsMapBounds irbounds = sObjectMgr.GetGOQuestInvolvedRelationsMapBounds(goEntry);
+			for (QuestRelationsMap::const_iterator itr = irbounds.first; itr != irbounds.second; ++itr)
+				rMap[entry][itr->second] |= (uint8)TravelDestinationPurpose::QuestTaker;
+		}
+	}
 
 	//Quest objectives
 	ObjectMgr::QuestMap const& questMap = sObjectMgr.GetQuestTemplates();
@@ -252,6 +265,7 @@ std::list<GuidPosition> ActiveQuestTakersValue::Calculate()
 	questGuidpMap questMap = GAI_VALUE(questGuidpMap, "quest guidp map");
 
 	std::list<GuidPosition> retQuestTakers;
+	bool shouldTrace = sPlayerbotAIConfig.hasLog("bot_events.csv");
 
 	QuestStatusMap& questStatusMap = bot->getQuestStatusMap();
 
@@ -271,6 +285,28 @@ std::list<GuidPosition> ActiveQuestTakersValue::Calculate()
 
 		auto q = questMap.find(questId);
 
+		if (shouldTrace)
+		{
+            std::ostringstream trace;
+			trace << "quest=" << quest->GetTitle()
+			      << " questId=" << questId
+			      << " status=" << status
+			      << " rewarded=" << (bot->GetQuestRewardStatus(questId) ? 1 : 0);
+		    if (q == questMap.end())
+            {
+                sPlayerbotAIConfig.logEvent(ai, "QuestTakerUnavailable", quest->GetTitle(), trace.str() + " reason=no-quest-map");
+			    continue;
+            }
+
+            auto traceQt = q->second.find((uint8)TravelDestinationPurpose::QuestTaker);
+
+            if (traceQt == q->second.end())
+            {
+                sPlayerbotAIConfig.logEvent(ai, "QuestTakerUnavailable", quest->GetTitle(), trace.str() + " reason=no-quest-taker");
+			    continue;		
+            }
+        }
+
 		if (q == questMap.end())
 			continue;
 
@@ -278,6 +314,8 @@ std::list<GuidPosition> ActiveQuestTakersValue::Calculate()
 
 		if (qt == q->second.end())
 			continue;		
+
+        uint32 added = 0;
 
 		for (auto& [entry, guidps] : qt->second)
 		{
@@ -298,8 +336,19 @@ std::list<GuidPosition> ActiveQuestTakersValue::Calculate()
 					continue;
 
 				retQuestTakers.push_back(guidp);
+                ++added;
 			}
 		}
+
+        if (shouldTrace)
+        {
+            std::ostringstream out;
+            out << "questId=" << questId
+                << " status=" << status
+                << " rewarded=" << (bot->GetQuestRewardStatus(questId) ? 1 : 0)
+                << " takers=" << added;
+            sPlayerbotAIConfig.logEvent(ai, "QuestTakerCandidates", quest->GetTitle(), out.str());
+        }
 	}
 
 	return retQuestTakers;

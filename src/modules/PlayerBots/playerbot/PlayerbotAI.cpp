@@ -7,6 +7,7 @@
 #include "playerbot/AiFactory.h"
 
 #include "Movement/MovementGenerator.h"
+#include "Movement/MotionMaster.h"
 #include "Maps/GridNotifiers.h"
 #include "Maps/GridNotifiersImpl.h"
 #include "Maps/CellImpl.h"
@@ -45,6 +46,7 @@
 #include "PlayerbotLLMInterface.h"
 
 #include <boost/algorithm/string.hpp>
+#include <cmath>
 
 #ifdef MANGOSBOT_TWO
 #include "Entities/Vehicle.h"
@@ -57,6 +59,277 @@
 #include "strategy/values/GuildValues.h"
 
 using namespace ai;
+
+namespace
+{
+    bool IsHostileCombatSpellForTarget(Player* bot, Unit* target, SpellEntry const* spellInfo)
+    {
+        if (!bot || !target || !spellInfo)
+            return false;
+
+        if (target == bot)
+            return false;
+
+        if (IsPositiveSpell(spellInfo))
+            return false;
+
+        if (sServerFacade.IsFriendlyTo(bot, target))
+            return false;
+
+        for (int32 i = EFFECT_INDEX_0; i <= EFFECT_INDEX_2; ++i)
+        {
+            SpellEffectIndex effectIndex = static_cast<SpellEffectIndex>(i);
+            switch (spellInfo->Effect[effectIndex])
+            {
+                case SPELL_EFFECT_SCHOOL_DAMAGE:
+                case SPELL_EFFECT_WEAPON_DAMAGE:
+                case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL:
+                case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
+                case SPELL_EFFECT_HEALTH_LEECH:
+                case SPELL_EFFECT_ENVIRONMENTAL_DAMAGE:
+                    return true;
+                case SPELL_EFFECT_APPLY_AURA:
+                    if (spellInfo->EffectApplyAuraName[i] == SPELL_AURA_PERIODIC_DAMAGE ||
+                        spellInfo->EffectApplyAuraName[i] == SPELL_AURA_PERIODIC_LEECH)
+                    {
+                        return true;
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        return false;
+    }
+
+    uint32 GetRespawnCorpseSourceGuid(Creature* creature)
+    {
+        if (!creature)
+            return 0;
+
+        if (creature->IsLootCorpseClone() && creature->GetLootCorpseSourceGuidLow())
+            return creature->GetLootCorpseSourceGuidLow();
+
+        if (creature->GetDbGuid())
+            return creature->GetDbGuid();
+
+        return creature->GetGUIDLow();
+    }
+
+    uint32 CountRespawnCorpsesForSource(Creature* creature)
+    {
+        if (!creature || !creature->IsInWorld())
+            return 0;
+
+        uint32 sourceGuid = GetRespawnCorpseSourceGuid(creature);
+        if (!sourceGuid)
+            return 0;
+
+        std::list<Creature*> nearbyCreatures;
+        MaNGOS::AnyUnitInObjectRangeCheck check(creature, 3.0f);
+        MaNGOS::CreatureListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(nearbyCreatures, check);
+        Cell::VisitAllObjects(creature, searcher, 3.0f);
+
+        uint32 count = creature->IsCorpse() ? 1u : 0u;
+        for (Creature* nearby : nearbyCreatures)
+        {
+            if (!nearby || nearby == creature || !nearby->IsCorpse())
+                continue;
+
+            if (GetRespawnCorpseSourceGuid(nearby) != sourceGuid)
+                continue;
+
+            ++count;
+        }
+
+        return count;
+    }
+
+    void CopyLootForRespawnCorpse(Creature* source, Creature* clone)
+    {
+        clone->loot.clear();
+        clone->loot.m_personal = source->loot.m_personal;
+        clone->loot.items = source->loot.items;
+        clone->loot.gold = source->loot.gold;
+        clone->loot.unlootedCount = source->loot.unlootedCount;
+        clone->loot.groupLeaderGuid = source->loot.groupLeaderGuid;
+        clone->loot.roundRobinPlayer = source->loot.roundRobinPlayer;
+        clone->loot.loot_type = source->loot.loot_type;
+        clone->loot.m_questItems = source->loot.m_questItems;
+        clone->loot.SetTeam(static_cast<Team>(source->loot.GetTeam()));
+
+        clone->lootForBody = source->lootForBody;
+        clone->lootForSkin = source->lootForSkin;
+        clone->lootForPickPocketed = source->lootForPickPocketed;
+        clone->skinningForOthersTimer = source->skinningForOthersTimer;
+        clone->lootForCreator = source->lootForCreator;
+        clone->CopyLootAccessFrom(*source);
+        clone->SetHealth(0);
+        clone->SetUInt32Value(UNIT_FIELD_FLAGS, source->GetUInt32Value(UNIT_FIELD_FLAGS));
+        clone->SetUInt32Value(UNIT_DYNAMIC_FLAGS, source->GetUInt32Value(UNIT_DYNAMIC_FLAGS));
+        // Keep preserved corpses interactable even when the loot payload is empty so
+        // body visibility and next-spawn timing stay independent.
+        clone->SetFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE);
+    }
+
+    bool CreateRespawnCorpseClone(PlayerbotAI* ai, Creature* creature, float x, float y, float z, float o,
+        uint32 preservedCorpses, uint32 maxCorpses, char const* eventName, bool consumeOriginalCorpse)
+    {
+        CreatureInfo const* cinfo = creature ? creature->GetCreatureInfo() : nullptr;
+        if (!ai || !creature || !cinfo || !creature->GetMap())
+            return false;
+
+        CreatureCreatePos corpsePos(creature->GetMap(), x, y, z, o);
+        Creature* corpseClone = new Creature();
+        if (!corpseClone->Create(creature->GetMap()->GenerateLocalLowGuid(cinfo->GetHighGuid()), corpsePos, cinfo, creature->GetEntry()))
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << creature->GetEntry()
+                    << ",reason=create_failed"
+                    << ",source=" << GetRespawnCorpseSourceGuid(creature)
+                    << ",event=" << eventName;
+                sPlayerbotAIConfig.logEvent(ai, "RespawnCorpseCloneSkip", creature->GetName(), out.str());
+            }
+
+            delete corpseClone;
+            return false;
+        }
+
+        corpseClone->SetLootCorpseClone(true);
+        corpseClone->SetLootCorpseSourceGuidLow(GetRespawnCorpseSourceGuid(creature));
+        corpseClone->SetDeathState(CORPSE);
+        corpseClone->SetRespawnDelay(0, true);
+        corpseClone->SetRespawnTime(0);
+        corpseClone->SetCorpseDecayTimer(std::max<uint32>(creature->GetCorpseDecayTimer(), 20 * IN_MILLISECONDS));
+        CopyLootForRespawnCorpse(creature, corpseClone);
+        creature->GetMap()->Add(corpseClone);
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << creature->GetEntry() << ",source=" << GetRespawnCorpseSourceGuid(creature)
+                << ",preserved=" << (preservedCorpses + 1) << ",cap=" << maxCorpses
+                << ",consume_original=" << (consumeOriginalCorpse ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, eventName, creature->GetName(), out.str());
+        }
+
+        if (consumeOriginalCorpse)
+        {
+            creature->loot.clear();
+            creature->lootForBody = false;
+            creature->lootForSkin = false;
+            creature->lootForPickPocketed = false;
+            creature->SetLootRecipient(nullptr);
+            creature->RemoveCorpse();
+        }
+
+        return true;
+    }
+
+    bool TryPreserveRespawnCorpse(PlayerbotAI* ai, Creature* creature)
+    {
+        if (!ai || !creature)
+            return false;
+
+        if (CountRespawnCorpsesForSource(creature) > 0 && (!creature->IsCorpse() || creature->IsAlive()))
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << creature->GetEntry()
+                    << ",reason=already_preserved"
+                    << ",death_state=" << creature->GetDeathState();
+                sPlayerbotAIConfig.logEvent(ai, "RespawnCorpseCloneSkip", creature->GetName(), out.str());
+            }
+            return false;
+        }
+
+        // Accelerated respawn can hit while the creature is still in a just-died
+        // transition state. Normalize that early so preservation does not depend
+        // on which exact update tick we landed on.
+        if (!creature->IsCorpse() && !creature->IsAlive())
+            creature->SetDeathState(CORPSE);
+
+        if (!creature->GetDbGuid())
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << creature->GetEntry()
+                    << ",reason=no_dbguid"
+                    << ",death_state=" << creature->GetDeathState();
+                sPlayerbotAIConfig.logEvent(ai, "RespawnCorpseCloneSkip", creature->GetName(), out.str());
+            }
+            return false;
+        }
+
+        uint32 maxCorpses = sPlayerbotAIConfig.respawnCorpseCloneMax;
+        if (!maxCorpses)
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << creature->GetEntry()
+                    << ",reason=cap_disabled";
+                sPlayerbotAIConfig.logEvent(ai, "RespawnCorpseCloneSkip", creature->GetName(), out.str());
+            }
+            return false;
+        }
+
+        uint32 preservedCorpses = CountRespawnCorpsesForSource(creature);
+        if (preservedCorpses >= maxCorpses)
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << creature->GetEntry() << ",source=" << GetRespawnCorpseSourceGuid(creature)
+                    << ",preserved=" << preservedCorpses << ",cap=" << maxCorpses;
+                sPlayerbotAIConfig.logEvent(ai, "RespawnCorpseCloneCap", creature->GetName(), out.str());
+            }
+            return false;
+        }
+
+        if (!creature->IsCorpse())
+        {
+            if (creature->IsAlive() && creature->GetLastDeathSnapshotAt())
+            {
+                time_t now = time(nullptr);
+                if ((now - creature->GetLastDeathSnapshotAt()) <= 10)
+                {
+                    if (CreateRespawnCorpseClone(ai, creature,
+                        creature->GetLastDeathPositionX(),
+                        creature->GetLastDeathPositionY(),
+                        creature->GetLastDeathPositionZ(),
+                        creature->GetLastDeathOrientation(),
+                        preservedCorpses, maxCorpses, "RespawnCorpseCloneRecovered", false))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << creature->GetEntry()
+                    << ",reason=not_corpse"
+                    << ",death_state=" << creature->GetDeathState()
+                    << ",alive=" << (creature->IsAlive() ? 1 : 0)
+                    << ",last_death_age_secs="
+                    << (creature->GetLastDeathSnapshotAt() ? static_cast<long long>(time(nullptr) - creature->GetLastDeathSnapshotAt()) : -1);
+                sPlayerbotAIConfig.logEvent(ai, "RespawnCorpseCloneSkip", creature->GetName(), out.str());
+            }
+            return false;
+        }
+
+        return CreateRespawnCorpseClone(ai, creature,
+            creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ(), creature->GetOrientation(),
+            preservedCorpses, maxCorpses, "RespawnCorpseClone", true);
+    }
+}
 
 std::vector<std::string>& split(const std::string &s, char delim, std::vector<std::string> &elems);
 std::vector<std::string> split(const std::string &s, char delim);
@@ -976,6 +1249,18 @@ time_t PlayerbotAI::GetCombatStartTime() const
 
 void PlayerbotAI::OnCombatStarted()
 {
+    if (aiObjectContext->GetValue<GuidPosition>("rpg target")->Get())
+    {
+        aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+    }
+
+    TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+    if (travelTarget && travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_NONE &&
+        travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_COOLDOWN)
+    {
+        travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+    }
+
     if(!IsStateActive(BotState::BOT_STATE_COMBAT))
     {
         // Reset the combat start timestamp
@@ -1261,9 +1546,14 @@ void PlayerbotAI::HandleTeleportAck()
 #else
         p << bot->GetObjectGuid();
 #endif
-		p << (uint32) 0; // supposed to be flags? not used currently
+        uint32 teleportCounter = GetPendingTeleportAckCounter();
+        if (!teleportCounter && bot->GetMovementCounter() > 0)
+            teleportCounter = bot->GetMovementCounter() - 1;
+
+		p << teleportCounter;
 		p << (uint32) time(0); // time - not currently used
         bot->GetSession()->HandleMoveTeleportAckOpcode(p);
+        pendingTeleportAckCounter = 0;
 
         // add delay to simulate teleport delay
         SetAIInternalUpdateDelay(urand(1000, 2000));
@@ -1280,6 +1570,179 @@ void PlayerbotAI::HandleTeleportAck()
         bot->SendHeartBeat();
 
     Reset();
+}
+
+uint32 PlayerbotAI::GetPendingTeleportAckCounter() const
+{
+    return pendingTeleportAckCounter;
+}
+
+void PlayerbotAI::ResetStaleTargetState()
+{
+    staleTargetGuid = ObjectGuid();
+    staleTargetSince = 0;
+    staleTargetLastProgress = 0;
+    staleTargetLastX = 0.0f;
+    staleTargetLastY = 0.0f;
+    staleTargetLastZ = 0.0f;
+    staleTargetLastTargetHealth = 0;
+}
+
+bool PlayerbotAI::DetectAndClearStaleTarget()
+{
+    AiObjectContext* context = aiObjectContext;
+    Unit* currentTarget = AI_VALUE(Unit*, "current target");
+    if (!currentTarget || !currentTarget->IsInWorld() || !currentTarget->IsAlive() || currentTarget->GetMapId() != bot->GetMapId())
+    {
+        ResetStaleTargetState();
+        return false;
+    }
+
+    ObjectGuid const targetGuid = currentTarget->GetObjectGuid();
+    time_t const now = time(0);
+    float const botX = bot->GetPositionX();
+    float const botY = bot->GetPositionY();
+    float const botZ = bot->GetPositionZ();
+
+    if (staleTargetGuid != targetGuid || !staleTargetSince)
+    {
+        staleTargetGuid = targetGuid;
+        staleTargetSince = now;
+        staleTargetLastProgress = now;
+        staleTargetLastX = botX;
+        staleTargetLastY = botY;
+        staleTargetLastZ = botZ;
+        staleTargetLastTargetHealth = currentTarget->GetHealth();
+        return false;
+    }
+
+    LastSpellCast const& lastSpell = AI_VALUE(LastSpellCast&, "last spell cast");
+    float const dx = botX - staleTargetLastX;
+    float const dy = botY - staleTargetLastY;
+    float const dz = botZ - staleTargetLastZ;
+    float const movedSq = dx * dx + dy * dy + dz * dz;
+    bool const moved = movedSq >= 0.75f * 0.75f;
+    bool const moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+    bool const hasVictim = bot->GetVictim() == currentTarget;
+    bool const hasSelection = bot->GetSelectionGuid() == targetGuid;
+    bool const attachedToTarget = hasVictim || hasSelection;
+    bool const hasAttackers = AI_VALUE(bool, "has attackers");
+    bool const inCombat = sServerFacade.IsInCombat(bot) || AI_VALUE2(bool, "combat", "self target");
+    bool const recentSpell = lastSpell.time && lastSpell.target == targetGuid && (now - lastSpell.time) <= 3;
+    bool const targetHealthChanged = staleTargetLastTargetHealth != currentTarget->GetHealth();
+    float const distance = bot->GetDistance(currentTarget);
+
+    if (moved || moving || recentSpell || targetHealthChanged)
+    {
+        staleTargetLastProgress = now;
+        staleTargetLastX = botX;
+        staleTargetLastY = botY;
+        staleTargetLastZ = botZ;
+        staleTargetLastTargetHealth = currentTarget->GetHealth();
+        return false;
+    }
+
+    staleTargetLastX = botX;
+    staleTargetLastY = botY;
+    staleTargetLastZ = botZ;
+    staleTargetLastTargetHealth = currentTarget->GetHealth();
+
+    if (bot->IsNonMeleeSpellCasted(true) || bot->HasUnitState(UNIT_STAT_CAN_NOT_MOVE | UNIT_STAT_STUNNED | UNIT_STAT_CONFUSED | UNIT_STAT_FLEEING))
+        return false;
+
+    uint32 const staleThreshold = inCombat ? 6u : 8u;
+    uint32 const recoveryThreshold = inCombat ? 4u : 6u;
+    uint32 const detachedThreshold = (!attachedToTarget && !hasAttackers && !inCombat) ? 2u : staleThreshold;
+
+    if (hasVictim && staleTargetLastProgress && (now - staleTargetLastProgress) >= recoveryThreshold)
+    {
+        bool recovered = false;
+        const bool isRangedBot = IsRanged(bot);
+        const bool inLos = bot->IsWithinLOSInMap(currentTarget, true);
+        const bool inMeleeRange = distance <= (ATTACK_DISTANCE + sPlayerbotAIConfig.contactDistance);
+        MotionMaster* mm = bot->GetMotionMaster();
+        MovementGeneratorType moveType = mm ? mm->GetCurrentMovementGeneratorType() : IDLE_MOTION_TYPE;
+
+        bot->SetSelectionGuid(targetGuid);
+        bot->SetTarget(currentTarget);
+
+        if (!isRangedBot)
+        {
+            if (mm && (!inMeleeRange || moveType != CHASE_MOTION_TYPE))
+            {
+                mm->MoveChase(currentTarget, ATTACK_DISTANCE, bot->GetAngle(currentTarget));
+                recovered = true;
+            }
+
+            bot->AttackStop(true);
+            recovered = bot->Attack(currentTarget, true) || recovered;
+        }
+        else if (inLos)
+        {
+            recovered = bot->Attack(currentTarget, false);
+        }
+
+        if (recovered)
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "target=" << currentTarget->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << distance
+                    << " ranged=" << (isRangedBot ? 1 : 0)
+                    << " motion=" << moveType
+                    << " los=" << (inLos ? 1 : 0)
+                    << " staleFor=" << (now - staleTargetLastProgress);
+                sPlayerbotAIConfig.logEvent(this, "StaleTargetRecover", std::to_string(targetGuid.GetCounter()), out.str());
+            }
+
+            staleTargetLastProgress = now;
+            staleTargetLastX = botX;
+            staleTargetLastY = botY;
+            staleTargetLastZ = botZ;
+            staleTargetLastTargetHealth = currentTarget->GetHealth();
+            return false;
+        }
+    }
+
+    if (staleTargetLastProgress && (now - staleTargetLastProgress) < detachedThreshold)
+        return false;
+
+    std::list<ObjectGuid> possibleTargets = AI_VALUE(std::list<ObjectGuid>, "possible attack targets");
+    bool const targetStillPreferred = std::find(possibleTargets.begin(), possibleTargets.end(), targetGuid) != possibleTargets.end();
+    if (targetStillPreferred && (now - staleTargetLastProgress) < staleThreshold + 2u)
+        return false;
+
+    std::string const targetName = currentTarget->GetName();
+
+    if (bot->GetVictim() == currentTarget)
+        bot->AttackStop(true);
+
+    RESET_AI_VALUE(Unit*, "old target");
+    RESET_AI_VALUE(Unit*, "current target");
+    RESET_AI_VALUE(Unit*, "pull target");
+    RESET_AI_VALUE(ObjectGuid, "attack target");
+    bot->SetSelectionGuid(ObjectGuid());
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "target=" << targetName
+            << " dist=" << std::fixed << std::setprecision(2) << distance
+            << " staleFor=" << (now - staleTargetLastProgress)
+            << " inCombat=" << (inCombat ? 1 : 0)
+            << " moving=" << (moving ? 1 : 0)
+            << " victim=" << (hasVictim ? 1 : 0)
+            << " selection=" << (hasSelection ? 1 : 0)
+            << " recentSpell=" << (recentSpell ? 1 : 0)
+            << " healthChanged=" << (targetHealthChanged ? 1 : 0)
+            << " preferred=" << (targetStillPreferred ? 1 : 0)
+            << " attackers=" << (hasAttackers ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(this, "StaleTargetReset", std::to_string(targetGuid.GetCounter()), out.str());
+    }
+
+    ResetStaleTargetState();
+    return true;
 }
 
 void PlayerbotAI::Reset(bool full)
@@ -1313,6 +1776,7 @@ void PlayerbotAI::Reset(bool full)
     RESET_AI_VALUE(uint32,"lfg proposal");
     RESET_AI_VALUE(time_t,"combat start time");
     bot->SetSelectionGuid(ObjectGuid());
+    ResetStaleTargetState();
 
     LastSpellCast & lastSpell = AI_VALUE(LastSpellCast&,"last spell cast");
     lastSpell.Reset();
@@ -1578,6 +2042,26 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
 
 	switch (packet.GetOpcode())
 	{
+    case MSG_MOVE_TELEPORT_ACK:
+    {
+        WorldPacket p(packet);
+        p.rpos(0);
+
+#ifdef MANGOSBOT_TWO
+        ObjectGuid moverGuid;
+        p >> moverGuid.ReadAsPacked();
+        if (moverGuid != bot->GetObjectGuid())
+            return;
+#else
+        if (extractGuid(p) != bot->GetObjectGuid().GetRawValue())
+            return;
+#endif
+
+        uint32 movementCounter = 0;
+        p >> movementCounter;
+        pendingTeleportAckCounter = movementCounter;
+        return;
+    }
 	case SMSG_SPELL_FAILURE:
 	{
 		WorldPacket p(packet);
@@ -2102,6 +2586,9 @@ void PlayerbotAI::DoNextAction(bool min)
         }
     }
 
+    SC_PHASE("DoNextAction.staleTargetRecover", bot ? bot->GetName() : "(null)");
+    DetectAndClearStaleTarget();
+
     bool minimal = !AllowActivity();
 
     SC_PHASE("DoNextAction.engineDoNextAction", bot ? bot->GetName() : "(null)");
@@ -2113,7 +2600,11 @@ void PlayerbotAI::DoNextAction(bool min)
 
     if (minimal)
     {
-        if (!MovementAction::MinimalMove(this) && !bot->isAFK() && !bot->InBattleGround() && !HasRealPlayerMaster())
+        bool isAutonomousRandomBot = sRandomPlayerbotMgr.IsRandomBot(bot) && !HasRealPlayerMaster();
+
+        if (!isAutonomousRandomBot && !MovementAction::MinimalMove(this) && !bot->isAFK() && !bot->InBattleGround() && !HasRealPlayerMaster())
+            bot->ToggleAFK();
+        else if (isAutonomousRandomBot && bot->isAFK())
             bot->ToggleAFK();
 
         SetAIInternalUpdateDelay(sPlayerbotAIConfig.passiveDelay);
@@ -2271,8 +2762,18 @@ void PlayerbotAI::DoNextAction(bool min)
             bot->GetPlayerbotAI()->SetMaster(nullptr);
         }
 	}
-	else if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_WALK_MODE)) bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_WALK_MODE);
-    else if ((aiInternalUpdateDelay < 1000) && bot->IsSitState()) bot->SetStandState(UNIT_STAND_STATE_STAND);
+	else
+    {
+        if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_WALK_MODE))
+            bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_WALK_MODE);
+
+        // Free bots should default back to run so travel/RPG movement cannot inherit a stale slow-walk state.
+        if (bot->IsWalking() || !bot->HasUnitState(UNIT_STAT_RUNNING))
+            bot->SetWalk(false, true);
+
+        if ((aiInternalUpdateDelay < 1000) && bot->IsSitState())
+            bot->SetStandState(UNIT_STAND_STATE_STAND);
+    }
 
 #ifndef MANGOSBOT_ZERO
     if (bot->IsFlying() && !bot->IsFreeFlying())
@@ -2569,8 +3070,46 @@ bool PlayerbotAI::IsRanged(Player* player, bool inGroup)
     if (botAi)
     {
         bool isRanged = botAi->ContainsStrategy(STRATEGY_TYPE_RANGED);
-        if (inGroup || isRanged)
-            return isRanged;
+        if (isRanged)
+            return true;
+
+        if (inGroup)
+        {
+            const bool isExplicitMelee = botAi->ContainsStrategy(STRATEGY_TYPE_MELEE) || botAi->ContainsStrategy(STRATEGY_TYPE_TANK);
+            if (isExplicitMelee)
+                return false;
+
+            switch (botAi->GetTalentSpec())
+            {
+                case PlayerTalentSpec::TALENT_SPEC_PALADIN_HOLY:
+                case PlayerTalentSpec::TALENT_SPEC_HUNTER_BEAST_MASTERY:
+                case PlayerTalentSpec::TALENT_SPEC_HUNTER_MARKSMANSHIP:
+                case PlayerTalentSpec::TALENT_SPEC_HUNTER_SURVIVAL:
+                case PlayerTalentSpec::TALENT_SPEC_PRIEST_DISCIPLINE:
+                case PlayerTalentSpec::TALENT_SPEC_PRIEST_HOLY:
+                case PlayerTalentSpec::TALENT_SPEC_PRIEST_SHADOW:
+                case PlayerTalentSpec::TALENT_SPEC_SHAMAN_ELEMENTAL:
+                case PlayerTalentSpec::TALENT_SPEC_SHAMAN_RESTORATION:
+                case PlayerTalentSpec::TALENT_SPEC_MAGE_ARCANE:
+                case PlayerTalentSpec::TALENT_SPEC_MAGE_FIRE:
+                case PlayerTalentSpec::TALENT_SPEC_MAGE_FROST:
+                case PlayerTalentSpec::TALENT_SPEC_WARLOCK_AFFLICTION:
+                case PlayerTalentSpec::TALENT_SPEC_WARLOCK_DEMONOLOGY:
+                case PlayerTalentSpec::TALENT_SPEC_WARLOCK_DESTRUCTION:
+                case PlayerTalentSpec::TALENT_SPEC_DRUID_BALANCE:
+                case PlayerTalentSpec::TALENT_SPEC_DRUID_RESTORATION:
+                    return true;
+
+                case PlayerTalentSpec::TALENT_SPEC_PALADIN_PROTECTION:
+                case PlayerTalentSpec::TALENT_SPEC_PALADIN_RETRIBUTION:
+                case PlayerTalentSpec::TALENT_SPEC_SHAMAN_ENHANCEMENT:
+                case PlayerTalentSpec::TALENT_SPEC_DRUID_FERAL:
+                    return false;
+
+                default:
+                    break;
+            }
+        }
     }
 
     switch (player->getClass())
@@ -4769,6 +5308,17 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
 
     if (spellSuccess != SPELL_CAST_OK)
         return false;
+
+    if (target && IsHostileCombatSpellForTarget(bot, target, pSpellInfo) && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "spell=" << pSpellInfo->SpellName[0]
+            << " target=" << target->GetName()
+            << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target)
+            << " manualPrime=0"
+            << " ranged=" << (IsRanged(bot) ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(this, "SpellCombatPrime", std::to_string(target->GetGUIDLow()), out.str());
+    }
 
     PlayAttackEmote(6);
 
@@ -7685,34 +8235,90 @@ void PlayerbotAI::AccelerateRespawn(Creature* creature, float accelMod)
     if (!creature)
         return;
 
+    std::string skipReason = "none";
+    uint32 nearbyFriendlyPlayers = 0;
+    uint32 playersAfterThreshold = 0;
+    float accelKnob = 0.0f;
+    bool hostileCreature = false;
+    bool autoComputedAccel = !accelMod;
+    uint32 originalRespawnDelay = creature->GetRespawnDelay() * IN_MILLISECONDS;
+    uint32 m_respawnDelay = originalRespawnDelay;
+    uint32 m_corpseAccelerationDecayDelay = 0;
+
+    auto logRespawnAccel = [&](bool respawnAccelerated, bool preserveLootCorpse)
+    {
+        if (!sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            return;
+
+        std::ostringstream out;
+        out << "entry=" << creature->GetEntry()
+            << ",auto_computed=" << (autoComputedAccel ? 1 : 0)
+            << ",skip_reason=" << skipReason
+            << ",nearby_friendly_players=" << nearbyFriendlyPlayers
+            << ",threshold=" << sPlayerbotAIConfig.respawnModThreshold
+            << ",players_after_threshold=" << playersAfterThreshold
+            << ",players_after_cap=" << playersAfterThreshold
+            << ",max_count=" << sPlayerbotAIConfig.respawnModMax
+            << ",hostile=" << (hostileCreature ? 1 : 0)
+            << ",knob_pct=" << accelKnob
+            << ",accel_mod=" << accelMod
+            << ",base_respawn_ms=" << originalRespawnDelay
+            << ",respawn_ms=" << m_respawnDelay
+            << ",corpse_ms=" << m_corpseAccelerationDecayDelay
+            << ",accelerated=" << (respawnAccelerated ? 1 : 0)
+            << ",preserve_candidate=" << (preserveLootCorpse ? 1 : 0)
+            << ",loot=" << (creature->m_loot ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(this, "RespawnAccel", creature->GetName(), out.str());
+    };
+
     if (!sPlayerbotAIConfig.respawnModForPlayerBots && HasRealPlayerMaster())
+    {
+        skipReason = "real_player_master_disabled";
+        logRespawnAccel(false, false);
         return;
+    }
 
     if (!sPlayerbotAIConfig.respawnModForInstances && !WorldPosition(creature).isOverworld())
+    {
+        skipReason = "instance_disabled";
+        logRespawnAccel(false, false);
         return;
+    }
 
     AiObjectContext* context = aiObjectContext;
     if (!accelMod)
     {
         if (!sPlayerbotAIConfig.respawnModHostile && !sPlayerbotAIConfig.respawnModNeutral)
+        {
+            skipReason = "respawn_mods_disabled";
+            logRespawnAccel(false, false);
             return;
+        }
 
-        uint32 playersNr = AI_VALUE_LAZY(std::list<ObjectGuid>, "nearest friendly players").size()+1;
-
+        uint32 playersNr = AI_VALUE_LAZY(std::list<ObjectGuid>, "nearest friendly players").size() + 1;
+        nearbyFriendlyPlayers = playersNr;
 
         if (playersNr <= sPlayerbotAIConfig.respawnModThreshold)
+        {
+            skipReason = "below_bot_threshold";
+            logRespawnAccel(false, false);
             return;
+        }
 
         playersNr = std::min(playersNr - sPlayerbotAIConfig.respawnModThreshold, sPlayerbotAIConfig.respawnModMax);
+        playersAfterThreshold = playersNr;
+        hostileCreature = creature->CanAttackOnSight(bot);
+        accelKnob = hostileCreature ? sPlayerbotAIConfig.respawnModHostile : sPlayerbotAIConfig.respawnModNeutral;
 
-        accelMod = playersNr * (creature->CanAttackOnSight(bot) ? sPlayerbotAIConfig.respawnModHostile : sPlayerbotAIConfig.respawnModNeutral) * 0.01f;
+        accelMod = playersNr * accelKnob * 0.01f;
     }
 
     if (!accelMod)
+    {
+        skipReason = "zero_accel_mod";
+        logRespawnAccel(false, false);
         return;
-
-    uint32 m_respawnDelay;
-    uint32 m_corpseAccelerationDecayDelay;
+    }
 
     if (accelMod >= 1)
     {
@@ -7724,9 +8330,14 @@ void PlayerbotAI::AccelerateRespawn(Creature* creature, float accelMod)
         CreatureData const* data = sObjectMgr.GetCreatureData(creature->GetDbGuid());
 
         if (!data)
+        {
+            skipReason = "missing_spawn_data";
+            logRespawnAccel(false, false);
             return;
+        }
 
         m_respawnDelay = data->GetRandomRespawnTime() * IN_MILLISECONDS;
+        originalRespawnDelay = m_respawnDelay;
         m_corpseAccelerationDecayDelay = MINIMUM_LOOTING_TIME;
 
         uint32 totalDelay = m_respawnDelay + m_corpseAccelerationDecayDelay;
@@ -7743,69 +8354,85 @@ void PlayerbotAI::AccelerateRespawn(Creature* creature, float accelMod)
             m_respawnDelay -= totalDelay * accelMod;
     }
 
-    creature->SetRespawnDelay(m_respawnDelay / IN_MILLISECONDS,true);
+    uint32 respawnDelaySeconds = m_respawnDelay / IN_MILLISECONDS;
+    creature->SetRespawnDelay(respawnDelaySeconds, true);
 
-    if (!m_corpseAccelerationDecayDelay && creature->m_loot)
+    // Creature death already computed m_respawnTime once, so keep the live respawn clock
+    // aligned with the accelerated delay we just applied.
+    if (creature->GetRespawnTime() > time(nullptr))
     {
-        // LootAccess wraps Loot* now.
-        LootAccess lootAccess(creature->m_loot);
+        time_t remainingRespawn = creature->GetRespawnTime() - time(nullptr);
+        if (respawnDelaySeconds < static_cast<uint32>(remainingRespawn))
+            creature->SetRespawnTime(respawnDelaySeconds);
+    }
+    else if (respawnDelaySeconds)
+    {
+        // Death handling can reach this path before the core has written a future
+        // respawn timestamp. If we only update when one already exists, the preserved
+        // corpse flow later sees respawnTime==0 and treats the spawn as instantly ready.
+        creature->SetRespawnTime(respawnDelaySeconds);
+    }
+    else if (!respawnDelaySeconds)
+    {
+        creature->SetRespawnTime(0);
+    }
 
-        if (lootAccess.IsLootedForAll()) //No loot left. Just despawn the corpse.
+    creature->SaveRespawnTime();
+
+    bool hasLootPtr = creature->m_loot;
+    bool respawnAccelerated = (m_respawnDelay < originalRespawnDelay || !m_respawnDelay);
+    bool preserveLootCorpse = respawnAccelerated;
+    skipReason = "applied";
+    logRespawnAccel(respawnAccelerated, preserveLootCorpse);
+
+    if (!preserveLootCorpse && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "entry=" << creature->GetEntry()
+            << ",loot=" << (hasLootPtr ? 1 : 0)
+            << ",accelerated=" << (respawnAccelerated ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(this, "RespawnPreserveSkip", creature->GetName(), out.str());
+    }
+
+    if (preserveLootCorpse)
+    {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
         {
-            creature->RemoveCorpse();
-            return;
+            std::ostringstream out;
+            out << "entry=" << creature->GetEntry()
+                << ",respawn_time=" << creature->GetRespawnTime()
+                << ",delegated_to_core=1";
+            sPlayerbotAIConfig.logEvent(this, "RespawnCoreDelegated", creature->GetName(), out.str());
         }
 
-        uint32 defaultDelay = 2 * MINUTE;
-
-        CreatureInfo const* cinfo = creature->GetCreatureInfo();
-
-        if (cinfo->CorpseDelay)
-            defaultDelay = cinfo->CorpseDelay;
-        else if (sObjectMgr.IsEncounter(creature->GetEntry(), creature->GetMapId()))
-        {
-            // encounter boss forced decay timer to 1h
-            defaultDelay = 3600;                               // TODO: maybe add that to config file
-        }
-        else
-        {
-            switch (cinfo->Rank)
-            {
-            case CREATURE_ELITE_RARE:
-                defaultDelay = sWorld.getConfig(CONFIG_UINT32_CORPSE_DECAY_RARE);
-                break;
-            case CREATURE_ELITE_ELITE:
-                defaultDelay = sWorld.getConfig(CONFIG_UINT32_CORPSE_DECAY_ELITE);
-                break;
-            case CREATURE_ELITE_RAREELITE:
-                defaultDelay = sWorld.getConfig(CONFIG_UINT32_CORPSE_DECAY_RAREELITE);
-                break;
-            case CREATURE_ELITE_WORLDBOSS:
-                defaultDelay = sWorld.getConfig(CONFIG_UINT32_CORPSE_DECAY_WORLDBOSS);
-                break;
-            default:
-                defaultDelay = sWorld.getConfig(CONFIG_UINT32_CORPSE_DECAY_NORMAL);
-                break;
-            }
-        }
-
-        defaultDelay *= static_cast<uint32>(IN_MILLISECONDS) / (1+accelMod);
-
-        //We will decrease the loot time by a factor capping at 20 seconds.
-        m_corpseAccelerationDecayDelay = std::max(uint32(20 * static_cast<uint32>(IN_MILLISECONDS)), defaultDelay);
-        creature->SetCorpseAccelerationDelay(m_corpseAccelerationDecayDelay);
-
-        creature->ReduceCorpseDecayTimer();
         return;
     }
+    m_corpseAccelerationDecayDelay = std::max<uint32>(m_corpseAccelerationDecayDelay, 20 * IN_MILLISECONDS);
     MANGOS_ASSERT(m_corpseAccelerationDecayDelay < 24 * HOUR * static_cast<uint32>(IN_MILLISECONDS));
-    creature->SetCorpseAccelerationDelay(m_corpseAccelerationDecayDelay);
+    creature->SetCorpseDecayTimer(m_corpseAccelerationDecayDelay);
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "entry=" << creature->GetEntry() << ",timer_ms=" << m_corpseAccelerationDecayDelay;
+        sPlayerbotAIConfig.logEvent(this, "RespawnCorpseTimer", creature->GetName(), out.str());
+    }
 }
 
 std::list<Unit*> PlayerbotAI::GetAllHostileUnitsAroundWO(WorldObject* wo, float distanceAround)
 {
     std::list<Unit*> hostileUnits;
-    MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck u_check(wo, distanceAround);
+    if (!wo || !wo->IsInWorld())
+        return hostileUnits;
+
+    Unit* observer = dynamic_cast<Unit*>(wo);
+    if (!observer)
+        observer = bot;
+
+    if (!observer || !observer->IsInWorld())
+        return hostileUnits;
+
+    MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck u_check(wo, observer, distanceAround);
     MaNGOS::UnitListSearcher<MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck> searcher(hostileUnits, u_check);
     Cell::VisitAllObjects(wo, searcher, distanceAround);
 

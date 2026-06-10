@@ -19,6 +19,43 @@ bool TravelAction::Execute(Event& event)
     
     target->CheckStatus();     
 
+    if (target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK)
+    {
+        if (QuestRelationTravelDestination* questDest = dynamic_cast<QuestRelationTravelDestination*>(target->GetDestination()))
+        {
+            ObjectGuid targetGuid;
+            if (GuidPosition* guidPos = dynamic_cast<GuidPosition*>(target->GetPosition()))
+            {
+                if (WorldObject* wo = guidPos->GetWorldObject(bot->GetInstanceId()))
+                    targetGuid = wo->GetObjectGuid();
+            }
+
+            if (targetGuid)
+                bot->SetSelectionGuid(targetGuid);
+
+            bool didQuestWork = false;
+            if (questDest->GetRelation() == 0)
+                didQuestWork = ai->DoSpecificAction("accept quest", Event("quest travel", "*", bot), true);
+            else
+                didQuestWork = ai->DoSpecificAction("talk to quest giver", targetGuid ? Event("quest travel", targetGuid, bot) : Event("quest travel", "", bot), true);
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "entry=" << questDest->GetEntry()
+                    << " questId=" << questDest->GetQuestId()
+                    << " relation=" << (uint32)questDest->GetRelation()
+                    << " guid=" << (targetGuid ? targetGuid.GetRawValue() : 0)
+                    << " didQuestWork=" << (didQuestWork ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(ai, "QuestTravelWorkAction", target->GetDestination()->GetTitle(), out.str());
+            }
+
+            target->SetStatus(didQuestWork ? TravelStatus::TRAVEL_STATUS_EXPIRED : TravelStatus::TRAVEL_STATUS_COOLDOWN);
+            context->ClearValues("no active travel destinations");
+            RESET_AI_VALUE(bool, "travel target active");
+        }
+    }
+
     SET_AI_VALUE2(time_t, "manual time", "next travel check", time(0) + 5);
 
     return false;

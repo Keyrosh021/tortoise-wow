@@ -2,6 +2,22 @@
 /data/
 /build/
 /.vscode/
+
+# Local runtime and database directories
+/bin/
+/dbs/
+/logs/
+bin/
+dbs/
+logs/
+
 *.kate-swp
 *.exe
-/src/shared/revision.h
+*.log
+*.bak
+*.txt
+CMakeFiles/*
+etc/
+.deps/
+benchmark_results
+build*/

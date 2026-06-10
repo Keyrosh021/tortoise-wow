@@ -249,7 +249,25 @@ void AnticheatLib::Initialize()
 std::unique_ptr<SessionAnticheatInterface> AnticheatLib::NewSession(WorldSession *session, const BigNumber &K)
 {
     if (sAnticheatConfig.EnableAnticheat())
+    {
+        if (session->GetOS() == CLIENT_OS_WIN && !sWardenModuleMgr.HasWindowsModule())
+        {
+            sLog.outError("[Anticheat] Warden disabled for account %u: no Windows Warden modules are loaded.",
+                session->GetAccountId());
+            return std::make_unique<NullSessionAnticheat>(session);
+        }
+
+        if (session->GetOS() == CLIENT_OS_MAC &&
+            session->GetPlatform() == CLIENT_PLATFORM_X86 &&
+            !sWardenModuleMgr.HasMacModule())
+        {
+            sLog.outError("[Anticheat] Warden disabled for account %u: no Mac Warden modules are loaded.",
+                session->GetAccountId());
+            return std::make_unique<NullSessionAnticheat>(session);
+        }
+
         return std::make_unique<SessionAnticheat>(session, K);
+    }
 
     return std::make_unique<NullSessionAnticheat>(session);
 }
@@ -1177,4 +1195,3 @@ AnticheatLibInterface* GetAnticheatLib()
     static Anticheat::AnticheatLib l;
     return &l;
 }
-

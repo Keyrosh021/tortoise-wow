@@ -868,6 +868,7 @@ void Map::Update(uint32 t_diff)
 {
     XScopeStatTimer ScopeStatTimer{ UpdateTimer };
     uint32 updateMapTime = WorldTimer::getMSTime();
+    const uint32 playerCount = m_mapRefManager.getSize();
     _dynamicTree.update(t_diff);
 
     UpdateSessionsMovementAndSpellsIfNeeded();
@@ -957,13 +958,30 @@ void Map::Update(uint32 t_diff)
 
     bool packetBroadcastSlow = sWorld.GetBroadcaster()->IsMapSlow(GetInstanceId());
     if (sWorld.getConfig(CONFIG_UINT32_PERFLOG_SLOW_MAP_UPDATE) && updateMapTime > sWorld.getConfig(CONFIG_UINT32_PERFLOG_SLOW_MAP_UPDATE))
+    {
+        uint32 pendingObjectUpdates = 0;
+        {
+            std::lock_guard<std::mutex> lock(i_objectsToClientUpdate_lock);
+            pendingObjectUpdates = i_objectsToClientUpdate.size();
+        }
+
+        uint32 pendingRelocations = 0;
+        {
+            std::lock_guard<std::mutex> lock(i_unitsRelocated_lock);
+            pendingRelocations = i_unitsRelocated.size();
+        }
+
         sLog.out(LOG_PERFORMANCE, "Update single map %3u inst %2u: %3ums "
             "[sess %3ums|players %3ums|cells %3ums|sendObjUpdates %3ums"
-            "|relocations %3ums|players2 %3ums|wait%2u %3ums] %s",
+            "|relocations %3ums|players2 %3ums|wait%2u %3ums] "
+            "[players %u|activeNonPlayers " SIZEFMTD "|pendingObj %u|pendingReloc %u|vis %.1f|grid %.1f] %s",
             GetId(), GetInstanceId(), updateMapTime,
                  sessionsUpdateTime, playersUpdateTime, activeCellsUpdateTime, objectsUpdateTime,
                  visibilityUpdateTime, playersUpdateTime2, additionnalUpdateCounts, additionnalWaitTime,
+                playerCount, m_activeNonPlayers.size(), pendingObjectUpdates, pendingRelocations,
+                m_VisibleDistance, m_GridActivationDistance,
                 packetBroadcastSlow ? "SLOWBCAST" : "");
+    }
     // Continent only
     if (IsContinent())
     {

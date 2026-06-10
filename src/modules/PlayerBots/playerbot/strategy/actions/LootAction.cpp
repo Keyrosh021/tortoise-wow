@@ -14,8 +14,95 @@
 
 using namespace ai;
 
+namespace
+{
+    static constexpr float PLAYERBOT_STRICT_LOOT_RANGE = 2.0f;
+
+    void ClearActiveLootState(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        if (WorldSession* session = bot->GetSession())
+        {
+            if (ObjectGuid lootGuid = bot->GetLootGuid())
+                session->DoLootRelease(lootGuid);
+        }
+
+        if (bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING))
+            bot->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING);
+
+        if (!bot->IsStandState())
+            bot->SetStandState(UNIT_STAND_STATE_STAND);
+    }
+
+    bool HasAttachedLiveTarget(PlayerbotAI* ai, Player* bot, Unit* currentTarget)
+    {
+        if (!ai || !bot || !currentTarget || !currentTarget->IsInWorld() || sServerFacade.UnitIsDead(currentTarget))
+            return false;
+
+        const ObjectGuid targetGuid = currentTarget->GetObjectGuid();
+        return bot->GetVictim() == currentTarget || bot->GetSelectionGuid() == targetGuid;
+    }
+
+    bool HasActiveCombatPressure(PlayerbotAI* ai, Player* bot, Unit* currentTarget)
+    {
+        if (!ai || !bot)
+            return false;
+
+        AiObjectContext* aiContext = ai->GetAiObjectContext();
+        if (!aiContext)
+            return false;
+
+        if (aiContext->GetValue<bool>("combat", "self target")->Get())
+            return true;
+
+        if (HasAttachedLiveTarget(ai, bot, currentTarget))
+            return true;
+
+        if (aiContext->GetValue<bool>("has attackers")->Get())
+            return true;
+
+        return false;
+    }
+
+    bool IsSurvivalWoodLock(uint32 lockId)
+    {
+        switch (lockId)
+        {
+            case 1660:
+            case 1661:
+            case 1662:
+            case 1663:
+            case 1664:
+            case 1665:
+                return true;
+            default:
+                return false;
+        }
+    }
+}
+
 bool LootAction::Execute(Event& event)
 {
+    Unit* currentTarget = AI_VALUE(Unit*, "current target");
+    if (HasActiveCombatPressure(ai, bot, currentTarget))
+    {
+        ClearActiveLootState(bot);
+        context->GetValue<LootObject>("loot target")->Set(LootObject());
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "combat=" << (AI_VALUE2(bool, "combat", "self target") ? 1 : 0)
+                << " attackers=" << (AI_VALUE(bool, "has attackers") ? 1 : 0)
+                << " currentTargetAlive=" << (currentTarget && !sServerFacade.UnitIsDead(currentTarget) ? 1 : 0)
+                << " currentTarget=" << (currentTarget ? currentTarget->GetName() : "none");
+            sPlayerbotAIConfig.logEvent(ai, "LootDeferredCombat", currentTarget ? std::to_string(currentTarget->GetGUIDLow()) : "none", out.str());
+        }
+        return false;
+    }
+
     if (!AI_VALUE(bool, "has available loot"))
         return false;
 
@@ -52,6 +139,24 @@ enum ProfessionSpells
 
 bool OpenLootAction::Execute(Event& event)
 {
+    Unit* currentTarget = AI_VALUE(Unit*, "current target");
+    if (HasActiveCombatPressure(ai, bot, currentTarget))
+    {
+        ClearActiveLootState(bot);
+        context->GetValue<LootObject>("loot target")->Set(LootObject());
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "combat=" << (AI_VALUE2(bool, "combat", "self target") ? 1 : 0)
+                << " attackers=" << (AI_VALUE(bool, "has attackers") ? 1 : 0)
+                << " currentTargetAlive=" << (currentTarget && !sServerFacade.UnitIsDead(currentTarget) ? 1 : 0)
+                << " currentTarget=" << (currentTarget ? currentTarget->GetName() : "none");
+            sPlayerbotAIConfig.logEvent(ai, "LootOpenDeferredCombat", currentTarget ? std::to_string(currentTarget->GetGUIDLow()) : "none", out.str());
+        }
+        return false;
+    }
+
     LootObject lootObject = AI_VALUE(LootObject, "loot target");
     bool result = DoLoot(lootObject);
     if (result)
@@ -68,18 +173,50 @@ bool OpenLootAction::DoLoot(LootObject& lootObject)
         return false;
 
     Creature* creature = ai->GetCreature(lootObject.guid);
-    if (creature && sServerFacade.GetDistance2d(bot, creature) > INTERACTION_DISTANCE)
-        return false;
+    if (creature && sServerFacade.GetDistance2d(bot, creature) > PLAYERBOT_STRICT_LOOT_RANGE)
+    {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "target=" << creature->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, creature)
+                << " desired=" << PLAYERBOT_STRICT_LOOT_RANGE;
+            sPlayerbotAIConfig.logEvent(ai, "LootMoveBeforeOpen", std::to_string(creature->GetGUIDLow()), out.str());
+        }
+
+        bot->SetWalk(false, false);
+        return MoveNear(creature, PLAYERBOT_STRICT_LOOT_RANGE);
+    }
 
     if (creature && creature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE) && !creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))
     {
         if (!lootObject.IsLootPossible(bot)) //Clear loot if bot can't loot it.
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "target=" << creature->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, creature)
+                    << " canLoot=0";
+                sPlayerbotAIConfig.logEvent(ai, "LootRejected", std::to_string(creature->GetGUIDLow()), out.str());
+            }
+
             return true;
+        }
 
         WorldPacket packet(CMSG_LOOT, 8);
         packet << lootObject.guid;
         bot->GetSession()->HandleLootOpcode(packet);
         SetDuration(sPlayerbotAIConfig.lootDelay);
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "target=" << creature->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, creature)
+                << " desired=" << PLAYERBOT_STRICT_LOOT_RANGE;
+            sPlayerbotAIConfig.logEvent(ai, "LootOpenTrace", std::to_string(creature->GetGUIDLow()), out.str());
+        }
 
         if (bot->isRealPlayer())
         {
@@ -112,8 +249,20 @@ bool OpenLootAction::DoLoot(LootObject& lootObject)
     }
 
     GameObject* go = ai->GetGameObject(lootObject.guid);
-    if (go && sServerFacade.GetDistance2d(bot, go) > INTERACTION_DISTANCE)
-        return false;
+    if (go && sServerFacade.GetDistance2d(bot, go) > PLAYERBOT_STRICT_LOOT_RANGE)
+    {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "target=" << go->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, go)
+                << " desired=" << PLAYERBOT_STRICT_LOOT_RANGE;
+            sPlayerbotAIConfig.logEvent(ai, "LootMoveBeforeOpen", std::to_string(go->GetGUIDLow()), out.str());
+        }
+
+        bot->SetWalk(false, false);
+        return MoveNear(go, PLAYERBOT_STRICT_LOOT_RANGE);
+    }
 
     if (go && (go->IsInUse() || go->GetGoState() == GO_STATE_ACTIVE))
         return false;
@@ -145,12 +294,33 @@ bool OpenLootAction::DoLoot(LootObject& lootObject)
         return false;
 
     if (!lootObject.IsLootPossible(bot)) //Clear loot if bot can't loot it.
+    {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "target=" << (go ? go->GetName() : "gameobject")
+                << " dist=" << std::fixed << std::setprecision(2) << (go ? sServerFacade.GetDistance2d(bot, go) : 0.0f)
+                << " canLoot=0";
+            sPlayerbotAIConfig.logEvent(ai, "LootRejected", std::to_string(lootObject.guid.GetCounter()), out.str());
+        }
+
         return true;
+    }
 
     //Keys need to use the key 
     if (spellId == sPlayerbotAIConfig.openGoSpell && go && lootObject.reqItem && bot->HasItemCount(lootObject.reqItem,1,false))
     {
         return ai->DoSpecificAction("use", Event("do loot", chat->formatQItem(lootObject.reqItem) + " " + chat->formatGameobject(go)));
+    }
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "target=" << (go ? go->GetName() : "gameobject")
+            << " dist=" << std::fixed << std::setprecision(2) << (go ? sServerFacade.GetDistance2d(bot, go) : 0.0f)
+            << " desired=" << PLAYERBOT_STRICT_LOOT_RANGE
+            << " spellId=" << spellId;
+        sPlayerbotAIConfig.logEvent(ai, "LootOpenTrace", std::to_string(lootObject.guid.GetCounter()), out.str());
     }
 
     return ai->CastSpell(spellId, bot);
@@ -203,6 +373,9 @@ uint32 OpenLootAction::GetOpeningSpell(LootObject& lootObject, GameObject* go)
 
 bool OpenLootAction::CanOpenLock(LootObject& lootObject, const SpellEntry* pSpellInfo, GameObject* go)
 {
+    if (go && IsSurvivalWoodLock(go->GetGOInfo()->GetLockId()) && !bot->GetPlayerbotAI()->HasSkill(SKILL_SURVIVAL))
+        return false;
+
     for (int effIndex = 0; effIndex <= EFFECT_INDEX_2; effIndex++)
     {
         if (pSpellInfo->Effect[effIndex] != SPELL_EFFECT_OPEN_LOCK && pSpellInfo->Effect[effIndex] != SPELL_EFFECT_SKINNING)
@@ -254,6 +427,7 @@ bool OpenLootAction::CanOpenLock(uint32 skillId, uint32 reqSkillValue)
 bool StoreLootAction::Execute(Event& event)
 {
     Player* requester = event.getOwner() ? event.getOwner() : GetMaster();
+    Unit* currentTarget = AI_VALUE(Unit*, "current target");
     WorldPacket p(event.getPacket()); // (8+1+4+1+1+4+4+4+4+4+1)
     ObjectGuid guid;
     uint8 loot_type;
@@ -271,6 +445,45 @@ bool StoreLootAction::Execute(Event& event)
     }
 
     bot->SetLootGuid(guid);
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "lootGuid=" << guid.GetCounter()
+            << " lootType=" << (uint32)loot_type
+            << " gold=" << gold
+            << " items=" << (uint32)items
+            << " combat=" << (AI_VALUE2(bool, "combat", "self target") ? 1 : 0)
+            << " attackers=" << (AI_VALUE(bool, "has attackers") ? 1 : 0)
+            << " currentTargetAlive=" << (currentTarget && !sServerFacade.UnitIsDead(currentTarget) ? 1 : 0)
+            << " currentTarget=" << (currentTarget ? currentTarget->GetName() : "none");
+        sPlayerbotAIConfig.logEvent(ai, "StoreLootCombatTrace", std::to_string(guid.GetCounter()), out.str());
+    }
+
+    if (HasActiveCombatPressure(ai, bot, currentTarget))
+    {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "lootGuid=" << guid.GetCounter()
+                << " combat=" << (AI_VALUE2(bool, "combat", "self target") ? 1 : 0)
+                << " attackers=" << (AI_VALUE(bool, "has attackers") ? 1 : 0)
+                << " currentTargetAlive=" << (currentTarget && !sServerFacade.UnitIsDead(currentTarget) ? 1 : 0)
+                << " currentTarget=" << (currentTarget ? currentTarget->GetName() : "none")
+                << " reason=store-loot-during-combat";
+            sPlayerbotAIConfig.logEvent(ai, "StoreLootDeferredCombat", std::to_string(guid.GetCounter()), out.str());
+        }
+
+        AI_VALUE(LootObjectStack*, "available loot")->Remove(guid);
+        RESET_AI_VALUE(LootObject, "loot target");
+        RESET_AI_VALUE2(bool, "should loot object", std::to_string(guid.GetRawValue()));
+        bot->SetLootGuid(ObjectGuid());
+
+        WorldPacket releasePacket(CMSG_LOOT_RELEASE, 8);
+        releasePacket << guid;
+        bot->GetSession()->HandleLootReleaseOpcode(releasePacket);
+        return false;
+    }
 
     Loot* loot = sLootMgr.GetLoot(bot);
 
@@ -448,5 +661,6 @@ bool ReleaseLootAction::Execute(Event& event)
         bot->GetSession()->HandleLootReleaseOpcode(packet);
     }
 
+    bot->SetLootGuid(ObjectGuid());
     return true;
 }

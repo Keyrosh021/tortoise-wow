@@ -187,14 +187,17 @@ bool PullStrategy::CanDoPullAction(Unit* target)
 {
     // Check if the bot can perform the pull action
 
-    // check if has ranged weapon
-    if (ai->GetBot()->getClass() != CLASS_DRUID && ai->GetBot()->getClass() != CLASS_PALADIN && !ai->GetBot()->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED))
-        return false;
-
     bool canPull = false;
     const std::string& pullAction = GetPullActionName();
     if (!pullAction.empty())
     {
+        if (pullAction == "shoot")
+        {
+            // Weapon-based pulls still require an actual ranged weapon.
+            if (!ai->GetBot()->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED))
+                return false;
+        }
+
         // Temporarily set the pull target to be used by the can do specific action method
         AiObjectContext* context = ai->GetAiObjectContext();
         Unit* previousTarget = GetTarget();

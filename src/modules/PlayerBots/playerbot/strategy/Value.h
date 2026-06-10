@@ -7,6 +7,7 @@
 #include "AiObject.h"
 #include "playerbot/GuidPosition.h"
 #include "NamedObjectContext.h"
+#include <mutex>
 
 namespace ai
 {
@@ -58,6 +59,7 @@ namespace ai
     public:
         virtual T Get() override
         {
+            std::lock_guard<std::recursive_mutex> lock(valueMutex);
             time_t now = time(0);
             if (!lastCheckTime || (checkInterval < 2 && (now - lastCheckTime > 0.1)) || now - lastCheckTime >= checkInterval / 2)
             {
@@ -70,15 +72,28 @@ namespace ai
         }
         virtual T LazyGet() override
         {
+            std::lock_guard<std::recursive_mutex> lock(valueMutex);
             if (!lastCheckTime)
                 return Get();
             return value;
         }
-        virtual void Set(T value) override { this->value = value; }
+        virtual void Set(T value) override
+        {
+            std::lock_guard<std::recursive_mutex> lock(valueMutex);
+            this->value = value;
+        }
         virtual void Update() { }
-        virtual void Reset() override { lastCheckTime = 0; }
+        virtual void Reset() override
+        {
+            std::lock_guard<std::recursive_mutex> lock(valueMutex);
+            lastCheckTime = 0;
+        }
         virtual bool Expired() override { return Expired(checkInterval / 2); }
-        virtual bool Expired(uint32 interval) override { return time(0) - lastCheckTime >= interval; }
+        virtual bool Expired(uint32 interval) override
+        {
+            std::lock_guard<std::recursive_mutex> lock(valueMutex);
+            return time(0) - lastCheckTime >= interval;
+        }
     protected:
         virtual T Calculate() = 0;
 
@@ -86,6 +101,7 @@ namespace ai
         int checkInterval;
         time_t lastCheckTime;
         T value;
+        mutable std::recursive_mutex valueMutex;
     };
 
     template <class T> class SingleCalculatedValue : public CalculatedValue<T>
@@ -95,6 +111,7 @@ namespace ai
 
         virtual T Get() override
         {
+            std::lock_guard<std::recursive_mutex> lock(this->valueMutex);
             time_t now = time(0);
             if (!this->lastCheckTime)
             {

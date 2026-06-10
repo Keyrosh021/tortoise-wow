@@ -58,8 +58,11 @@ else( OPENSSL_INCLUDE_DIR AND OPENSSL_LIBRARIES )
       ssl
     PATHS
       /usr/lib
+      /usr/lib/x86_64-linux-gnu
+      /usr/lib64
       /usr/lib/ssl
       /usr/local/lib
+      /usr/local/lib64
       /usr/local/lib/ssl
       /usr/local/ssl/lib
       ${TMP_OPENSSL_LIBRARIES}
@@ -83,8 +86,11 @@ else( OPENSSL_INCLUDE_DIR AND OPENSSL_LIBRARIES )
         crypto
       PATHS
         /usr/lib
+        /usr/lib/x86_64-linux-gnu
+        /usr/lib64
         /usr/lib/ssl
         /usr/local/lib
+        /usr/local/lib64
         /usr/local/lib/ssl
         /usr/local/ssl/lib
         ${TMP_OPENSSL_LIBRARIES}

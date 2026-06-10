@@ -97,39 +97,43 @@ add_executable(${EXECUTABLE_NAME}
   ${EXECUTABLE_SRCS}
 )
 
+set(MANGOSD_CORE_LIBS
+  game
+  shared
+  framework
+  g3dlite
+)
+
 if(USE_SCRIPTS)
+  list(APPEND MANGOSD_CORE_LIBS scripts)
+endif()
+
+if(BUILD_PLAYERBOTS)
+  list(APPEND MANGOSD_CORE_LIBS playerbots)
+endif()
+
+if(UNIX)
   target_link_libraries(${EXECUTABLE_NAME}
-    game
-    scripts
-    shared
-    framework
-    g3dlite
+    -Wl,--start-group
+    ${MANGOSD_CORE_LIBS}
+    -Wl,--end-group
     ${ACE_LIBRARIES}
   )
 else()
   target_link_libraries(${EXECUTABLE_NAME}
-    game
-    #scripts
-    shared
-    framework
-    g3dlite 
+    ${MANGOSD_CORE_LIBS}
     ${ACE_LIBRARIES}
   )
 endif()
 
 if(USE_DISCORD_BOT)
-    target_link_libraries(${EXECUTABLE_NAME}
-	dpp
+  target_link_libraries(${EXECUTABLE_NAME}
+    dpp
   )
 endif()
 
-# playerbots library link gated by BUILD_PLAYERBOTS.
-if(BUILD_PLAYERBOTS)
-  target_link_libraries(${EXECUTABLE_NAME} playerbots)
-endif()
-
 target_link_libraries(${EXECUTABLE_NAME}
-    libdeflate
+  libdeflate
 )
 
 # Boost lib search path for playerbots' transitive boost references.

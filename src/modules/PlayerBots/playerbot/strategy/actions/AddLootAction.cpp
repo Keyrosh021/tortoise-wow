@@ -158,6 +158,15 @@ bool AddAllLootAction::AddLoot(Player* requester, ObjectGuid guid)
 
     if (isInGroup && !ai->IsGroupLeader())
     {
+        WorldObject* freshWo = ai->GetWorldObject(guid);
+        if (!freshWo)
+        {
+            ai->TellDebug(requester, "Loot object disappeared before hostile scan.", "debug loot");
+            return false;
+        }
+
+        wo = freshWo;
+
         float MOB_AGGRO_DISTANCE = 30.0f;
         std::list<Unit*> hostiles = ai->GetAllHostileNPCNonPetUnitsAroundWO(wo, MOB_AGGRO_DISTANCE);
 
@@ -254,6 +263,12 @@ bool AddGatheringLootAction::AddLoot(Player* requester, ObjectGuid guid)
     }
 
     //check hostile units after distance checks, to avoid unnecessary calculations
+
+    WorldObject* freshWo = ai->GetWorldObject(guid);
+    if (!freshWo)
+        return false;
+
+    wo = freshWo;
 
     float MOB_AGGRO_DISTANCE = 30.0f;
     std::list<Unit*> hostiles = ai->GetAllHostileNPCNonPetUnitsAroundWO(wo, MOB_AGGRO_DISTANCE);

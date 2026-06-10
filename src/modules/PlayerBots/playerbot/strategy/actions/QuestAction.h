@@ -19,6 +19,7 @@ namespace ai
         bool AcceptQuest(Player* requester, Quest const* quest, uint64 questGiver);
         bool ProcessQuests(ObjectGuid questGiver);
         bool ProcessQuests(WorldObject* questGiver);
+        bool ShouldSkipQuestForBot(Quest const* quest) const;
     };
     
     class QuestUpdateAddKillAction : public Action

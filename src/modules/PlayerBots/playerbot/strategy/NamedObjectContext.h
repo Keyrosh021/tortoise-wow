@@ -5,6 +5,8 @@
 #include <set>
 #include <list>
 #include <map>
+#include <mutex>
+#include <vector>
 
 namespace ai
 {
@@ -200,6 +202,7 @@ namespace ai
 
         T* Create(std::string name, PlayerbotAI* ai)
         {
+            std::lock_guard<std::recursive_mutex> lock(createdMutex);
             if (created.find(name) == created.end())
                 return created[name] = NamedObjectFactory<T>::Create(name, ai);
 
@@ -213,50 +216,91 @@ namespace ai
 
         void Clear()
         {
-            for (typename std::map<std::string, T*>::iterator i = created.begin(); i != created.end(); i++)
+            std::vector<T*> objects;
             {
-                if (i->second)
-                    delete i->second;
+                std::lock_guard<std::recursive_mutex> lock(createdMutex);
+                for (typename std::map<std::string, T*>::iterator i = created.begin(); i != created.end(); i++)
+                {
+                    if (i->second)
+                        objects.push_back(i->second);
+                }
+                created.clear();
             }
 
-            created.clear();
+            for (T* object : objects)
+            {
+                delete object;
+            }
         }
 
         void Erase(const std::string& name)
         {
-            if (created.find(name) != created.end())
+            T* object = nullptr;
             {
-                delete created[name];
-                created.erase(name);
+                std::lock_guard<std::recursive_mutex> lock(createdMutex);
+                auto it = created.find(name);
+                if (it != created.end())
+                {
+                    object = it->second;
+                    created.erase(it);
+                }
+            }
+
+            if (object)
+            {
+                delete object;
             }
         }
 
         void Update()
         {
-            for (typename std::map<std::string, T*>::iterator i = created.begin(); i != created.end(); i++)
+            std::vector<T*> objects;
             {
-                if (i->second)
-                    i->second->Update();
+                std::lock_guard<std::recursive_mutex> lock(createdMutex);
+                for (typename std::map<std::string, T*>::iterator i = created.begin(); i != created.end(); i++)
+                {
+                    if (i->second)
+                        objects.push_back(i->second);
+                }
+            }
+
+            for (T* object : objects)
+            {
+                object->Update();
             }
         }
 
         void Reset()
         {
-            for (typename std::map<std::string, T*>::iterator i = created.begin(); i != created.end(); i++)
+            std::vector<T*> objects;
             {
-                if (i->second)
-                    i->second->Reset();
+                std::lock_guard<std::recursive_mutex> lock(createdMutex);
+                for (typename std::map<std::string, T*>::iterator i = created.begin(); i != created.end(); i++)
+                {
+                    if (i->second)
+                        objects.push_back(i->second);
+                }
+            }
+
+            for (T* object : objects)
+            {
+                object->Reset();
             }
         }
 
         bool IsShared() { return shared; }
         bool IsSupportsSiblings() { return supportsSiblings; }
 
-        bool IsCreated(const std::string& name) { return created.find(name) != created.end(); }
+        bool IsCreated(const std::string& name)
+        {
+            std::lock_guard<std::recursive_mutex> lock(createdMutex);
+            return created.find(name) != created.end();
+        }
 
         std::set<std::string> GetCreated()
         {
             std::set<std::string> keys;
+            std::lock_guard<std::recursive_mutex> lock(createdMutex);
             for (typename std::map<std::string, T*>::iterator it = created.begin(); it != created.end(); it++)
                 keys.insert(it->first);
             return keys;
@@ -264,6 +308,7 @@ namespace ai
 
     protected:
         std::map<std::string, T*> created;
+        mutable std::recursive_mutex createdMutex;
         bool shared;
         bool supportsSiblings;
     };

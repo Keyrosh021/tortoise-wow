@@ -378,6 +378,7 @@ public:
     void HandleMasterIncomingPacket(const WorldPacket& packet);
     void HandleMasterOutgoingPacket(const WorldPacket& packet);
 	void HandleTeleportAck();
+    uint32 GetPendingTeleportAckCounter() const;
     void ChangeEngine(BotState type);
     void DoNextAction(bool minimal = false);
     bool CanDoSpecificAction(const std::string& name, bool isUseful = true, bool isPossible = true);
@@ -658,6 +659,8 @@ public:
     bool HasPlayerNearby(WorldPosition pos, float range);
     bool HasPlayerNearby(float range = sPlayerbotAIConfig.reactDistance);
     bool HasManyPlayersNearby(uint32 trigerrValue = 20, float range = sPlayerbotAIConfig.sightDistance);
+
+    uint32 pendingTeleportAckCounter = 0;
     bool ChannelHasRealPlayer(std::string channelName);
 
 
@@ -757,6 +760,8 @@ public:
 private:
     bool UpdateAIReaction(uint32 elapsed, bool minimal, bool isStunned);
     void UpdateFaceTarget(uint32 elapsed, bool minimal);
+    void ResetStaleTargetState();
+    bool DetectAndClearStaleTarget();
 
 protected:
 	Player* bot;
@@ -788,6 +793,13 @@ protected:
     bool inCombat = false;
     bool isMoving = false;
     bool isWaiting = false;
+    ObjectGuid staleTargetGuid;
+    time_t staleTargetSince = 0;
+    time_t staleTargetLastProgress = 0;
+    float staleTargetLastX = 0.0f;
+    float staleTargetLastY = 0.0f;
+    float staleTargetLastZ = 0.0f;
+    uint32 staleTargetLastTargetHealth = 0;
     BotCheatMask cheatMask = BotCheatMask::none;
     WorldPosition jumpDestination;
     uint32 jumpTime;

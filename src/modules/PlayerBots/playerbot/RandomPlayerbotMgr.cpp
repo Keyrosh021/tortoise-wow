@@ -41,6 +41,9 @@
 #include "playerbot/TravelMgr.h"
 #include <iomanip>
 #include <float.h>
+#include <chrono>
+#include <sstream>
+#include <thread>
 
 #if PLATFORM == PLATFORM_WINDOWS
 #include "windows.h"
@@ -51,6 +54,22 @@ using namespace ai;
 using namespace MaNGOS;
 
 INSTANTIATE_SINGLETON_1(RandomPlayerbotMgr);
+
+namespace
+{
+    bool ExecuteRandomBotEventWrite(std::string sql)
+    {
+        for (uint8 attempt = 0; attempt < 3; ++attempt)
+        {
+            if (CharacterDatabase.DirectExecute(sql.c_str()))
+                return true;
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10 * (attempt + 1)));
+        }
+
+        return false;
+    }
+}
 
 #ifdef CMANGOS
 #include <boost/thread/thread.hpp>
@@ -641,6 +660,36 @@ void RandomPlayerbotMgr::LogPlayerLocation()
     }
 }
 
+namespace
+{
+    template <class Callback>
+    uint32 ForEachCircularBotSlice(std::list<uint32> const& bots, size_t& cursor, uint32 maxVisits, Callback&& callback)
+    {
+        const size_t total = bots.size();
+        if (!total || !maxVisits)
+            return 0;
+
+        if (cursor >= total)
+            cursor %= total;
+
+        auto it = bots.begin();
+        std::advance(it, cursor);
+
+        uint32 visited = 0;
+        while (visited < maxVisits)
+        {
+            callback(*it);
+            ++visited;
+            ++it;
+            if (it == bots.end())
+                it = bots.begin();
+        }
+
+        cursor = (cursor + visited) % total;
+        return visited;
+    }
+}
+
 void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
 #ifdef MEMORY_MONITOR
@@ -648,11 +697,36 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     sMemoryMonitor.LogCount(sConfig.GetStringDefault("LogsDir") + "/" + "memory.csv");
 #endif
 
+    const uint32 totalUpdateStart = WorldTimer::getMSTime();
+    uint32 updateSessionsTime = 0;
+    uint32 scaleActivityTime = 0;
+    uint32 asyncLoginTime = 0;
+    uint32 addRandomBotsTime = 0;
+    uint32 checkPlayersTime = 0;
+    uint32 checkLfgTime = 0;
+    uint32 checkBgTime = 0;
+    uint32 addOfflineGroupBotsTime = 0;
+    uint32 processBotLoopTime = 0;
+    uint32 loginQueueTime = 0;
+    uint32 loginFreeBotsTime = 0;
+    uint32 logPlayerLocationTime = 0;
+    uint32 delayedFacingFixTime = 0;
+    uint32 mirrorAhTime = 0;
+    uint32 perfInitTime = 0;
+    uint32 databasePingTime = 0;
+    uint32 processBotCalls = 0;
+    uint32 processBotInspected = 0;
+    uint32 updateBotsProcessed = 0;
+    uint32 loginQueueInspected = 0;
+    uint32 loginAttemptsStarted = 0;
+
     // tick random bots' sessions so
     // teleport ACKs (HandleTeleportAck) and queued packets get processed.
     // See PlayerbotMgr::UpdateAIInternal for the rationale — same call,
     // same purpose, applied to the random-bot pool.
+    uint32 phaseStart = WorldTimer::getMSTime();
     UpdateSessions(elapsed);
+    updateSessionsTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
         return;
@@ -660,12 +734,17 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     if (!playersLevel)
         playersLevel = sPlayerbotAIConfig.syncLevelNoPlayer;
 
+    phaseStart = WorldTimer::getMSTime();
     ScaleBotActivity();
+    scaleActivityTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
+
     if (sPlayerbotAIConfig.asyncBotLogin)
     {
+        phaseStart = WorldTimer::getMSTime();
         auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "AsyncBotLogin");
         sPlayerBotLoginMgr.Update(players);
         pmo.reset();
+        asyncLoginTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
     }
 
     uint32 maxAllowedBotCount = GetEventValue(0, "bot_count");
@@ -698,94 +777,157 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
 
         if (logInAllowed)
         {
+            phaseStart = WorldTimer::getMSTime();
             AddRandomBots();
+            addRandomBotsTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
         }
     }
 
     if (sPlayerbotAIConfig.syncLevelWithPlayers && players.size())
     {
         if (time(nullptr) > (PlayersCheckTimer + 60))
+        {
+            phaseStart = WorldTimer::getMSTime();
             CheckPlayers();
+            checkPlayersTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
+        }
     }
 
     if (sPlayerbotAIConfig.randomBotJoinLfg && players.size())
     {
         if (time(nullptr) > (LfgCheckTimer + 30))
+        {
+            phaseStart = WorldTimer::getMSTime();
             CheckLfgQueue();
+            checkLfgTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
+        }
     }
 
     if (sPlayerbotAIConfig.randomBotJoinBG/* && players.size()*/)
     {
         if (time(nullptr) > (BgCheckTimer + 30))
+        {
+            phaseStart = WorldTimer::getMSTime();
             CheckBgQueue();
+            checkBgTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
+        }
     }
 
     if (time(nullptr) > (OfflineGroupBotsTimer + 5) && players.size())
+    {
+        phaseStart = WorldTimer::getMSTime();
         AddOfflineGroupBots();
+        addOfflineGroupBotsTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
+    }
 
     uint32 updateBots = sPlayerbotAIConfig.randomBotsPerInterval == 0 ? UINT32_MAX : sPlayerbotAIConfig.randomBotsPerInterval;
 
     //Update bots
-    for (auto bot : availableBots)
+    phaseStart = WorldTimer::getMSTime();
+    uint32 processScanBudget = availableBotCount;
+    if (!sPlayerbotAIConfig.disableBotOptimizations)
     {
-        if (GetPlayerBot(bot))
-        {
-            if (ProcessBot(bot))
-                updateBots--;
-
-            if (!updateBots)
-                break;
-        }
+        const uint32 desiredUpdates = sPlayerbotAIConfig.randomBotsPerInterval == 0 ? 128u : sPlayerbotAIConfig.randomBotsPerInterval;
+        processScanBudget = std::min<uint32>(availableBotCount, std::max<uint32>(desiredUpdates * 8, 1024u));
     }
+
+    processBotInspected = ForEachCircularBotSlice(availableBots, processBotCursor, processScanBudget, [&](uint32 bot)
+    {
+        if (!GetPlayerBot(bot))
+            return;
+
+        ++processBotCalls;
+        if (ProcessBot(bot))
+        {
+            if (updateBots != UINT32_MAX)
+                --updateBots;
+            ++updateBotsProcessed;
+        }
+    });
+    processBotLoopTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     uint32 maxLogins = sPlayerbotAIConfig.randomBotsMaxLoginsPerInterval;
 
     //Log in bots
     if (sRandomPlayerbotMgr.GetDatabaseDelay("CharacterDatabase") < 10 * IN_MILLISECONDS && !sPlayerbotAIConfig.asyncBotLogin && onlineBotCount < maxAllowedBotCount && maxLogins > 0)
     {
-        for (auto bot : availableBots)
+        phaseStart = WorldTimer::getMSTime();
+        uint32 loginScanBudget = availableBotCount;
+        if (!sPlayerbotAIConfig.disableBotOptimizations)
+            loginScanBudget = std::min<uint32>(availableBotCount, std::max<uint32>(maxLogins * 12, 600u));
+
+        loginQueueInspected = ForEachCircularBotSlice(availableBots, loginBotCursor, loginScanBudget, [&](uint32 bot)
         {
+            if (!maxLogins || onlineBotCount >= maxAllowedBotCount)
+                return;
+
             if (GetPlayerBot(bot))
-                continue;   
+                return;
 
             if (!eventCache[bot].empty() && GetEventValue(bot, "login"))
             {
                 onlineBotCount++;
-                continue;
+                return;
             }
 
             if (GetEventValue(bot, "login"))
                 onlineBotCount++;
 
             if (onlineBotCount >= maxAllowedBotCount)
-                break;
+                return;
 
             if (ProcessBot(bot)) {
                 --maxLogins;
+                ++onlineBotCount;
+                ++loginAttemptsStarted;
             }
-
-            if (maxLogins == 0)
-                break;
-        }
+        });
+        loginQueueTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
     }
 
+    phaseStart = WorldTimer::getMSTime();
     LoginFreeBots();
+    loginFreeBotsTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     //sLog.outString("[char %d, bot %d]", CharacterDatabase.m_threadBody->m_sqlQueue.size(), CharacterDatabase.m_threadBody->m_sqlQueue.size());
    
+    phaseStart = WorldTimer::getMSTime();
     LogPlayerLocation();
+    logPlayerLocationTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
+    phaseStart = WorldTimer::getMSTime();
     DelayedFacingFix();
+    delayedFacingFixTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
+    phaseStart = WorldTimer::getMSTime();
     MirrorAh();
+    mirrorAhTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
+    phaseStart = WorldTimer::getMSTime();
     for (auto& [mapId, map] : sMapMgr.Maps())
     {
         sPerformanceMonitor.Init(map->GetId(), map->GetInstanceId());
     }
+    perfInitTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     //Ping character database.
+    phaseStart = WorldTimer::getMSTime();
     CharacterDatabase.AsyncPQuery(&RandomPlayerbotMgr::DatabasePing, sWorld.GetCurrentMSTime(), std::string("CharacterDatabase"), "SELECT 1");
+    databasePingTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
+
+    const uint32 totalUpdateTime = WorldTimer::getMSTimeDiffToNow(totalUpdateStart);
+    if (sWorld.getConfig(CONFIG_UINT32_PERFLOG_SLOW_SESSIONS_UPDATE) &&
+        totalUpdateTime > sWorld.getConfig(CONFIG_UINT32_PERFLOG_SLOW_SESSIONS_UPDATE))
+    {
+        sLog.out(LOG_PERFORMANCE,
+            "RandomPlayerbotMgr update: %ums [sessions %ums|scale %ums|asyncLogin %ums|addBots %ums|checkPlayers %ums|checkLfg %ums|checkBg %ums|offlineGroups %ums|processBotLoop %ums|loginQueue %ums|loginFree %ums|logLoc %ums|facing %ums|mirrorAh %ums|perfInit %ums|dbPing %ums] [available %u|online %u|target %u|playersMap " SIZEFMTD "|processInspected %u|processCalls %u|processed %u|loginInspected %u|loginStarts %u]",
+            totalUpdateTime, updateSessionsTime, scaleActivityTime, asyncLoginTime, addRandomBotsTime,
+            checkPlayersTime, checkLfgTime, checkBgTime, addOfflineGroupBotsTime, processBotLoopTime,
+            loginQueueTime, loginFreeBotsTime, logPlayerLocationTime, delayedFacingFixTime,
+            mirrorAhTime, perfInitTime, databasePingTime, availableBotCount, onlineBotCount,
+            maxAllowedBotCount, players.size(), processBotInspected, processBotCalls, updateBotsProcessed,
+            loginQueueInspected, loginAttemptsStarted);
+    }
 
     PlayerbotHolder::UpdateAIInternal(elapsed, minimal);
 }
@@ -3310,6 +3452,8 @@ std::list<uint32> RandomPlayerbotMgr::GetBgBots(uint32 bracket)
 
 uint32 RandomPlayerbotMgr::GetEventValue(uint32 bot, std::string event)
 {
+    std::lock_guard<std::mutex> guard(m_eventCacheMutex);
+
     // load all events at once on first event load
     if (eventCache[bot].empty())
     {
@@ -3348,6 +3492,8 @@ uint32 RandomPlayerbotMgr::GetEventValue(uint32 bot, std::string event)
 
 int32 RandomPlayerbotMgr::GetValueValidTime(uint32 bot, std::string event)
 {
+    std::lock_guard<std::mutex> guard(m_eventCacheMutex);
+
     if (eventCache.find(bot) == eventCache.end())
         return 0;
 
@@ -3364,6 +3510,7 @@ std::string RandomPlayerbotMgr::GetEventData(uint32 bot, std::string event)
     std::string data = "";
     if (GetEventValue(bot, event))
     {
+        std::lock_guard<std::mutex> guard(m_eventCacheMutex);
         CachedEvent e = eventCache[bot][event];
         data = e.data;
     }
@@ -3372,22 +3519,44 @@ std::string RandomPlayerbotMgr::GetEventData(uint32 bot, std::string event)
 
 uint32 RandomPlayerbotMgr::SetEventValue(uint32 bot, std::string event, uint32 value, uint32 validIn, std::string data)
 {
-    CharacterDatabase.PExecute("DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '%u' AND event = '%s'",
-            bot, event.c_str());
+    std::lock_guard<std::mutex> guard(m_eventCacheMutex);
+
+    std::string eventSql = event;
+    CharacterDatabase.escape_string(eventSql);
+
+    std::string dataSql = data;
+    CharacterDatabase.escape_string(dataSql);
+
+    std::ostringstream sql;
+    bool writeOk = false;
+
     if (value)
     {
-        if (data != "")
+        if (!data.empty())
         {
-            CharacterDatabase.PExecute(
-                "INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`, `data`) VALUES ('%u', '%u', '%u', '%u', '%s', '%u', '%s')",
-                0, bot, (uint32)time(0), validIn, event.c_str(), value, data.c_str());
+            sql << "INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`, `data`) VALUES (0, "
+                << bot << ", " << static_cast<uint32>(time(0)) << ", " << validIn << ", '" << eventSql << "', " << value
+                << ", '" << dataSql << "') ON DUPLICATE KEY UPDATE `time` = VALUES(`time`), validIn = VALUES(validIn), `value` = VALUES(`value`), `data` = VALUES(`data`)";
         }
         else
         {
-            CharacterDatabase.PExecute(
-                "INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('%u', '%u', '%u', '%u', '%s', '%u')",
-                0, bot, (uint32)time(0), validIn, event.c_str(), value);
+            sql << "INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`, `data`) VALUES (0, "
+                << bot << ", " << static_cast<uint32>(time(0)) << ", " << validIn << ", '" << eventSql << "', " << value
+                << ", NULL) ON DUPLICATE KEY UPDATE `time` = VALUES(`time`), validIn = VALUES(validIn), `value` = VALUES(`value`), `data` = NULL";
         }
+
+        writeOk = ExecuteRandomBotEventWrite(sql.str());
+    }
+    else
+    {
+        sql << "DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = " << bot << " AND event = '" << eventSql << "'";
+        writeOk = ExecuteRandomBotEventWrite(sql.str());
+    }
+
+    if (!writeOk)
+    {
+        sLog.outError("RandomPlayerbotMgr::SetEventValue failed for bot=%u event=%s value=%u", bot, event.c_str(), value);
+        return 0;
     }
 
     CachedEvent e(value, (uint32)time(0), validIn, data);
@@ -4257,7 +4426,29 @@ void RandomPlayerbotMgr::MirrorAh()
     //Now loops over all houses. Can probably be faction specific later.
     for (auto house : houses)
     {
-        AuctionHouseObject* auctionHouse = sAuctionMgr.GetAuctionsMap(house);
+        uint32 houseId = 7;
+        switch (house)
+        {
+            case (AuctionHouseType)0:
+                houseId = 1;
+                break;
+            case (AuctionHouseType)1:
+                houseId = 6;
+                break;
+            case (AuctionHouseType)2:
+                houseId = 7;
+                break;
+            default:
+                continue;
+        }
+
+        AuctionHouseEntry const* houseEntry = sAuctionHouseStore.LookupEntry(houseId);
+        if (!houseEntry)
+            continue;
+
+        AuctionHouseObject* auctionHouse = sAuctionMgr.GetAuctionsMap(houseEntry);
+        if (!auctionHouse)
+            continue;
 
         AuctionHouseObject::AuctionEntryMap const& map = *auctionHouse->GetAuctions();
 

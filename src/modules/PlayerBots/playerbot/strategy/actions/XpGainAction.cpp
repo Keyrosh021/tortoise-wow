@@ -33,6 +33,13 @@ bool XpGainAction::Execute(Event& event)
         sPlayerbotAIConfig.logEvent(ai, "XpGainAction", guid, std::to_string(xpgain));
     }
 
+    if (!type && guid)
+    {
+        Creature* killedCreature = ai->GetCreature(guid);
+        if (killedCreature)
+            sPlayerbotAIConfig.logEvent(ai, "KillAction", killedCreature->GetName(), std::to_string(killedCreature->GetEntry()));
+    }
+
     int32 bonusXpgain = (int32)xpgain * (sPlayerbotAIConfig.playerbotsXPrate - 1.0f);
 
     std::ostringstream out;

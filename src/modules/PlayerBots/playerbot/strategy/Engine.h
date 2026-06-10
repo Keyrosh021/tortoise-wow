@@ -7,6 +7,7 @@
 #include "AiObjectContext.h"
 #include "Strategy.h"
 #include "playerbot/BotState.h"
+#include <mutex>
 
 namespace ai
 {
@@ -118,6 +119,7 @@ namespace ai
         std::list<Multiplier*> multipliers;
         AiObjectContext* aiObjectContext;
         std::map<std::string, Strategy*> strategies;
+        mutable std::recursive_mutex engineMutex;
         float lastRelevance;
         std::string lastAction;
         ActionExecutionListeners actionExecutionListeners;

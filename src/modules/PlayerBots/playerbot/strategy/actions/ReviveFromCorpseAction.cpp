@@ -175,25 +175,20 @@ bool FindCorpseAction::Execute(Event& event)
         }
     }
 
-    //Actual mobing part.
+    // Actual moving part. Ghosts should physically path back to the corpse when possible
+    // instead of idling until a simulated travel delay expires.
     bool moved = false;
 
     if (!ai->AllowActivity(DETAILED_MOVE_ACTIVITY) && !ai->HasPlayerNearby(moveToPos))
     {
-        uint32 delay = sServerFacade.GetDistance2d(bot, corpse) / bot->GetSpeed(MOVE_RUN); //Time a bot would take to travel to it's corpse.
-        delay = std::min(delay, uint32(10 * MINUTE)); //Cap time to get to corpse at 10 minutes.
+        uint32 delay = sServerFacade.GetDistance2d(bot, corpse) / bot->GetSpeed(MOVE_RUN);
+        delay = std::min(delay, uint32(10 * MINUTE));
 
-        if (deadTime > delay)
-        {
-            bot->GetMotionMaster()->Clear();
-            bot->TeleportTo(moveToPos.getMapId(), moveToPos.getX(), moveToPos.getY(), moveToPos.getZ(), 0);
-            if (bot->isRealPlayer())
-                bot->SendHeartBeat();
-        }
-
-        moved = true;
+        if (deadTime <= delay)
+            return true;
     }
-    else
+
+    if (!moved)
     {
 #ifndef MANGOSBOT_ZERO
         if (bot->IsMovingIgnoreFlying())
