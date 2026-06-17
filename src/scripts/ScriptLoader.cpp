@@ -199,6 +199,7 @@ void AddSC_burning_steppes();
 void AddSC_dun_morogh();
 void AddSC_eastern_plaguelands();
 void AddSC_elwynn_forest();
+void AddSC_grim_reaches();
 void AddSC_hillsbrad_foothills();
 void AddSC_hinterlands();
 void AddSC_ironforge();
@@ -553,6 +554,7 @@ void AddScripts()
     AddSC_dun_morogh();
     AddSC_eastern_plaguelands();
     AddSC_elwynn_forest();
+    AddSC_grim_reaches();
     AddSC_hillsbrad_foothills();
     AddSC_hinterlands();
     AddSC_ironforge();
