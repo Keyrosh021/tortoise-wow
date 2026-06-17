@@ -347,6 +347,7 @@ world/eastern_plaguelands.cpp
 world/elwynn_forest.cpp
 world/felwood.cpp
 world/feralas.cpp
+world/grim_reaches.cpp
 world/hillsbrad_foothills.cpp
 world/hinterlands.cpp
 world/ironforge.cpp
