@@ -199,6 +199,7 @@ void AddSC_burning_steppes();
 void AddSC_dun_morogh();
 void AddSC_eastern_plaguelands();
 void AddSC_elwynn_forest();
+void AddSC_grim_reaches();
 void AddSC_hillsbrad_foothills();
 void AddSC_hinterlands();
 void AddSC_ironforge();
@@ -330,6 +331,13 @@ void AddSC_boss_engineer_figgles();
 void AddSC_boss_hargesh_doomcaller();
 void AddSC_boss_hatereaver_annhilator();
 void AddSC_trash_mobs_hateforge_quarry();
+
+// Frostmane Hollow
+void AddSC_boss_hailar_the_frigid();
+
+// Windhorn Canyon
+void AddSC_boss_bonespeaker_narlgom();
+void AddSC_windhorn_canyon();
 
 // Stormwind Vaults
 void AddSC_boss_aszosh_grimflame();
@@ -546,6 +554,7 @@ void AddScripts()
     AddSC_dun_morogh();
     AddSC_eastern_plaguelands();
     AddSC_elwynn_forest();
+    AddSC_grim_reaches();
     AddSC_hillsbrad_foothills();
     AddSC_hinterlands();
     AddSC_ironforge();
@@ -621,6 +630,13 @@ void AddScripts()
     AddSC_thunder_bluff();
     AddSC_ungoro_crater();
     AddSC_winterspring();
+
+    // Frostmane Hollow
+    AddSC_boss_hailar_the_frigid();
+
+    // Windhorn Canyon
+    AddSC_boss_bonespeaker_narlgom();
+    AddSC_windhorn_canyon();
 
     // Stormwind Vaults
     AddSC_boss_aszosh_grimflame();
