@@ -40,6 +40,7 @@
 #include "BattleGroundMgr.h"
 #include "MapManager.h"
 #include "SocialMgr.h"
+#include "Barbershop/TurtleBarbershopMgr.h"
 
 #include "PlayerBotMgr.h"
 #include "Anticheat/Anticheat.h"
@@ -727,6 +728,9 @@ void WorldSession::LogoutPlayer(bool Save)
                 sMapMgr.ExecuteSingleDelayedTeleport(_player);
             }
         }
+
+        sTurtleBarbershopMgr.HandlePlayerLogout(_player);
+
         ///- empty buyback items and save the player in the database
         // some save parts only correctly work in case player present in map/player_lists (pets, etc)
         if (Save)

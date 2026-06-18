@@ -75,6 +75,7 @@ set (game_SRCS
 	Analysis/AccountAnalyser.cpp
     Autoscaling/AutoScaler.cpp
     AuctionHouse/AuctionHouseMgr.cpp
+    Barbershop/TurtleBarbershopMgr.cpp
     Battlegrounds/BattleGround.cpp
     Battlegrounds/BattleGroundAB.cpp
     Battlegrounds/BattleGroundAV.cpp
@@ -97,6 +98,7 @@ set (game_SRCS
     Group/GroupReference.cpp
     Guild/Guild.cpp
     Guild/GuildMgr.cpp
+    LFG/TurtleLFGMgr.cpp
     Handlers/AddonHandler.cpp
     Handlers/AuctionHouseHandler.cpp
     Handlers/BattleGroundHandler.cpp
