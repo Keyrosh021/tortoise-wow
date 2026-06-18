@@ -271,7 +271,7 @@ inline bool SpellCanTrigger(const SpellEntry* spellProto, const SpellEntry* proc
 
 inline bool IsCrusaderStrikeProc(SpellEntry const* spellInfo)
 {
-    // Blessed/Righteous Strikes: accept live Crusader Strike helpers even when family flags are missing.
+    // Prefer the Paladin Crusader Strike family binding; keep explicit ranks/helpers as fallback for older DB rows.
     if (!spellInfo)
         return false;
 
@@ -366,7 +366,7 @@ SpellProcEventTriggerCheck Unit::IsTriggeredAtSpellProcEvent(Unit *pVictim, Spel
                 return SPELL_PROC_TRIGGER_FAILED;
         }
         // Blessed Strikes needs to accept the live Crusader Strike ranks/helpers.
-        if (spellProto->Id == 51320 || spellProto->Id == 51321)
+        if (spellProto->Id >= 51317 && spellProto->Id <= 51321)
             return IsCrusaderStrikeProc(procSpell) ? SPELL_PROC_TRIGGER_OK : SPELL_PROC_TRIGGER_FAILED;
         // Righteous Strikes needs to accept the live Crusader Strike spell variants
         // before the generic spell_proc_event filter rejects them.
@@ -418,7 +418,7 @@ SpellProcEventTriggerCheck Unit::IsTriggeredAtSpellProcEvent(Unit *pVictim, Spel
             case 51343: // Righteous Strikes rank 3
             case 51344: // Righteous Strikes rank 4
             case 51345: // Righteous Strikes rank 5
-                if (procSpell && procSpell->SpellFamilyName == SPELLFAMILY_PALADIN && procSpell->SpellIconID == 2164 && procSpell->DmgClass == SPELL_DAMAGE_CLASS_MELEE)
+                if (IsCrusaderStrikeProc(procSpell))
                     return SPELL_PROC_TRIGGER_OK;
                 break;
             }
@@ -1718,33 +1718,6 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
                 return SPELL_AURA_PROC_OK;
             }
 
-            // Blessed/Righteous Strikes: local proc path also accepts Crusader Strike helper spell ids.
-            auto const isCrusaderStrikeProc = [](SpellEntry const* spellInfo) -> bool
-            {
-                if (!spellInfo)
-                    return false;
-
-                if (spellInfo->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_CRUSADER_STRIKE>())
-                    return true;
-
-                switch (spellInfo->Id)
-                {
-                    case 7297:
-                    case 8825:
-                    case 8826:
-                    case 10338:
-                    case 10339:
-                    case 47314:
-                    case 47315:
-                    case 47316:
-                    case 47317:
-                    case 47318:
-                        return true;
-                    default:
-                        return false;
-                }
-            };
-
             // Righteous Defense talent ranks (51328-30) - only while Righteous Fury is active and always self-targeted.
             if (auraSpellInfo->Id == 51328 || auraSpellInfo->Id == 51329 || auraSpellInfo->Id == 51330)
             {
@@ -1760,7 +1733,7 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
                     RemoveAurasDueToSpell(trigger_spell_id);
             }
             // Blessed Strikes: Crusader Strike can reset Holy Shock cooldown.
-            else if (auraSpellInfo->Id == 51320 || auraSpellInfo->Id == 51321)
+            else if (auraSpellInfo->Id >= 51317 && auraSpellInfo->Id <= 51321)
             {
                 Player* player = ToPlayer();
                 if (!player || !IsCrusaderStrikeProc(procSpell))
@@ -1997,7 +1970,10 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
             // while still applying the damage to the debuffed target.
             uint32 repentDamage = std::max(1, triggerEntry->CalculateSimpleValue(EFFECT_INDEX_0));
             if (Unit* pAuraCaster = triggeredByAura->GetCaster())
+            {
+                repentDamage += uint32(pAuraCaster->GetTotalAttackPowerValue(BASE_ATTACK) * 0.20f);
                 pAuraCaster->SpellNonMeleeDamageLog(this, trigger_spell_id, repentDamage);
+            }
             else
                 SpellNonMeleeDamageLog(this, trigger_spell_id, repentDamage);
             return SPELL_AURA_PROC_OK;

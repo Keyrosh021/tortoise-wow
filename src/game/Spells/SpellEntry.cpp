@@ -748,56 +748,25 @@ float SpellEntry::CalculateCustomCoefficient(WorldObject const* caster, DamageEf
     {
         case SPELLFAMILY_PALADIN:
         {
-            // Judgement of Righteousness: keep normal percent damage mods and tune raw 1H/2H spellpower scaling here.
-            if (IsFitToFamilyMask(UI64LIT(0x0000000000000400)) && SpellIconID == 25)
-            {
-                // Target-side JotC follows the historical judgement coefficient, not the raw 73% spellpower coeff.
-                if (!donePart)
-                    return 0.50f;
-
-                return 0.73f;
-            }
-
             // Daybreak: healing power scaling reduced from 43% to 32%.
             if (Id == 50931)
                 return 0.32f;
 
-            // Holy Light Rank 1: 20% spellpower coefficient
+            // Holy Light Rank 1: 20% spellpower coefficient.
             if (Id == 635)
                 return 0.20f;
 
-            // Holy Shock (damage): 43% spellpower coefficient.
-            if (IsFitToFamilyMask(UI64LIT(0x0000000000200000)) && SpellIconID == 156 && damageType == SPELL_DIRECT_DAMAGE)
+            // Standard Holy Shock coefficients are in spell_template; the custom damage row is not.
+            if (Id == 52012 && damageType == SPELL_DIRECT_DAMAGE)
                 return 0.43f;
 
-            // Keep Holy Shield out of the new target-side JotC tuning until we verify its intended scaling.
+            // Keep Holy Shield out of target-side JotC scaling until its behavior is verified.
             if (!donePart && IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_HOLY_SHIELD>() && damageType == SPELL_DIRECT_DAMAGE)
                 return 0.0f;
 
-            // Direct holy paladin finishers and nukes get explicit target-side JotC coefficients from live research.
-            if (!donePart && IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_JUDGEMENT_OF_COMMAND>() && SpellIconID == 561 && damageType == SPELL_DIRECT_DAMAGE)
-                return 0.43f;
-
-            // Exorcism uses the same target-side JotC coefficient as its historical holy spellpower scaling.
-            if (!donePart && IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_EXORCISM>() && damageType == SPELL_DIRECT_DAMAGE)
-                return 0.43f;
-
-            // Hammer of Wrath keeps a smaller target-side JotC share than its caster-side spellpower coefficient.
-            if (!donePart && SpellIconID == 42 && damageType == SPELL_DIRECT_DAMAGE)
-                return 0.286f;
-
-            // Holy Wrath uses a reduced target-side JotC coefficient for its direct holy hit.
-            if (!donePart && (SpellIconID == 158 || SpellIconID == 548) && damageType == SPELL_DIRECT_DAMAGE)
-                return 0.19f;
-
-            // Consecration distributes the researched total JotC gain evenly across its periodic ticks.
-            if (!donePart && IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_CONSECRATION>() && damageType == DOT)
-                return 0.04125f;
-
-            // Updated 2h Scaling from live server target dummy testing
+            // Seal of Righteousness uses weapon-speed scaling, with separate target-side JotC coefficients.
             if (IsFitToFamilyMask(UI64LIT(0x0000000008000000)) && SpellIconID == 25)
             {
-                // JotC scales on the holy proc shell directly, with separate 1H and 2H target-side coefficients.
                 if (!donePart)
                 {
                     if (caster->IsPlayer())
