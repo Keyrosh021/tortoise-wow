@@ -2427,6 +2427,34 @@ public:
     }
 };
 
+static bool IsHolyStrikeMendingLight(uint32 spellId)
+{
+    switch (spellId)
+    {
+        case 51324:
+        case 51875:
+        case 51876:
+        case 51877:
+        case 51878:
+        case 51879:
+        case 51880:
+        case 51881:
+            return true;
+        default:
+            return false;
+    }
+}
+
+struct WoundedAllyOrder
+{
+    bool operator()(Unit const* left, Unit const* right) const
+    {
+        uint32 const leftMissing = left->GetMaxHealth() - left->GetHealth();
+        uint32 const rightMissing = right->GetMaxHealth() - right->GetHealth();
+        return leftMissing > rightMissing;
+    }
+};
+
 // Helper for targets nearest to the spell target
 // The spell target is always first unless there is a target at _completely_ the same position (unbelievable case)
 struct TargetDistanceOrderNear
@@ -2600,6 +2628,40 @@ void Spell::SetTargetMap(SpellEffectIndex effIndex, uint32 targetMode, UnitList&
 
     switch (targetMode)
     {
+        case TARGET_ENUM_UNITS_RAID_WITHIN_CASTER_RANGE:
+        {
+            if (m_casterUnit && IsHolyStrikeMendingLight(m_spellInfo->Id))
+            {
+                FillAreaTargets(targetUnitMap, radius, PUSH_SELF_CENTER, SPELL_TARGETS_FRIENDLY);
+
+                for (UnitList::iterator itr = targetUnitMap.begin(), next; itr != targetUnitMap.end(); itr = next)
+                {
+                    next = itr;
+                    ++next;
+
+                    Unit* target = *itr;
+                    if (!target || target == m_casterUnit || target->GetHealth() == target->GetMaxHealth())
+                        targetUnitMap.erase(itr);
+                }
+
+                targetUnitMap.sort(WoundedAllyOrder());
+
+                uint32 maxTargets = EffectChainTarget ? EffectChainTarget : 4;
+                if (targetUnitMap.size() > maxTargets)
+                {
+                    UnitList::iterator itr = targetUnitMap.begin();
+                    std::advance(itr, maxTargets);
+                    targetUnitMap.erase(itr, targetUnitMap.end());
+                }
+
+                unMaxTargets = 0;
+                break;
+            }
+
+            if (m_casterUnit)
+                FillRaidOrPartyTargets(targetUnitMap, m_casterUnit, radius, true, true, false);
+            break;
+        }
         case TARGET_UNIT_CASTER:
         {
             if (m_casterUnit)
@@ -3043,12 +3105,6 @@ void Spell::SetTargetMap(SpellEffectIndex effIndex, uint32 targetMode, UnitList&
         {
             if (m_casterUnit)
                 FillRaidOrPartyTargets(targetUnitMap, m_casterUnit, radius, false, true, true);
-            break;
-        }
-        case TARGET_ENUM_UNITS_RAID_WITHIN_CASTER_RANGE:
-        {
-            if (m_casterUnit)
-                FillRaidOrPartyTargets(targetUnitMap, m_casterUnit, radius, true, true, false);
             break;
         }
         case TARGET_UNIT_FRIEND:

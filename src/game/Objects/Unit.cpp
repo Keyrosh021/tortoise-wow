@@ -1727,38 +1727,15 @@ void Unit::CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo *da
             damageInfo->TargetState  = VICTIMSTATE_NORMAL;
             damageInfo->procEx |= PROC_EX_NORMAL_HIT;
 
-            // Baeza formula: https://wowwiki.fandom.com/wiki/Weapon_skill?diff=349241&oldid=347613
-            // Low end : 1.3 - 0.05*(defense - skill) min of 0.01 and max of 0.91
-            // If the attacker is a caster then this is reduced by 0.7 and max of 0.6
-            // High end : 1.2 - 0.03*(defense - skill) min of 0.2 and max of 0.99
-            // If the attacker is a caster then this is reduced by 0.3
+            // Each weapon skill point reduces the glancing damage penalty by 2%.
+            int32 skillDiff = int32(pVictim->GetDefenseSkillValue(this)) - int32(GetWeaponSkillValue(damageInfo->attackType, pVictim));
+            float glancingPenalty = 0.05f + skillDiff * 0.02f;
+            if (glancingPenalty < 0.0f)
+                glancingPenalty = 0.0f;
+            if (glancingPenalty > 0.99f)
+                glancingPenalty = 0.99f;
 
-            int32 skillDiff = pVictim->GetDefenseSkillValue(this) - GetWeaponSkillValue(damageInfo->attackType, pVictim);
-            float low = 1.3f - 0.05f * skillDiff;
-            float high = 1.2f - 0.03f * skillDiff;
-            float lowCap = 0.91f;
-            float highCap = 0.99f;
-
-            if ((GetClassMask() & CLASSMASK_WAND_USERS) != 0)
-            {
-                low -= 0.7f;
-                high -= 0.3f;
-                lowCap = 0.6f;
-            }
-
-            if (low < 0.01f)
-                low = 0.01f;
-
-            if (high < 0.2f)
-                high = 0.2f;
-
-            if (low > lowCap)
-                low = lowCap;
-
-            if (high > highCap)
-                high = highCap;
-
-            float reducePercent = frand(low,high);
+            float reducePercent = 1.0f - glancingPenalty;
 
             damageInfo->cleanDamage += uint32((1.0f - reducePercent) * damageInfo->totalDamage);
             damageInfo->totalDamage = uint32(reducePercent * damageInfo->totalDamage);
@@ -2932,10 +2909,8 @@ float Unit::MeleeMissChanceCalc(Unit const* pVictim, WeaponAttackType attType) c
     // PvP - PvE melee chances
     if (pVictim->IsPlayer())
         skillDiffBonus = skillDiff * 0.04f;
-    else if (skillDiff < -10)
-        skillDiffBonus = skillDiff * 0.2f;
     else
-        skillDiffBonus = skillDiff * 0.1f;
+        skillDiffBonus = skillDiff * 0.2f;
     missChance -= skillDiffBonus;
 
     // Low level reduction
@@ -2949,12 +2924,6 @@ float Unit::MeleeMissChanceCalc(Unit const* pVictim, WeaponAttackType attType) c
         hitChance = m_modRangedHitChance;
     else
         hitChance = m_modMeleeHitChance;
-
-    // There is some code in 1.12 that explicitly adds a modifier that causes the first 1% of +hit gained from
-    // talents or gear to be ignored against monsters with more than 10 Defense Skill above the attacking player’s Weapon Skill.
-    // https://us.forums.blizzard.com/en/wow/t/bug-hit-tables/185675/33
-    if (skillDiff < -10 && hitChance > 0.0f)
-        hitChance -= 1.0f;
 
     missChance -= hitChance;
 
@@ -5810,15 +5779,12 @@ bool Unit::IsSpellCrit(Unit const* pVictim, SpellEntry const* spellProto, SpellS
         crit_chance = 10.0f;
     else
     {
-        // Judgement of Righteousness: uses melee crit chance
+        // Judgement of Righteousness: uses melee crit chance instead of spell crit.
         if (spellProto->IsFitToFamilyMask<CF_PALADIN_JUDGEMENT_OF_RIGHTEOUSNESS>() && spellProto->SpellIconID == 25)
         {
             if (pVictim->IsPlayer() && !pVictim->IsStandingUp())
                 return true;
             crit_chance = GetUnitCriticalChance(attackType, pVictim);
-            crit_chance += GetTotalAuraModifierByMiscMask(SPELL_AURA_MOD_SPELL_CRIT_CHANCE_SCHOOL, schoolMask);
-            if (Player* modOwner = GetSpellModOwner())
-                modOwner->ApplySpellMod(spellProto->Id, SPELLMOD_CRITICAL_CHANCE, crit_chance, spell);
             crit_chance = crit_chance > 0.0f ? crit_chance : 0.0f;
             return roll_chance_f(crit_chance);
         }

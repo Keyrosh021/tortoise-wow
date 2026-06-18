@@ -1,13 +1,16 @@
 # Paladin Fixes Patch Notes
 
+- The Weapon Skill formula has been altered.
+
 - Holy Strike / Holy Might
   - Holy Might ranks 51350-51354 were rebound to the correct Holy Might family flag so proc and aura matching works again.
   - Holy Strike helper auras 51355-51359 no longer auto-proc from unrelated spells through overly broad proc flags.
   - Holy Might now refreshes only from actual Holy Strike casts, so missed, dodged, or parried Holy Strikes do not incorrectly drop the buff.
-  - Fixed the healing and mana back for Holy Strikes.
+  - Fixed the healing and mana back for Holy Strikes to also hit 4 nearby allies regardless of party.
+  - Added the custom 71.4% spellpower scaling.
 
 - Crusader Strike
-  - Crusader Strike ranks 47314-47318 were retuned from the older 35/50/66/80/100% values to 25/40/56/70/90% weapon damage.
+  - Crusader Strike helper ranks 47314-47318 teach the actual cast spells, with final weapon damage values 35/50/66/80/100%.
   - Crusader Strike ranks and helper spells now use the Paladin Crusader Strike family mask.
   - Crusader Strike now uses normalized weapon damage handling.
   - Crusader Strike now gains 20% of Holy spell power as bonus damage.
@@ -16,24 +19,20 @@
 - Judgment of Righteousness
   - Now uses melee miss/crit values.
 
-- Seal/Judgment of Wisdom
-  - Added handlers for the missing 2 new ranks
+- Seal and Judgment of Wisdom
+  - Added handlers for the missing 2 new ranks.
+
+- Seal and Judgement of Command
+  - Seal of Command PPM increased from 7 to 9.
+  - Seal of Command now has a small Spell Power modifier, and Judgement of Command now has a small Attack Power modifier.
 
 - Repentance
-  - Now applies the Repent debuff on Immune targets lasting 20 seconds with the 20% scaling from attack power.
+  - Now applies the Repent debuff on Immune targets lasting 20 seconds with the 8% scaling from attack power.
   - Fixed Repent spell family so it wouldnt get overriden by judgments.
 
-- Judgement of the Crusader and holy-damage interactions
+- Judgement of the Crusader
   - Judgement of the Crusader target-side scaling was retuned using explicit coefficients for paladin holy finishers.
-  - Judgement of Righteousness now displays as a Judgement instead of the seal-style damage shell.
-  - Judgement of Righteousness now uses melee hit and melee crit rules instead of magic hit and spell crit rules.
-  - Judgement of Righteousness no longer double-applies percent damage modifiers during damage calculation.
-  - Judgement of Righteousness target-side coefficient is fixed at 50%, while the caster-side shell keeps its 73% spellpower behavior.
-  - Exorcism target-side Judgement of the Crusader scaling is fixed at 43%.
-  - Hammer of Wrath target-side Judgement of the Crusader scaling is fixed at 28.6%.
-  - Holy Wrath target-side Judgement of the Crusader scaling is fixed at 19%.
-  - Old helper Judgement of the Crusader rows were removed from explicit runtime classification in both C++ repos, leaving only the real learned ranks in the switch.
-  - Judgement of the Crusader contribution is distributed evenly across Consecration ticks with a per-tick coefficient of 0.04125.
+  - Judgement of Righteousness target-side coefficient is fixed at 50%.
   - Needs more tuning and research for closer damage scaling per spells.
 
 - Consecration

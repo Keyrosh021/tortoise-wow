@@ -1971,7 +1971,7 @@ SpellAuraProcResult Unit::HandleProcTriggerSpellAuraProc(Unit* pVictim, uint32 d
             uint32 repentDamage = std::max(1, triggerEntry->CalculateSimpleValue(EFFECT_INDEX_0));
             if (Unit* pAuraCaster = triggeredByAura->GetCaster())
             {
-                repentDamage += uint32(pAuraCaster->GetTotalAttackPowerValue(BASE_ATTACK) * 0.20f);
+                repentDamage += uint32(pAuraCaster->GetTotalAttackPowerValue(BASE_ATTACK) * 0.08f);
                 pAuraCaster->SpellNonMeleeDamageLog(this, trigger_spell_id, repentDamage);
             }
             else

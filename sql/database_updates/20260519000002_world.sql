@@ -18,7 +18,7 @@ VALUES
     (51358, 0, 0, 'Holy Strike rank 4: C++ proc'),
     (51359, 0, 0, 'Holy Strike rank 5: C++ proc');
 
--- Crusader Strike final damage is 25/40/56/70/90%.
+-- Crusader Strike final damage is 35/50/65/80/100%.
 -- Effect 31 stores weapon damage as "percent minus 1".
 -- Bind the ranks and helper spells to the Crusader Strike family bit.
 REPLACE INTO `spell_mod` (`Id`, `SpellFamilyName`, `SpellFamilyFlags`, `Comment`)
@@ -34,13 +34,18 @@ VALUES
     (47317, 10, 34359738368, 'Crusader Strike rank 4 helper: family mask'),
     (47318, 10, 34359738368, 'Crusader Strike rank 5 helper: family mask');
 
-REPLACE INTO `spell_effect_mod` (`Id`, `EffectIndex`, `EffectBasePoints`, `Comment`)
+-- The 47314-47318 rows are learn/helper spells; remove any stale damage overrides there and patch the actual cast spells.
+DELETE FROM `spell_effect_mod`
+WHERE `Id` IN (47314, 47315, 47316, 47317, 47318)
+  AND `EffectIndex` = 0;
+
+REPLACE INTO `spell_effect_mod` (`Id`, `EffectIndex`, `EffectBasePoints`, `EffectDieSides`, `Comment`)
 VALUES
-    (47314, 0, 24, 'Crusader Strike rank 1: 25% weapon damage'),
-    (47315, 0, 39, 'Crusader Strike rank 2: 40% weapon damage'),
-    (47316, 0, 55, 'Crusader Strike rank 3: 56% weapon damage'),
-    (47317, 0, 69, 'Crusader Strike rank 4: 70% weapon damage'),
-    (47318, 0, 89, 'Crusader Strike rank 5: 90% weapon damage');
+    (2537, 0, 34, 1, 'Crusader Strike rank 1: 35% weapon damage'),
+    (8823, 0, 49, 1, 'Crusader Strike rank 2: 50% weapon damage'),
+    (8824, 0, 64, 1, 'Crusader Strike rank 3: 65% weapon damage'),
+    (10336, 0, 79, 1, 'Crusader Strike rank 4: 80% weapon damage'),
+    (10337, 0, 99, 1, 'Crusader Strike rank 5: 100% weapon damage');
 
 -- 70% threat reduction on all Exorcism ranks.
 DELETE FROM `spell_threat`
@@ -165,3 +170,6 @@ VALUES
     (20955, 0, 1.5, 0),
     (20956, 0, 1.5, 0),
     (20957, 0, 1.5, 0);
+
+-- Seal of Command: PPM increased from 7 to 9.
+UPDATE spell_proc_event SET ppmRate = 9 WHERE entry IN (20375, 33006, 20915, 20918, 20919, 20920);

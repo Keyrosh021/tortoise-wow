@@ -760,6 +760,25 @@ float SpellEntry::CalculateCustomCoefficient(WorldObject const* caster, DamageEf
             if (Id == 52012 && damageType == SPELL_DIRECT_DAMAGE)
                 return 0.43f;
 
+            // Holy Strike: direct Holy hit scales from 71.4% spellpower.
+            if (damageType == SPELL_DIRECT_DAMAGE)
+            {
+                switch (Id)
+                {
+                    case 679:
+                    case 678:
+                    case 1866:
+                    case 680:
+                    case 2495:
+                    case 5569:
+                    case 10332:
+                    case 10333:
+                        return 0.714f;
+                    default:
+                        break;
+                }
+            }
+
             // Keep Holy Shield out of target-side JotC scaling until its behavior is verified.
             if (!donePart && IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_HOLY_SHIELD>() && damageType == SPELL_DIRECT_DAMAGE)
                 return 0.0f;

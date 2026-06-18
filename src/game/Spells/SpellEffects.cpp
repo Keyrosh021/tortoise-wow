@@ -686,6 +686,10 @@ void Spell::EffectSchoolDMG(SpellEffectIndex effect_idx)
                     if (!unitTarget->HasUnitState(UNIT_STAT_STUNNED | UNIT_STAT_PENDING_STUNNED))
                         damage = int32(damage * 0.5f);
 
+                    // Judgement of Command: tooltip states damage is increased by 15% of attack power.
+                    if (m_casterUnit)
+                        damage += int32(m_casterUnit->GetTotalAttackPowerValue(BASE_ATTACK) * 0.15f);
+
                     // First apply bonus damage from the caster, then apply damage modifiers on the target.
                     damage = m_caster->SpellDamageBonusDone(unitTarget, m_spellInfo, effect_idx, damage, SPELL_DIRECT_DAMAGE);
                     damage = unitTarget->SpellDamageBonusTaken(m_caster, m_spellInfo, effect_idx, damage, SPELL_DIRECT_DAMAGE);
