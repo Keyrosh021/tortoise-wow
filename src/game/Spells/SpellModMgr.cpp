@@ -236,7 +236,7 @@ void SpellModMgr::LoadSpellMods()
 
     // Other modifications (no 'speed' field in spell_mod)
 
-    // Divine Strike should scale 0.3% from spellpower.
+    // Divine Strike scales from 0.3% spellpower.
     if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(51810)))
         spellInfo->EffectBonusCoefficient[EFFECT_INDEX_0] = 0.003f;
 
@@ -252,13 +252,6 @@ void SpellModMgr::LoadSpellMods()
     {
         if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(spellId)))
             spellInfo->EffectBonusCoefficient[EFFECT_INDEX_1] = 0.01f;
-    }
-
-    // Retribution Aura should only scale from 1% spellpower.
-    for (uint32 spellId : { 7294, 10298, 10299, 10300, 10301 })
-    {
-        if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(spellId)))
-            spellInfo->EffectBonusCoefficient[EFFECT_INDEX_0] = 0.01f;
     }
 
     // Flare

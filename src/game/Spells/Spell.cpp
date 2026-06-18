@@ -83,25 +83,32 @@ uint32 GetHolyShockResetChance(Player* player)
     return std::min<uint32>(chance, 100);
 }
 
-void HandleHolyShockCooldownReset(Unit* caster, SpellEntry const* spellInfo)
+void HandleHolyShockCooldownReset(Unit* caster, SpellEntry const* spellInfo, bool isTriggeredSpell, bool& checked, bool& reset)
 {
-    if (!IsHolyShockSpell(spellInfo))
+    if (isTriggeredSpell || !IsHolyShockSpell(spellInfo))
         return;
 
     Player* player = caster ? caster->ToPlayer() : nullptr;
     if (!player)
         return;
 
-    uint32 const resetChance = GetHolyShockResetChance(player);
-    if (!resetChance || !roll_chance_i(resetChance))
+    if (!checked)
+    {
+        checked = true;
+        uint32 const resetChance = GetHolyShockResetChance(player);
+        reset = resetChance && roll_chance_i(resetChance);
+    }
+
+    if (!reset)
         return;
 
+    uint32 const holyShockCategory = spellInfo->Category;
     SpellCooldowns cooldowns = player->GetSpellCooldownMap();
     for (SpellCooldowns::const_iterator itr = cooldowns.begin(); itr != cooldowns.end();)
     {
         SpellEntry const* cooldownSpellInfo = sSpellMgr.GetSpellEntry(itr->first);
 
-        if (IsHolyShockSpell(cooldownSpellInfo))
+        if (IsHolyShockSpell(cooldownSpellInfo) || (holyShockCategory && itr->second.cat == holyShockCategory))
             player->RemoveSpellCooldown((itr++)->first, true);
         else
             ++itr;
@@ -191,6 +198,10 @@ void CastRepentanceImmuneFallback(Unit* caster, Unit* target, uint32 spellId)
         return;
 
     caster->CastSpell(target, spellId, true);
+    target->m_Events.AddLambdaEventAtOffset([target, spellId]()
+    {
+        target->RemoveAurasDueToSpell(spellId);
+    }, 20 * IN_MILLISECONDS);
 }
 
 }
@@ -2115,13 +2126,6 @@ void Spell::DoSpellHitOnUnit(Unit *unit, uint32 effectMask)
             {
                 m_spellAuraHolder->SetAuraMaxDuration(duration);
                 m_spellAuraHolder->SetAuraDuration(duration);
-            }
-
-            // Repent: fallback aura must last 20 seconds even if helper spell data is treated as persistent.
-            if (IsRepentanceImmuneFallbackAura(m_spellInfo->Id))
-            {
-                m_spellAuraHolder->SetAuraMaxDuration(20 * IN_MILLISECONDS);
-                m_spellAuraHolder->SetAuraDuration(20 * IN_MILLISECONDS);
             }
 
             if (!unit->AddSpellAuraHolder(m_spellAuraHolder))
@@ -4649,7 +4653,7 @@ void Spell::SendSpellCooldown()
         return;
 
     m_casterUnit->AddSpellAndCategoryCooldowns(m_spellInfo, m_CastItem ? m_CastItem->GetEntry() : 0, this);
-    HandleHolyShockCooldownReset(m_casterUnit, m_spellInfo);
+    HandleHolyShockCooldownReset(m_casterUnit, m_spellInfo, m_IsTriggeredSpell, m_holyShockCooldownResetChecked, m_holyShockCooldownReset);
 }
 
 void Spell::update(uint32 difftime)
