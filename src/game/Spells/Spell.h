@@ -702,6 +702,8 @@ class Spell
         float m_castPositionZ = 0;
         float m_castOrientation = 0;
         bool m_IsTriggeredSpell = false;
+        bool m_holyShockCooldownResetChecked = false;
+        bool m_holyShockCooldownReset = false;
 		bool m_IsIgnoreLOS = false;
 
         // if need this can be replaced by Aura copy

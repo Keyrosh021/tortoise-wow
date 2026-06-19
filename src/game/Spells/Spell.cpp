@@ -60,6 +60,153 @@ using namespace Spells;
 
 #define SPELL_CHANNEL_VISUAL_TIMER 800
 
+namespace
+{
+
+bool IsHolyShockSpell(SpellEntry const* spellInfo)
+{
+    return spellInfo && spellInfo->IsFitToFamilyMask<CF_PALADIN_HOLY_SHOCK>();
+}
+
+uint32 GetHolyShockResetChance(Player* player)
+{
+    if (!player)
+        return 0;
+
+    uint32 chance = 5;
+    int32 const healingPower = std::max<int32>(0, player->SpellBaseHealingBonusDone(SPELL_SCHOOL_MASK_HOLY));
+
+    chance += healingPower / 100;
+
+    if (player->HasAura(51825))
+        chance += 15;
+
+    return std::min<uint32>(chance, 100);
+}
+
+void HandleHolyShockCooldownReset(Unit* caster, SpellEntry const* spellInfo, bool isTriggeredSpell, bool& checked, bool& reset)
+{
+    if (isTriggeredSpell || !IsHolyShockSpell(spellInfo))
+        return;
+
+    Player* player = caster ? caster->ToPlayer() : nullptr;
+    if (!player)
+        return;
+
+    if (!checked)
+    {
+        checked = true;
+        uint32 const resetChance = GetHolyShockResetChance(player);
+        reset = resetChance && roll_chance_i(resetChance);
+    }
+
+    if (!reset)
+        return;
+
+    uint32 const holyShockCategory = spellInfo->Category;
+    SpellCooldowns cooldowns = player->GetSpellCooldownMap();
+    for (SpellCooldowns::const_iterator itr = cooldowns.begin(); itr != cooldowns.end();)
+    {
+        SpellEntry const* cooldownSpellInfo = sSpellMgr.GetSpellEntry(itr->first);
+
+        if (IsHolyShockSpell(cooldownSpellInfo) || (holyShockCategory && itr->second.cat == holyShockCategory))
+            player->RemoveSpellCooldown((itr++)->first, true);
+        else
+            ++itr;
+    }
+}
+
+// Holy Strike/Holy Might: refresh Holy Might only on Holy Strike casts so misses and parries do not drop it.
+bool IsHolyStrikeSpell(SpellEntry const* spellInfo)
+{
+    if (!spellInfo)
+        return false;
+
+    switch (spellInfo->Id)
+    {
+        case 678:
+        case 679:
+        case 680:
+        case 1866:
+        case 2495:
+        case 5569:
+        case 10332:
+        case 10333:
+            return true;
+        default:
+            return false;
+    }
+}
+
+uint32 GetHolyMightSpellForCaster(Unit* caster)
+{
+    if (!caster)
+        return 0;
+    // Holy Might: proc auras (51355-51359) map back to visible Holy Might buffs refreshed on Holy Strike cast.
+    if (caster->HasAura(51359))
+        return 51354;
+    if (caster->HasAura(51358))
+        return 51353;
+    if (caster->HasAura(51357))
+        return 51352;
+    if (caster->HasAura(51356))
+        return 51351;
+    if (caster->HasAura(51355))
+        return 51350;
+
+    return 0;
+}
+
+bool IsHolyStrikeDamageCarrierSpell(SpellEntry const* spellInfo)
+{
+    return IsHolyStrikeSpell(spellInfo);
+}
+
+// Repentance: immune NPC targets receive the Repent fallback aura instead of the incapacitate.
+uint32 GetRepentanceImmuneFallbackSpellId(uint32 spellId)
+{
+    switch (spellId)
+    {
+        case 20066:
+            return 51360;
+        case 51557:
+            return 51561;
+        case 51558:
+            return 51562;
+        default:
+            return 0;
+    }
+}
+
+// Repent: helper aura ranks need fixed 20 second duration and expiry handling.
+bool IsRepentanceImmuneFallbackAura(uint32 spellId)
+{
+    switch (spellId)
+    {
+        case 51360:
+        case 51561:
+        case 51562:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Repentance: cast the fallback aura only from the immune miss path.
+void CastRepentanceImmuneFallback(Unit* caster, Unit* target, uint32 spellId)
+{
+    if (!caster || !target || !spellId)
+        return;
+
+    caster->CastSpell(target, spellId, true);
+    target->m_Events.AddLambdaEventAtOffset([target, spellId]()
+    {
+        target->RemoveAurasDueToSpell(spellId);
+    }, 20 * IN_MILLISECONDS);
+}
+
+}
+
 extern pEffect SpellEffects[TOTAL_SPELL_EFFECTS];
 
 bool IsQuestTameSpell(uint32 spellId)
@@ -363,16 +510,10 @@ WorldObject* Spell::FindCorpseUsing()
 void Spell::FillTargetMap()
 {
     // TODO: ADD the correct target FILLS!!!!!!
+    // Repentance fallback and other triggered helpers can need later effect slots even when an earlier effect is empty.
 
     for (int i = 0; i < MAX_EFFECT_INDEX; ++i)
     {
-        // not call for empty effect.
-        // Also some spells use not used effect targets for store targets for dummy effect in triggered spells
-        if (m_spellInfo->Effect[i] == SPELL_EFFECT_NONE)
-            continue;
-
-        // TODO: find a way so this is not needed?
-       // for area auras always add caster as target (needed for totems for example)
         if (m_casterUnit)
         {
             if (IsAreaAuraEffect(m_spellInfo->Effect[i]) ||
@@ -1340,6 +1481,11 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
     else if (missInfo == SPELL_MISS_MISS || missInfo == SPELL_MISS_RESIST || missInfo == SPELL_MISS_DODGE ||
              missInfo == SPELL_MISS_PARRY || missInfo == SPELL_MISS_BLOCK || missInfo == SPELL_MISS_IMMUNE)
     {
+        // Repentance: tooltip only promises Repent fallback on immunity, not resist or other misses.
+        if (missInfo == SPELL_MISS_IMMUNE && pRealUnitCaster && unit->IsAlive() && !unit->IsPlayer())
+            if (uint32 const fallbackSpellId = GetRepentanceImmuneFallbackSpellId(m_spellInfo->Id))
+                CastRepentanceImmuneFallback(pRealUnitCaster, unit, fallbackSpellId);
+
         // in 1.12.1 we need explicit miss info
         if (pRealUnitCaster && pRealUnitCaster != unit)
         {
@@ -2282,6 +2428,34 @@ public:
     }
 };
 
+static bool IsHolyStrikeMendingLight(uint32 spellId)
+{
+    switch (spellId)
+    {
+        case 51324:
+        case 51875:
+        case 51876:
+        case 51877:
+        case 51878:
+        case 51879:
+        case 51880:
+        case 51881:
+            return true;
+        default:
+            return false;
+    }
+}
+
+struct WoundedAllyOrder
+{
+    bool operator()(Unit const* left, Unit const* right) const
+    {
+        uint32 const leftMissing = left->GetMaxHealth() - left->GetHealth();
+        uint32 const rightMissing = right->GetMaxHealth() - right->GetHealth();
+        return leftMissing > rightMissing;
+    }
+};
+
 // Helper for targets nearest to the spell target
 // The spell target is always first unless there is a target at _completely_ the same position (unbelievable case)
 struct TargetDistanceOrderNear
@@ -2455,6 +2629,40 @@ void Spell::SetTargetMap(SpellEffectIndex effIndex, uint32 targetMode, UnitList&
 
     switch (targetMode)
     {
+        case TARGET_ENUM_UNITS_RAID_WITHIN_CASTER_RANGE:
+        {
+            if (m_casterUnit && IsHolyStrikeMendingLight(m_spellInfo->Id))
+            {
+                FillAreaTargets(targetUnitMap, radius, PUSH_SELF_CENTER, SPELL_TARGETS_FRIENDLY);
+
+                for (UnitList::iterator itr = targetUnitMap.begin(), next; itr != targetUnitMap.end(); itr = next)
+                {
+                    next = itr;
+                    ++next;
+
+                    Unit* target = *itr;
+                    if (!target || target == m_casterUnit || target->GetHealth() == target->GetMaxHealth())
+                        targetUnitMap.erase(itr);
+                }
+
+                targetUnitMap.sort(WoundedAllyOrder());
+
+                uint32 maxTargets = EffectChainTarget ? EffectChainTarget : 4;
+                if (targetUnitMap.size() > maxTargets)
+                {
+                    UnitList::iterator itr = targetUnitMap.begin();
+                    std::advance(itr, maxTargets);
+                    targetUnitMap.erase(itr, targetUnitMap.end());
+                }
+
+                unMaxTargets = 0;
+                break;
+            }
+
+            if (m_casterUnit)
+                FillRaidOrPartyTargets(targetUnitMap, m_casterUnit, radius, true, true, false);
+            break;
+        }
         case TARGET_UNIT_CASTER:
         {
             if (m_casterUnit)
@@ -2898,12 +3106,6 @@ void Spell::SetTargetMap(SpellEffectIndex effIndex, uint32 targetMode, UnitList&
         {
             if (m_casterUnit)
                 FillRaidOrPartyTargets(targetUnitMap, m_casterUnit, radius, false, true, true);
-            break;
-        }
-        case TARGET_ENUM_UNITS_RAID_WITHIN_CASTER_RANGE:
-        {
-            if (m_casterUnit)
-                FillRaidOrPartyTargets(targetUnitMap, m_casterUnit, radius, true, true, false);
             break;
         }
         case TARGET_UNIT_FRIEND:
@@ -4192,6 +4394,17 @@ void Spell::cast(bool skipCheck)
             // Blessing of Protection (Divine Shield, Divine Protection in generic switch case)
             if (m_spellInfo->Mechanic == MECHANIC_INVULNERABILITY && m_spellInfo->Id != 25771)
                 AddPrecastSpell(25771);                     // Forbearance
+
+            if (m_casterUnit && IsHolyStrikeSpell(m_spellInfo))
+            {
+                if (uint32 holyMightSpellId = GetHolyMightSpellForCaster(m_casterUnit))
+                {
+                    // Recast the active Holy Might rank so misses and parries do not drop the buff.
+                    m_casterUnit->RemoveAurasDueToSpell(holyMightSpellId);
+                    m_casterUnit->CastSpell(m_casterUnit, holyMightSpellId, true);
+                }
+            }
+
             break;
         }
         default:
@@ -4506,6 +4719,7 @@ void Spell::SendSpellCooldown()
         return;
 
     m_casterUnit->AddSpellAndCategoryCooldowns(m_spellInfo, m_CastItem ? m_CastItem->GetEntry() : 0, this);
+    HandleHolyShockCooldownReset(m_casterUnit, m_spellInfo, m_IsTriggeredSpell, m_holyShockCooldownResetChecked, m_holyShockCooldownReset);
 }
 
 void Spell::update(uint32 difftime)
@@ -7003,10 +7217,10 @@ SpellCastResult Spell::CheckCast(bool strict)
 
                 // chance for fail at orange mining/herb/LockPicking gathering attempt
                 // second check prevent fail at rechecks
-                if ((skillId == SKILL_HERBALISM || skillId == SKILL_MINING || skillId == SKILL_LOCKPICKING) 
+                if ((skillId == SKILL_HERBALISM || skillId == SKILL_MINING || skillId == SKILL_SURVIVAL2 || skillId == SKILL_LOCKPICKING)
                     && (m_selfContainer && (*m_selfContainer) == this))
                 {
-                    bool canFailAtMax = skillId != SKILL_HERBALISM && skillId != SKILL_MINING;
+                    bool canFailAtMax = skillId != SKILL_HERBALISM && skillId != SKILL_MINING && skillId != SKILL_SURVIVAL2;
 
                     // chance for failure in orange gather / lockpick (gathering skill can't fail at maxskill)
                     if ((canFailAtMax || skillValue < sWorld.GetConfigMaxSkillValue()) && reqSkillValue > irand(skillValue - 25, skillValue + 37))

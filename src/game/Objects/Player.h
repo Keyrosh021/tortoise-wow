@@ -142,6 +142,10 @@ enum Challenges
     CHALLENGE_HARDCORE = 3,
     CHALLENGE_VAGRANT_MODE = 4,
     CHALLENGE_BOARING_MODE = 5,
+    CHALLENGE_CRAFTMASTER = 6,
+    CHALLENGE_LUNATIC = 7,
+    CHALLENGE_BREWMASTER = 8,
+    CHALLENGE_HEROIC = 9,
 };
 
 enum ChallengeSpells
@@ -152,6 +156,10 @@ enum ChallengeSpells
     SPELL_HARDCORE = 50001,
     SPELL_VARGANT_MODE = 50014,
     SPELL_BOARING_MODE = 50071,
+    SPELL_CRAFTMASTER = 57738,
+    SPELL_LUNATIC = 57736,
+    SPELL_BREWMASTER = 57746,
+    SPELL_HEROIC = 57846,
 };
 
 constexpr uint32 LoreKeeperQuestRequirement = 1700;
@@ -1076,7 +1084,8 @@ enum class PlayerVariables : uint32
     HardcoreMessageLevel,
     UnlockedSpecTabs,
     FreeTalentResets,
-    OriginalSkinByte
+    OriginalSkinByte,
+    PendingChallengeMask
 };
 
 struct PlayerEggLoot
@@ -2775,6 +2784,10 @@ public:
             {CHALLENGE_HARDCORE,        SPELL_HARDCORE},
             {CHALLENGE_VAGRANT_MODE,    SPELL_VARGANT_MODE},
             {CHALLENGE_BOARING_MODE,    SPELL_BOARING_MODE},
+            {CHALLENGE_CRAFTMASTER,     SPELL_CRAFTMASTER},
+            {CHALLENGE_LUNATIC,         SPELL_LUNATIC},
+            {CHALLENGE_BREWMASTER,      SPELL_BREWMASTER},
+            {CHALLENGE_HEROIC,          SPELL_HEROIC},
         };
 
         auto itr = challenge_spells.find(challenge);

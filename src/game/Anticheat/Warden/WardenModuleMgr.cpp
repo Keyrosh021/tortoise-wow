@@ -93,10 +93,11 @@ void WardenModuleMgr::LoadWardenModules()
         sLog.outError("[Anticheat] No Mac Warden modules loaded from %s", moduleDir.c_str());
 }
 
+
 const WardenModule *WardenModuleMgr::GetWindowsModule() const
 {
-    MANGOS_ASSERT(!_winModules.empty());
-
+    if (_winModules.empty())
+        return nullptr;
     return &_winModules[urand(0, _winModules.size() - 1)];
 }
 

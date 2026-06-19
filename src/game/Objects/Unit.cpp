@@ -814,7 +814,9 @@ uint32 Unit::DealDamage(Unit* pVictim, uint32 damage, CleanDamage const* cleanDa
                         pVictim->RemoveFearEffectsByDamageTaken(cleanDamage->absorb, spellProto ? spellProto->Id : 0, damagetype);
                 }
 
-                pVictim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_DAMAGE, spellProto ? spellProto->Id : 0, true);
+                // Blessing of Sacrifice redirect damage does not break CC on the recipient
+                if (!spellProto || !(spellProto->SpellFamilyName == SPELLFAMILY_PALADIN && spellProto->SpellIconID == 504))
+                    pVictim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_DAMAGE, spellProto ? spellProto->Id : 0, true);
 
                 // interrupt spells like trying to mount even through absorb shields
                 if (pVictim->IsPlayer() && damagetype != DOT)
@@ -1014,10 +1016,15 @@ uint32 Unit::DealDamage(Unit* pVictim, uint32 damage, CleanDamage const* cleanDa
         if (spell && spell->m_triggeredBySpellInfo && spell->m_triggeredByParentSpellInfo)
             isProcSpell = spell->m_triggeredBySpellInfo->HasAuraWithSpellTriggerEffect();
 
-        if (isProcSpell)
-            pVictim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_DAMAGE, spell->m_triggeredByParentSpellInfo->Id, true);
-        else
-            pVictim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_DAMAGE, spellProto ? spellProto->Id : 0, true);
+        // Blessing of Sacrifice redirect damage does not break CC on the recipient
+        bool const isBoSRedirect = spellProto && spellProto->SpellFamilyName == SPELLFAMILY_PALADIN && spellProto->SpellIconID == 504;
+        if (!isBoSRedirect)
+        {
+            if (isProcSpell)
+                pVictim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_DAMAGE, spell->m_triggeredByParentSpellInfo->Id, true);
+            else
+                pVictim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_DAMAGE, spellProto ? spellProto->Id : 0, true);
+        }
 
         if (damagetype != NODAMAGE && damage && pVictim->IsPlayer())
         {
@@ -1539,6 +1546,28 @@ uint32 Unit::SpellNonMeleeDamageLog(Unit* pVictim, uint32 spellID, uint32 damage
 //TODO for melee need create structure as in
 void Unit::CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo *damageInfo, WeaponAttackType attackType)
 {
+    // Righteous Strikes: apply aura 224's post-block damage reduction to blocked melee swings.
+    auto applyBlockedDamageReduction = [](Unit* victim, uint32 blockedDamage, SpellAuraHolder*& consumedHolder) -> uint32
+    {
+        int32 reductionPct = 0;
+        consumedHolder = nullptr;
+        for (uint32 spellId = 51336; spellId <= 51340; ++spellId)
+        {
+            if (Aura* aura = victim->GetAura(spellId, EFFECT_INDEX_0))
+            {
+                reductionPct = aura->GetModifier()->m_amount;
+                consumedHolder = aura->GetHolder();
+                break;
+            }
+        }
+
+        if (reductionPct >= 0 || blockedDamage == 0)
+            return blockedDamage;
+
+        int32 const adjustedDamage = int32(blockedDamage) * (100 + reductionPct) / 100;
+        return adjustedDamage > 0 ? uint32(adjustedDamage) : 0;
+    };
+
     damageInfo->attacker = this;
     damageInfo->target = pVictim;
     damageInfo->attackType = attackType;
@@ -1724,6 +1753,11 @@ void Unit::CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo *da
 
             damageInfo->totalDamage -= damageInfo->blocked_amount;
             damageInfo->subDamage[0].damage -= damageInfo->blocked_amount;
+            SpellAuraHolder* consumedHolder = nullptr;
+            damageInfo->subDamage[0].damage = applyBlockedDamageReduction(damageInfo->target, damageInfo->subDamage[0].damage, consumedHolder);
+            if (consumedHolder && consumedHolder->DropAuraCharge())
+                damageInfo->target->RemoveSpellAuraHolder(consumedHolder);
+            damageInfo->totalDamage = damageInfo->subDamage[0].damage;
             damageInfo->cleanDamage += damageInfo->blocked_amount;
             break;
         }
@@ -1733,38 +1767,15 @@ void Unit::CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo *da
             damageInfo->TargetState  = VICTIMSTATE_NORMAL;
             damageInfo->procEx |= PROC_EX_NORMAL_HIT;
 
-            // Baeza formula: https://wowwiki.fandom.com/wiki/Weapon_skill?diff=349241&oldid=347613
-            // Low end : 1.3 - 0.05*(defense - skill) min of 0.01 and max of 0.91
-            // If the attacker is a caster then this is reduced by 0.7 and max of 0.6
-            // High end : 1.2 - 0.03*(defense - skill) min of 0.2 and max of 0.99
-            // If the attacker is a caster then this is reduced by 0.3
+            // Each weapon skill point reduces the glancing damage penalty by 2%.
+            int32 skillDiff = int32(pVictim->GetDefenseSkillValue(this)) - int32(GetWeaponSkillValue(damageInfo->attackType, pVictim));
+            float glancingPenalty = 0.05f + skillDiff * 0.02f;
+            if (glancingPenalty < 0.0f)
+                glancingPenalty = 0.0f;
+            if (glancingPenalty > 0.99f)
+                glancingPenalty = 0.99f;
 
-            int32 skillDiff = pVictim->GetDefenseSkillValue(this) - GetWeaponSkillValue(damageInfo->attackType, pVictim);
-            float low = 1.3f - 0.05f * skillDiff;
-            float high = 1.2f - 0.03f * skillDiff;
-            float lowCap = 0.91f;
-            float highCap = 0.99f;
-
-            if ((GetClassMask() & CLASSMASK_WAND_USERS) != 0)
-            {
-                low -= 0.7f;
-                high -= 0.3f;
-                lowCap = 0.6f;
-            }
-
-            if (low < 0.01f)
-                low = 0.01f;
-
-            if (high < 0.2f)
-                high = 0.2f;
-
-            if (low > lowCap)
-                low = lowCap;
-
-            if (high > highCap)
-                high = highCap;
-
-            float reducePercent = frand(low,high);
+            float reducePercent = 1.0f - glancingPenalty;
 
             damageInfo->cleanDamage += uint32((1.0f - reducePercent) * damageInfo->totalDamage);
             damageInfo->totalDamage = uint32(reducePercent * damageInfo->totalDamage);
@@ -2367,6 +2378,28 @@ void Unit::CalculateDamageAbsorbAndResist(WorldObject *pCaster, SpellSchoolMask 
 
 void Unit::CalculateAbsorbResistBlock(WorldObject* pCaster, SpellNonMeleeDamage *damageInfo, SpellEntry const* spellProto, WeaponAttackType attType, Spell* spell)
 {
+    // Righteous Strikes: apply aura 224's post-block damage reduction to blocked melee/ranged spells.
+    auto applyBlockedDamageReduction = [this](uint32 damage, SpellAuraHolder*& consumedHolder) -> uint32
+    {
+        int32 reductionPct = 0;
+        consumedHolder = nullptr;
+        for (uint32 spellId = 51336; spellId <= 51340; ++spellId)
+        {
+            if (Aura* aura = GetAura(spellId, EFFECT_INDEX_0))
+            {
+                reductionPct = aura->GetModifier()->m_amount;
+                consumedHolder = aura->GetHolder();
+                break;
+            }
+        }
+
+        if (reductionPct >= 0 || damage == 0)
+            return damage;
+
+        int32 const adjustedDamage = int32(damage) * (100 + reductionPct) / 100;
+        return adjustedDamage > 0 ? uint32(adjustedDamage) : 0;
+    };
+
     bool blocked = false;
     // Get blocked status
     switch (spellProto->DmgClass)
@@ -2388,6 +2421,10 @@ void Unit::CalculateAbsorbResistBlock(WorldObject* pCaster, SpellNonMeleeDamage 
             damageInfo->blocked = damageInfo->damage;
 
         damageInfo->damage -= damageInfo->blocked;
+        SpellAuraHolder* consumedHolder = nullptr;
+        damageInfo->damage = applyBlockedDamageReduction(damageInfo->damage, consumedHolder);
+        if (consumedHolder && consumedHolder->DropAuraCharge())
+            RemoveSpellAuraHolder(consumedHolder);
     }
     
     CalculateDamageAbsorbAndResist(pCaster, spellProto->GetSpellSchoolMask(), SPELL_DIRECT_DAMAGE, damageInfo->damage, &damageInfo->absorb, &damageInfo->resist, spellProto, spell);
@@ -2912,10 +2949,8 @@ float Unit::MeleeMissChanceCalc(Unit const* pVictim, WeaponAttackType attType) c
     // PvP - PvE melee chances
     if (pVictim->IsPlayer())
         skillDiffBonus = skillDiff * 0.04f;
-    else if (skillDiff < -10)
-        skillDiffBonus = skillDiff * 0.2f;
     else
-        skillDiffBonus = skillDiff * 0.1f;
+        skillDiffBonus = skillDiff * 0.2f;
     missChance -= skillDiffBonus;
 
     // Low level reduction
@@ -2929,12 +2964,6 @@ float Unit::MeleeMissChanceCalc(Unit const* pVictim, WeaponAttackType attType) c
         hitChance = m_modRangedHitChance;
     else
         hitChance = m_modMeleeHitChance;
-
-    // There is some code in 1.12 that explicitly adds a modifier that causes the first 1% of +hit gained from
-    // talents or gear to be ignored against monsters with more than 10 Defense Skill above the attacking player’s Weapon Skill.
-    // https://us.forums.blizzard.com/en/wow/t/bug-hit-tables/185675/33
-    if (skillDiff < -10 && hitChance > 0.0f)
-        hitChance -= 1.0f;
 
     missChance -= hitChance;
 
@@ -3816,6 +3845,16 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder *holder)
         return false;
 
     uint32 spellId = holder->GetId();
+    bool allowPeriodicHealStacking = false;
+
+    switch (spellId)
+    {
+        case 41592: // Frostmane Ritual
+            allowPeriodicHealStacking = true;
+            break;
+        default:
+            break;
+    }
 
     // passive spell special case (only non stackable with ranks)
     if (spellProto->Attributes & (SPELL_ATTR_PASSIVE | SPELL_ATTR_HIDDEN_CLIENTSIDE))
@@ -3926,7 +3965,7 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder *holder)
         if (i_spellId == spellId)
         {
             // Nostalrius - fix stack same HoT rank / diff caster
-            if (firstInChain)
+            if (firstInChain && !allowPeriodicHealStacking)
                 RemoveAurasDueToSpell(i_spellId);
             else switch (spellId)
             {
@@ -5742,10 +5781,14 @@ uint32 Unit::GetSpellRank(SpellEntry const* spellInfo)
  */
 uint32 Unit::SpellDamageBonusTaken(WorldObject* pCaster, SpellEntry const* spellProto, SpellEffectIndex effectIndex, uint32 pdamage, DamageEffectType damagetype, uint32 stack, Spell* spell) const
 {
-    if (!spellProto || !pCaster || damagetype == DIRECT_DAMAGE || spellProto->HasAttribute(SPELL_ATTR_EX4_IGNORE_DAMAGE_TAKEN_MODIFIERS))
+    if (!spellProto || !pCaster || spellProto->HasAttribute(SPELL_ATTR_EX4_IGNORE_DAMAGE_TAKEN_MODIFIERS))
         return pdamage;
 
     uint32 schoolMask = spell ? spell->m_spellSchoolMask : spellProto->GetSpellSchoolMask();
+
+    // JotC only needs direct-damage taken scaling for Holy in this pass.
+    if (damagetype == DIRECT_DAMAGE && !(schoolMask & SPELL_SCHOOL_MASK_HOLY))
+        return pdamage;
 
     // Taken total percent damage auras
     float takenTotalMod = 1.0f;
@@ -5805,6 +5848,16 @@ bool Unit::IsSpellCrit(Unit const* pVictim, SpellEntry const* spellProto, SpellS
         crit_chance = 10.0f;
     else
     {
+        // Judgement of Righteousness: uses melee crit chance instead of spell crit.
+        if (spellProto->IsFitToFamilyMask<CF_PALADIN_JUDGEMENT_OF_RIGHTEOUSNESS>() && spellProto->SpellIconID == 25)
+        {
+            if (pVictim->IsPlayer() && !pVictim->IsStandingUp())
+                return true;
+            crit_chance = GetUnitCriticalChance(attackType, pVictim);
+            crit_chance = crit_chance > 0.0f ? crit_chance : 0.0f;
+            return roll_chance_f(crit_chance);
+        }
+
         // Wand shoot forced to use ranged crit
         uint32 const dmgClass = attackType == RANGED_ATTACK && spellProto->HasAttribute(SPELL_ATTR_EX3_NORMAL_RANGED_ATTACK) ?
             SPELL_DAMAGE_CLASS_RANGED
@@ -6233,11 +6286,18 @@ uint32 Unit::MeleeDamageBonusTaken(WorldObject* pCaster, uint32 pdamage, WeaponA
     if (spellProto && spellProto->HasAttribute(SPELL_ATTR_EX4_IGNORE_DAMAGE_TAKEN_MODIFIERS))
         return pdamage;
 
-    // Exception for Seal of Command and Seal of Righteousness
-    // already with coeff!
-    if (spellProto && (spellProto->Id == 20424 ||
-        (spellProto->SpellFamilyName == SPELLFAMILY_PALADIN && spellProto->DmgClass == SPELL_DAMAGE_CLASS_MELEE))) // SoR is the only pala spell with melee dmg class
-        return pdamage;
+    // Seal holy proc shells use their own target-side JotC coefficients.
+    bool isPaladinSealHolyProc = spellProto && (spellProto->Id == 20424 ||
+        (spellProto->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_SEAL_OF_RIGHTEOUSNESS>() && spellProto->SpellIconID == 25));
+    if (isPaladinSealHolyProc)
+    {
+        uint32 schoolMask = spellProto->GetSpellSchoolMask();
+        int32 takenFlat = GetTotalAuraModifierByMiscMask(SPELL_AURA_MOD_DAMAGE_TAKEN, schoolMask);
+        takenFlat = SpellBonusWithCoeffs(spellProto, effectIndex, 0, takenFlat, 0, damagetype, false, pCaster, spell);
+        float takenPercent = GetTotalAuraMultiplierByMiscMask(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN, schoolMask);
+        float tmpDamage = float(int32(pdamage) + takenFlat * int32(stack)) * takenPercent;
+        return tmpDamage > 0 ? uint32(tmpDamage) : 0;
+    }
 
     // differentiate for weapon damage based spells
     bool isWeaponDamageBasedSpell = !(spellProto && (damagetype == DOT || spellProto->HasEffect(SPELL_EFFECT_SCHOOL_DAMAGE)));
@@ -7937,8 +7997,25 @@ float Unit::ApplyTotalThreatModifier(float threat, SpellSchoolMask schoolMask)
         return threat;
 
     SpellSchools school = GetFirstSchoolInMask(schoolMask);
+    float modifier = m_threatModifier[school];
 
-    return threat * m_threatModifier[school];
+    // Vengeance: threat reduction does not apply while Righteous Fury is active
+    if (HasAura(25780))
+    {
+        AuraList const& threatAuras = GetAurasByType(SPELL_AURA_MOD_THREAT);
+        for (const auto& aura : threatAuras)
+        {
+            SpellEntry const* sp = aura->GetSpellProto();
+            if (sp && sp->SpellFamilyName == SPELLFAMILY_PALADIN && sp->SpellIconID == 84)
+            {
+                int32 amount = aura->GetModifier()->m_amount;
+                if (amount < 0 && (aura->GetModifier()->m_miscvalue & int32(1 << school)))
+                    ApplyPercentModFloatVar(modifier, float(amount), false);
+            }
+        }
+    }
+
+    return threat * modifier;
 }
 
 //======================================================================
@@ -9902,7 +9979,6 @@ void Unit::ClearAllReactives()
         ModifyAuraState(AURA_STATE_HUNTER_PARRY, false);
     if (GetClass() == CLASS_ROGUE && HasAuraState(AURA_STATE_TARGET_DODGED))
         ModifyAuraState(AURA_STATE_TARGET_DODGED, false);
-
     if (GetClass() == CLASS_WARRIOR && IsPlayer())
         static_cast<Player*>(this)->ClearComboPoints();
 }
@@ -11130,7 +11206,7 @@ SpellAuraHolder* Unit::AddAura(uint32 spellId, uint32 addAuraFlags, Unit* pCaste
             if (addAuraFlags & ADD_AURA_POSITIVE)
                 aur->SetPositive(true);
             else if (addAuraFlags & ADD_AURA_NEGATIVE)
-                aur->SetPositive(true);
+                aur->SetPositive(false);
 
             holder->AddAura(aur, SpellEffectIndex(i));
         }

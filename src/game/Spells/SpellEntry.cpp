@@ -117,6 +117,19 @@ SpellSpecific Spells::GetSpellSpecific(uint32 spellId)
             if ((spellInfo->IsFitToFamilyMask(UI64LIT(0x180400))) && spellInfo->baseLevel != 0)
                 return SPELL_JUDGEMENT;
 
+            switch (spellInfo->Id)
+            {
+                case 21183: // Judgement of the Crusader (Rank 1)
+                case 20188: // Judgement of the Crusader (Rank 2)
+                case 20300: // Judgement of the Crusader (Rank 3)
+                case 20301: // Judgement of the Crusader (Rank 4)
+                case 20302: // Judgement of the Crusader (Rank 5)
+                case 20303: // Judgement of the Crusader (Rank 6)
+                    return SPELL_JUDGEMENT;
+                default:
+                    break;
+            }
+
             // Old Judgement of Command
             if (spellInfo->SpellIconID == 561 && spellInfo->SpellVisual == 5652)
                 return SPELL_JUDGEMENT;
@@ -735,9 +748,55 @@ float SpellEntry::CalculateCustomCoefficient(WorldObject const* caster, DamageEf
     {
         case SPELLFAMILY_PALADIN:
         {
-            // Seal of Righteousness
+            // Daybreak: healing power scaling reduced from 43% to 32%.
+            if (Id == 50931)
+                return 0.32f;
+
+            // Holy Light Rank 1: 20% spellpower coefficient.
+            if (Id == 635)
+                return 0.20f;
+
+            // Standard Holy Shock coefficients are in spell_template; the custom damage row is not.
+            if (Id == 52012 && damageType == SPELL_DIRECT_DAMAGE)
+                return 0.43f;
+
+            // Holy Strike: direct Holy hit scales from 71.4% spellpower.
+            if (damageType == SPELL_DIRECT_DAMAGE)
+            {
+                switch (Id)
+                {
+                    case 679:
+                    case 678:
+                    case 1866:
+                    case 680:
+                    case 2495:
+                    case 5569:
+                    case 10332:
+                    case 10333:
+                        return 0.714f;
+                    default:
+                        break;
+                }
+            }
+
+            // Keep Holy Shield out of target-side JotC scaling until its behavior is verified.
+            if (!donePart && IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_HOLY_SHIELD>() && damageType == SPELL_DIRECT_DAMAGE)
+                return 0.0f;
+
+            // Seal of Righteousness uses weapon-speed scaling, with separate target-side JotC coefficients.
             if (IsFitToFamilyMask(UI64LIT(0x0000000008000000)) && SpellIconID == 25)
             {
+                if (!donePart)
+                {
+                    if (caster->IsPlayer())
+                    {
+                        if (Item *item = ((Player*)caster)->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
+                            return item->isOneHandedWeapon() ? 0.18f : 0.43f;
+                    }
+
+                    return 0.18f;
+                }
+
                 coeff = 0.092f;
                 float speed = BASE_ATTACK_TIME;
 
@@ -745,7 +804,7 @@ float SpellEntry::CalculateCustomCoefficient(WorldObject const* caster, DamageEf
                 {
                     if (Item *item = ((Player*)caster)->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
                     {
-                        coeff = item->isOneHandedWeapon() ? 0.092f : 0.108f;
+                        coeff = item->isOneHandedWeapon() ? 0.092f : 0.125f;
                         speed = item->GetProto()->Delay;
                     }
                 }
@@ -759,6 +818,20 @@ float SpellEntry::CalculateCustomCoefficient(WorldObject const* caster, DamageEf
             {
                 return donePart ? 0.20f : 0.29f;
             }
+
+            break;
+        }
+        case SPELLFAMILY_PRIEST:
+        {
+            // Priest holy direct and periodic components use explicit target-side JotC coefficients.
+            if (!donePart && IsFitToFamily<SPELLFAMILY_PRIEST, CF_PRIEST_SMITE>() && damageType == SPELL_DIRECT_DAMAGE)
+                return 0.714f;
+
+            // Holy Fire splits target-side JotC between the opening hit and the DoT using the researched totals.
+            if (!donePart && IsFitToFamily<SPELLFAMILY_PRIEST, CF_PRIEST_HOLY_FIRE>())
+                return damageType == DOT ? 0.143f : 0.857f;
+
+            break;
         }
         case SPELLFAMILY_SHAMAN:
         {
