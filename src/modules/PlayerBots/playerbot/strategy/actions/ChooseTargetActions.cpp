@@ -5,6 +5,169 @@
 #include "playerbot/TravelMgr.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
+#include "playerbot/strategy/values/ItemUsageValue.h"
+#include "playerbot/strategy/values/SharedValueContext.h"
+#include "PerfStats.h"
+#include <algorithm>
+#include <cctype>
+#include <limits>
+#include <set>
+
+namespace
+{
+    int32 GetActiveQuestObjectiveEntry(PlayerbotAI* ai)
+    {
+        if (!ai || !ai->GetAiObjectContext())
+            return 0;
+
+        TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+        if (!target || !target->GetDestination())
+            return 0;
+
+        if (target->GetStatus() != TravelStatus::TRAVEL_STATUS_READY &&
+            target->GetStatus() != TravelStatus::TRAVEL_STATUS_TRAVEL &&
+            target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
+            return 0;
+
+        QuestObjectiveTravelDestination* objective = dynamic_cast<QuestObjectiveTravelDestination*>(target->GetDestination());
+        if (!objective || objective->GetEntry() <= 0)
+            return 0;
+
+        return objective->GetEntry();
+    }
+
+    bool ItemNameSuggestsCreature(ItemPrototype const* proto, CreatureInfo const* creatureInfo)
+    {
+        if (!proto || !creatureInfo)
+            return false;
+
+        std::string itemName = proto->Name1;
+        std::string creatureName = creatureInfo->name;
+        std::transform(itemName.begin(), itemName.end(), itemName.begin(), ::tolower);
+        std::transform(creatureName.begin(), creatureName.end(), creatureName.begin(), ::tolower);
+
+        return !itemName.empty() && !creatureName.empty() && itemName.find(creatureName) != std::string::npos;
+    }
+
+    bool HasSuggestedCreatureDropSource(ItemPrototype const* proto, std::list<int32> const& dropEntries)
+    {
+        for (int32 entry : dropEntries)
+            if (entry > 0 && ItemNameSuggestsCreature(proto, sObjectMgr.GetCreatureTemplate(uint32(entry))))
+                return true;
+
+        return false;
+    }
+
+    std::set<uint32> GetNeededQuestCreatureEntries(Player* bot)
+    {
+        std::set<uint32> entries;
+        if (!bot)
+            return entries;
+
+        QuestStatusMap& questStatusMap = bot->getQuestStatusMap();
+        for (auto const& [questId, questStatus] : questStatusMap)
+        {
+            Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
+            if (!quest || !quest->IsActive() || questStatus.m_status != QUEST_STATUS_INCOMPLETE)
+                continue;
+
+            for (uint32 objective = 0; objective < QUEST_OBJECTIVES_COUNT; ++objective)
+            {
+                if (quest->ReqCreatureOrGOCount[objective] &&
+                    questStatus.m_creatureOrGOcount[objective] < quest->ReqCreatureOrGOCount[objective] &&
+                    quest->ReqCreatureOrGOId[objective] > 0)
+                {
+                    entries.insert(uint32(quest->ReqCreatureOrGOId[objective]));
+                }
+
+                if (!quest->ReqItemCount[objective] || questStatus.m_itemcount[objective] >= quest->ReqItemCount[objective])
+                    continue;
+
+                uint32 itemId = quest->ReqItemId[objective];
+                while (itemId)
+                {
+                    ItemPrototype const* proto = sObjectMgr.GetItemPrototype(itemId);
+                    std::list<int32> dropEntries = GAI_VALUE2(std::list<int32>, "item drop list", itemId);
+                    const bool hasSuggestedSource = HasSuggestedCreatureDropSource(proto, dropEntries);
+
+                    for (int32 entry : dropEntries)
+                    {
+                        if (entry <= 0)
+                            continue;
+
+                        if (hasSuggestedSource && !ItemNameSuggestsCreature(proto, sObjectMgr.GetCreatureTemplate(uint32(entry))))
+                            continue;
+
+                        entries.insert(uint32(entry));
+                    }
+
+                    itemId = ItemUsageValue::ItemCreatedFrom(itemId);
+                }
+            }
+        }
+
+        return entries;
+    }
+
+    Unit* FindVisibleQuestObjectiveTarget(PlayerbotAI* ai, Player* bot)
+    {
+        if (!ai || !bot || !bot->IsInWorld() || !ai->GetAiObjectContext())
+            return nullptr;
+
+        std::set<uint32> objectiveEntries = GetNeededQuestCreatureEntries(bot);
+        if (objectiveEntries.empty())
+            return nullptr;
+
+        Unit* bestActiveTarget = nullptr;
+        Unit* bestFallbackTarget = nullptr;
+        float bestActiveDistance = std::numeric_limits<float>::max();
+        float bestFallbackDistance = std::numeric_limits<float>::max();
+        const int32 activeObjectiveEntry = GetActiveQuestObjectiveEntry(ai);
+        Value<std::list<ObjectGuid>>* possibleTargetsValue = ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid>>("possible targets");
+        if (!possibleTargetsValue)
+            return nullptr;
+
+        std::list<ObjectGuid> possibleTargets = possibleTargetsValue->Get();
+        for (ObjectGuid const& guid : possibleTargets)
+        {
+            if (!guid.IsCreature() || !objectiveEntries.count(guid.GetEntry()))
+                continue;
+
+            Unit* target = ai->GetUnit(guid);
+            if (!target || !target->IsInWorld() || target->GetMapId() != bot->GetMapId() || sServerFacade.UnitIsDead(target))
+                continue;
+
+            if (sServerFacade.IsFriendlyTo(bot, target))
+                continue;
+
+            if (!bot->IsWithinLOSInMap(target, true))
+                continue;
+
+            float distance = sServerFacade.GetDistance2d(bot, target);
+            if (activeObjectiveEntry && int32(guid.GetEntry()) == activeObjectiveEntry)
+            {
+                if (distance < bestActiveDistance)
+                {
+                    bestActiveDistance = distance;
+                    bestActiveTarget = target;
+                }
+
+                continue;
+            }
+
+            if (distance < bestFallbackDistance)
+            {
+                bestFallbackDistance = distance;
+                bestFallbackTarget = target;
+            }
+        }
+
+        if (activeObjectiveEntry)
+            return bestActiveTarget;
+
+        return bestFallbackTarget;
+    }
+}
 
 bool DpsAssistAction::isUseful()
 {
@@ -20,14 +183,41 @@ bool DpsAssistAction::isUseful()
 
 bool AttackAnythingAction::isUseful() 
 {
-    if (!AttackAction::isUseful())
+    if (!bot->IsInCombat() && AI_VALUE(bool, "has available loot"))
+        return false;
+
+    Unit* questObjectiveTarget = FindVisibleQuestObjectiveTarget(ai, bot);
+    if (!questObjectiveTarget && !AttackAction::isUseful())
         return false;
 
     Unit* currentTarget = AI_VALUE(Unit*, "current target");
     if (currentTarget && currentTarget->IsInWorld() && !sServerFacade.UnitIsDead(currentTarget) &&
         !AI_VALUE2(bool, "invalid target", "current target"))
     {
-        return false;
+        const bool engagedWithCurrent =
+            bot->IsInCombat() ||
+            bot->GetVictim() == currentTarget ||
+            currentTarget->GetVictim() == bot;
+        const ObjectGuid attackTarget = AI_VALUE(ObjectGuid, "attack target");
+        const bool intendedCurrent =
+            attackTarget == currentTarget->GetObjectGuid() ||
+            GetTarget() == currentTarget;
+
+        if (!engagedWithCurrent && intendedCurrent)
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "target=" << currentTarget->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, currentTarget)
+                    << " victim=0 combat=0";
+                sPlayerbotAIConfig.logEvent(ai, "AttackCurrentTargetRetry", std::to_string(currentTarget->GetGUIDLow()), out.str());
+            }
+        }
+        else
+        {
+            return false;
+        }
     }
 
     if (Unit* victim = bot->GetVictim())
@@ -44,7 +234,7 @@ bool AttackAnythingAction::isUseful()
     if (!AI_VALUE(bool, "can move around"))
         return false;
 
-    Unit* target = GetTarget();
+    Unit* target = questObjectiveTarget ? questObjectiveTarget : GetTarget();
 
     if (!target || !ai->IsSafe(target))
         return false;
@@ -55,7 +245,7 @@ bool AttackAnythingAction::isUseful()
     if(!target->IsPlayer() && bot->isInFront(target,target->GetAttackDistance(bot)*1.5f, M_PI_F*0.5f) && target->CanAttackOnSight(bot) && target->GetLevel() < bot->GetLevel() + 3.0) //Attack before being attacked.
         return true;
 
-    if (AI_VALUE(bool, "travel target traveling") && CanFreeMoveValue::CanFreeMoveTo(ai, *AI_VALUE(TravelTarget*,"travel target")->GetPosition())) //Bot is traveling
+    if (!questObjectiveTarget && AI_VALUE(bool, "travel target traveling") && CanFreeMoveValue::CanFreeMoveTo(ai, *AI_VALUE(TravelTarget*,"travel target")->GetPosition())) //Bot is traveling
         return false;
 
     return true;
@@ -63,18 +253,40 @@ bool AttackAnythingAction::isUseful()
 
 bool ai::AttackAnythingAction::isPossible()
 {
-    return AttackAction::isPossible() && GetTarget();
+    return AttackAction::isPossible() && (FindVisibleQuestObjectiveTarget(ai, bot) || GetTarget());
 }
 
 bool ai::AttackAnythingAction::Execute(Event& event)
 {
+    if (Unit* questObjectiveTarget = FindVisibleQuestObjectiveTarget(ai, bot))
+    {
+        if (!ai->AllowPressureWork(PerfStats::BOT_PRESSURE_WORK_VISIBLE_OBJECTIVE_ATTACK, 1500, 5000))
+            return false;
+
+        SET_AI_VALUE(Unit*, "current target", questObjectiveTarget);
+        SET_AI_VALUE(ObjectGuid, "attack target", questObjectiveTarget->GetObjectGuid());
+        bot->SetSelectionGuid(questObjectiveTarget->GetObjectGuid());
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "target=" << questObjectiveTarget->GetName()
+                << " entry=" << questObjectiveTarget->GetEntry()
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, questObjectiveTarget)
+                << " travel=" << (AI_VALUE(TravelTarget*, "travel target")->GetDestination() ? AI_VALUE(TravelTarget*, "travel target")->GetDestination()->GetTitle() : "none");
+            sPlayerbotAIConfig.logEvent(ai, "QuestObjectiveVisibleAttack", std::to_string(questObjectiveTarget->GetGUIDLow()), out.str());
+        }
+
+        return Attack(event.getOwner() ? event.getOwner() : GetMaster(), questObjectiveTarget);
+    }
+
     if (Unit* victim = bot->GetVictim())
     {
         if (victim->IsInWorld() && !sServerFacade.UnitIsDead(victim))
         {
             context->GetValue<Unit*>("current target")->Set(victim);
             context->GetValue<ObjectGuid>("attack target")->Set(victim->GetObjectGuid());
-            return false;
+            return true;
         }
     }
 

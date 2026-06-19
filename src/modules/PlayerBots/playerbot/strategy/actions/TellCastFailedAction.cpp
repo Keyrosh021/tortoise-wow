@@ -19,6 +19,21 @@ bool TellCastFailedAction::Execute(Event& event)
         return false;
 
     const SpellEntry *const pSpellInfo =  sServerFacade.LookupSpellInfo(spellId);
+    if (pSpellInfo && bot && bot->getClass() == CLASS_PALADIN && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::string spellName = pSpellInfo->SpellName[0];
+        if (spellName == "Holy Light" || spellName == "Flash of Light")
+        {
+            std::ostringstream trace;
+            trace << "spell=" << spellName
+                  << " result=" << static_cast<uint32>(result)
+                  << " health=" << static_cast<uint32>(bot->GetHealthPercent())
+                  << " combat=" << (bot->IsInCombat() ? 1 : 0)
+                  << " moving=" << (sServerFacade.isMoving(bot) ? 1 : 0)
+                  << " attackers=" << AI_VALUE(uint8, "attacker count");
+            sPlayerbotAIConfig.logEvent(ai, "PaladinHealCastFailed", std::to_string(spellId), trace.str());
+        }
+    }
     std::ostringstream out; out << chat->formatSpell(pSpellInfo) << ": ";
     switch (result)
     {

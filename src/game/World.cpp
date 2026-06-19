@@ -1335,6 +1335,8 @@ void World::LoadConfigSettingsFromFile(bool reload)
     setConfig(CONFIG_UINT32_DYN_RESPAWN_PLAYERS_THRESHOLD, "DynamicRespawn.PlayersThreshold", 0);
     setConfig(CONFIG_UINT32_DYN_RESPAWN_PLAYERS_LEVELDIFF, "DynamicRespawn.PlayersMaxLevelDiff", 0);
     setConfig(CONFIG_UINT32_DYN_RESPAWN_CORPSE_CLONE_MAX, "DynamicRespawn.CorpseCloneMax", 5);
+    setConfig(CONFIG_UINT32_DYN_RESPAWN_UNLOOTED_CORPSE_CLONE_MAX, "DynamicRespawn.UnlootedCorpseCloneMax", 0);
+    setConfig(CONFIG_BOOL_DYN_RESPAWN_PRESERVE_CREATURE_CORPSES, "DynamicRespawn.PreserveCreatureCorpses", false);
 
     setConfig(CONFIG_UINT32_CHANNEL_INVITE_MIN_LEVEL, "ChannelInvite.MinLevel", 10);
     setConfig(CONFIG_BOOL_WHISPER_RESTRICTION, "WhisperRestriction", false);
@@ -2621,6 +2623,26 @@ void World::Update(uint32 diff)
         sLog.out(LOG_PERFORMANCE, "Update async queries: %ums", asyncQueriesTime);
 
     const uint32 worldUpdateTime = WorldTimer::getMSTimeDiffToNow(worldUpdateStart);
+    {
+        PerformanceMonitor::WorldPhaseSnapshot perfSnapshot;
+        perfSnapshot.sessionsUpdateMs = sessionsUpdateTime;
+        perfSnapshot.transportUpdateMs = transportUpdateTime;
+        perfSnapshot.mapMgrUpdateMs = mapMgrUpdateTime;
+        perfSnapshot.battlegroundUpdateMs = battlegroundUpdateTime;
+        perfSnapshot.lfgUpdateMs = lfgUpdateTime;
+        perfSnapshot.guardUpdateMs = guardUpdateTime;
+        perfSnapshot.zoneScriptUpdateMs = zoneScriptUpdateTime;
+        perfSnapshot.dynamicVisUpdateMs = dynamicVisUpdateTime;
+        perfSnapshot.playerbotUpdateMs = playerbotUpdateTime;
+        perfSnapshot.asyncQueriesMs = asyncQueriesTime;
+        perfSnapshot.worldUpdateMs = worldUpdateTime;
+        perfSnapshot.activeSessions = GetActiveSessionCount();
+        perfSnapshot.queuedSessions = GetQueuedSessionCount();
+        perfSnapshot.averageDiffMs = GetAverageDiff();
+        perfSnapshot.currentDiffMs = GetCurrentDiff();
+        sPerfMonitor.RecordWorldPhaseSnapshot(perfSnapshot);
+    }
+
     if (getConfig(CONFIG_UINT32_PERFLOG_SLOW_WORLD_UPDATE) && worldUpdateTime > getConfig(CONFIG_UINT32_PERFLOG_SLOW_WORLD_UPDATE))
     {
         sLog.out(LOG_PERFORMANCE,

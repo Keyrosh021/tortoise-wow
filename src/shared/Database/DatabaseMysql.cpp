@@ -28,8 +28,23 @@
 #include "Platform/Define.h"
 #include "DatabaseEnv.h"
 #include "Timer.h"
+#include <cstring>
 
 size_t DatabaseMysql::db_count = 0;
+
+namespace
+{
+    bool IsHighVolumeBotSql(const char* sql)
+    {
+        return sql && (std::strstr(sql, "ai_playerbot_task_sample") ||
+                       std::strstr(sql, "ai_playerbot_combat_sample") ||
+                       std::strstr(sql, "ai_playerbot_random_bots") ||
+                       std::strstr(sql, " group_member") ||
+                       std::strstr(sql, " `groups`") ||
+                       std::strstr(sql, " INTO groups") ||
+                       std::strstr(sql, " corpse "));
+    }
+}
 
 void DatabaseMysql::ThreadStart()
 {
@@ -224,7 +239,7 @@ bool MySQLConnection::_Query(const char *sql, MYSQL_RES **pResult, MYSQL_FIELD *
 
         return false;
     }
-    else
+    else if (!IsHighVolumeBotSql(sql))
     {
         BASIC_FILTER_LOG(LOG_FILTER_SQL_TEXT, "[%u ms] SQL: %s", WorldTimer::getMSTimeDiff(_s,WorldTimer::getMSTime()), sql );
     }
@@ -315,7 +330,7 @@ bool MySQLConnection::ExecuteMultiline(const char* sql)
         }
         return false;
     }
-    else
+    else if (!IsHighVolumeBotSql(sql))
     {
         DEBUG_FILTER_LOG(LOG_FILTER_SQL_TEXT, "[%u ms] SQL: %s", WorldTimer::getMSTimeDiff(_s, WorldTimer::getMSTime()), sql);
     }
@@ -352,7 +367,7 @@ bool MySQLConnection::Execute(const char* sql)
             return Execute(sql);
         return false;
     }
-    else
+    else if (!IsHighVolumeBotSql(sql))
     {
         BASIC_FILTER_LOG(LOG_FILTER_SQL_TEXT, "[%u ms] SQL: %s", WorldTimer::getMSTimeDiff(_s,WorldTimer::getMSTime()), sql );
     }
@@ -368,7 +383,7 @@ bool MySQLConnection::_TransactionCmd(const char *sql)
         sLog.outError("SQL ERROR: %s", mysql_error(mMysql));
         return false;
     }
-    else
+    else if (!IsHighVolumeBotSql(sql))
     {
         DEBUG_FILTER_LOG(LOG_FILTER_SQL_TEXT, "SQL: %s", sql);
     }

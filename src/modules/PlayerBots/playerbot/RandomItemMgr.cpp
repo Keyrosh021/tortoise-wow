@@ -3519,7 +3519,15 @@ void RandomItemMgr::BuildAmmoCache()
 
 uint32 RandomItemMgr::GetAmmo(uint32 level, uint32 subClass)
 {
-    return ammoCache[(level - 1) / 10][subClass];
+    auto levelItr = ammoCache.find((level - 1) / 10);
+    if (levelItr == ammoCache.end())
+        return 0;
+
+    auto subClassItr = levelItr->second.find(subClass);
+    if (subClassItr == levelItr->second.end())
+        return 0;
+
+    return subClassItr->second;
 }
 
 

@@ -301,8 +301,9 @@ namespace ai
     class SoulstoneTrigger : public ItemTargetTrigger
     {
     public:
-        SoulstoneTrigger(PlayerbotAI* ai) : ItemTargetTrigger(ai, "revive targets", true, true) {}
+        SoulstoneTrigger(PlayerbotAI* ai) : ItemTargetTrigger(ai, "revive targets", true, true, 30) {}
         std::string GetTargetName() override { return "party member to soulstone"; }
+        bool IsActive() override;
         uint32 GetItemId() override;
     };
 }

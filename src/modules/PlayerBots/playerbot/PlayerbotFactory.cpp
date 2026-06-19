@@ -38,6 +38,11 @@ namespace
 
         bot->SetHardcoreStatus(HARDCORE_MODE_STATUS_NONE);
 
+        if (bot->HasTitle(TITLE_STILL_ALIVE))
+            bot->AwardTitle(-TITLE_STILL_ALIVE);
+        if (bot->GetActiveTitle() == TITLE_STILL_ALIVE)
+            bot->ChangeTitle(0);
+
         static const uint32 challengeSpells[] =
         {
             SPELL_SLOW_AND_STEADY,

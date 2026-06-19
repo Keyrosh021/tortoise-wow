@@ -253,3 +253,14 @@ uint32 SoulstoneTrigger::GetItemId()
 
     return itemId;
 }
+
+bool SoulstoneTrigger::IsActive()
+{
+    // Soulstone is a convenience utility for commanded bots. On mass random-bot
+    // runs, letting every warlock probe item-target readiness can stall map
+    // update workers without helping quest/combat throughput.
+    if (!ai->HasRealPlayerMaster())
+        return false;
+
+    return ItemTargetTrigger::IsActive();
+}

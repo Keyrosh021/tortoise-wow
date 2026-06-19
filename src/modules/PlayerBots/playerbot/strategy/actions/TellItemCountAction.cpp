@@ -15,6 +15,9 @@ bool TellItemCountAction::Execute(Event& event)
         if (text.find("@") == 0)
             return false;
 
+        if (text == "inv")
+            return false;
+
         if (text.empty())
             text = "inventory";
 

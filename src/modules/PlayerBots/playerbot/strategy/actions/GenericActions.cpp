@@ -1,6 +1,7 @@
 
 #include "playerbot/playerbot.h"
 #include "GenericActions.h"
+#include "Database/CharacterDatabaseCache.h"
 #include "playerbot/PlayerbotFactory.h"
 
 using namespace ai;
@@ -124,15 +125,9 @@ bool InitializePetAction::isUseful()
             bool hasTamedPet = bot->GetPet();
             if (!hasTamedPet)
             {
-                std::unique_ptr<QueryResult> queryResult(CharacterDatabase.PQuery("SELECT id, entry, owner "
-                                                                                    "FROM character_pet WHERE owner = '%u' AND (slot = '%u' OR slot > '%u') ",
-                                                                                    bot->GetGUIDLow(), PET_SAVE_AS_CURRENT, PET_SAVE_LAST_STABLE_SLOT));
-            
-                if (queryResult)
+                if (CharacterPetCache* petCache = sCharacterDatabaseCache.GetCharacterPetByOwner(bot->GetGUIDLow()))
                 {
-                    Field* fields = queryResult->Fetch();
-                    const uint32 entry = fields[1].GetUInt32();
-                    hasTamedPet = sObjectMgr.GetCreatureTemplate(entry);
+                    hasTamedPet = sObjectMgr.GetCreatureTemplate(petCache->entry);
                 }
             }
 

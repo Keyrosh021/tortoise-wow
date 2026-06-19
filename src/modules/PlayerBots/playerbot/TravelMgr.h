@@ -164,6 +164,9 @@ namespace ai
 
         virtual std::string GetShortName() const override { return "temp"; };
 
+        virtual bool IsPossible(const PlayerTravelInfo& info) const override { return destination.getMapId() == info.GetPosition().getMapId(); }
+        virtual bool IsActive(Player* /*bot*/, const PlayerTravelInfo& info) const override { return IsPossible(info); }
+
 		WorldPosition* GetPosition() { return &destination; }
         void SetPosition(WorldPosition newDestination) { destination = newDestination; }
     private:

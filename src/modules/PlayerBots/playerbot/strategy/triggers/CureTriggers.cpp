@@ -8,6 +8,12 @@ using namespace ai;
 
 bool NeedCureTrigger::IsActive() 
 {
+    // Mass random-bot leveling should not let dispel scans stall continent map
+    // workers. Keep active dispel behavior for commanded bots; later we can
+    // reintroduce autonomous dispels through a sampled/budgeted combat model.
+    if (!ai->HasRealPlayerMaster())
+        return false;
+
 	Unit* target = GetTarget();
 	return target && ai->HasAuraToDispel(target, dispelType);
 }

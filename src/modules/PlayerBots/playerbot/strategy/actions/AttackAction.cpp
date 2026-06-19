@@ -9,9 +9,49 @@
 #include "playerbot/BotDiagnostics.h" // SC_LOG for attack-command diagnostic trace
 #include "playerbot/TravelMgr.h"
 #include "playerbot/strategy/generic/CombatStrategy.h"
+#include "PerfStats.h"
+#include <cmath>
 #include <iomanip>
+#include <map>
+#include <mutex>
 
 using namespace ai;
+
+namespace
+{
+    bool IsCastingSelfHeal(Player* bot)
+    {
+        if (!bot)
+            return false;
+
+        Spell* currentSpell = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+        if (!currentSpell || currentSpell->getState() != SPELL_STATE_CASTING || !PlayerbotAI::IsHealSpell(currentSpell->m_spellInfo))
+            return false;
+
+        Unit* target = currentSpell->m_targets.getUnitTarget();
+        return target && target->GetObjectGuid() == bot->GetObjectGuid();
+    }
+
+    bool ShouldLogChaseInProgress(Player* bot, Unit* target)
+    {
+        if (!bot || !target)
+            return false;
+
+        static std::mutex logMutex;
+        static std::map<uint64, time_t> lastLogByPair;
+
+        uint64 key = (static_cast<uint64>(bot->GetGUIDLow()) << 32) ^ target->GetGUIDLow();
+        time_t now = time(nullptr);
+
+        std::lock_guard<std::mutex> guard(logMutex);
+        time_t& last = lastLogByPair[key];
+        if (last && (now - last) < 5)
+            return false;
+
+        last = now;
+        return true;
+    }
+}
 
 bool AttackAction::Execute(Event& event)
 {
@@ -21,6 +61,15 @@ bool AttackAction::Execute(Event& event)
     if (target && target->IsInWorld() && target->GetMapId() == bot->GetMapId())
     {
         return Attack(requester, target);
+    }
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "target=" << (target ? target->GetName() : "none")
+            << " targetMap=" << (target ? target->GetMapId() : 0)
+            << " botMap=" << bot->GetMapId();
+        sPlayerbotAIConfig.logEvent(ai, "AttackNoTargetTrace", getName(), out.str());
     }
 
     return false;
@@ -125,6 +174,9 @@ bool AttackRTITargetAction::isUseful()
 
 bool AttackAction::Attack(Player* requester, Unit* target)
 {
+    if (IsCastingSelfHeal(bot))
+        return false;
+
     auto logAttackYield = [this, target](char const* eventName, char const* reason, float distance)
     {
         if (!target || !sPlayerbotAIConfig.hasLog("bot_events.csv"))
@@ -156,7 +208,148 @@ bool AttackAction::Attack(Player* requester, Unit* target)
         return moved;
     };
 
+    auto settleMeleeIfClose = [this, target]() -> bool
+    {
+        if (!target || ai->IsRanged(bot))
+            return false;
+
+        const float distance = sServerFacade.GetDistance2d(bot, target);
+        const float verticalDelta = std::fabs(bot->GetPositionZ() - target->GetPositionZ());
+        const bool inLos = bot->IsWithinLOSInMap(target, true);
+        const bool combatReach = bot->CanReachWithMeleeAutoAttack(target);
+        const bool closeEnough = combatReach || (distance <= 3.0f && verticalDelta <= 1.5f && inLos);
+
+        if (!closeEnough)
+            return false;
+
+        MotionMaster* mm = bot->GetMotionMaster();
+        const bool wasChasing = mm && mm->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE;
+        const bool wasMoving = sServerFacade.isMoving(bot) || !bot->IsStopped();
+
+        bot->SetSelectionGuid(target->GetObjectGuid());
+        bot->SetTarget(target);
+        if (bot->GetVictim() != target)
+            bot->Attack(target, true);
+
+        if (ai->CanMove() && !sServerFacade.IsInFront(bot, target, sPlayerbotAIConfig.sightDistance, CAST_ANGLE_IN_FRONT))
+            sServerFacade.SetFacingTo(bot, target);
+
+        if (wasChasing || wasMoving)
+            ai->StopMoving();
+
+        if ((wasChasing || wasMoving) && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "target=" << target->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << distance
+                << " dz=" << std::fixed << std::setprecision(2) << verticalDelta
+                << " los=" << (inLos ? 1 : 0)
+                << " combatReach=" << (combatReach ? 1 : 0)
+                << " wasChasing=" << (wasChasing ? 1 : 0)
+                << " wasMoving=" << (wasMoving ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "AttackMeleeSettle", std::to_string(target->GetGUIDLow()), out.str());
+        }
+
+        return true;
+    };
+
     auto ensureMeleeChase = [this, target]()
+    {
+        if (!target || ai->IsRanged(bot))
+            return false;
+
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (!mm)
+            return false;
+
+        const float distance = sServerFacade.GetDistance2d(bot, target);
+        const float distance3d = bot->GetDistance(target);
+        const float verticalDelta = std::fabs(bot->GetPositionZ() - target->GetPositionZ());
+        const bool inLos = bot->IsWithinLOSInMap(target, true);
+
+        if (bot->CanReachWithMeleeAutoAttack(target) || (distance <= 3.0f && verticalDelta <= 1.5f && inLos))
+        {
+            bot->SetSelectionGuid(target->GetObjectGuid());
+            bot->SetTarget(target);
+            if (bot->GetVictim() != target)
+                bot->Attack(target, true);
+            if (sServerFacade.isMoving(bot) || !bot->IsStopped() || mm->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+                ai->StopMoving();
+            if (ai->CanMove() && !sServerFacade.IsInFront(bot, target, sPlayerbotAIConfig.sightDistance, CAST_ANGLE_IN_FRONT))
+                sServerFacade.SetFacingTo(bot, target);
+            return true;
+        }
+
+        if (!inLos && verticalDelta > 6.0f)
+        {
+            if (AI_VALUE(Unit*, "current target") == target)
+                SET_AI_VALUE(Unit*, "current target", nullptr);
+
+            if (AI_VALUE(ObjectGuid, "attack target") == target->GetObjectGuid())
+                SET_AI_VALUE(ObjectGuid, "attack target", ObjectGuid());
+
+            if (bot->GetVictim() == target)
+                bot->AttackStop(true);
+
+            bot->SetSelectionGuid(ObjectGuid());
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "target=" << target->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << distance
+                    << " dist3d=" << std::fixed << std::setprecision(2) << distance3d
+                    << " dz=" << std::fixed << std::setprecision(2) << verticalDelta
+                    << " los=0"
+                    << " reason=vertical_los"
+                    << " cleared=1";
+                sPlayerbotAIConfig.logEvent(ai, "AttackChaseDeferred", std::to_string(target->GetGUIDLow()), out.str());
+            }
+
+            return false;
+        }
+
+        bool attackStarted = false;
+        if (bot->GetVictim() != target)
+        {
+            bot->SetSelectionGuid(target->GetObjectGuid());
+            bot->SetTarget(target);
+            attackStarted = bot->Attack(target, true);
+        }
+
+        Unit* chaseTarget = sServerFacade.GetChaseTarget(bot);
+        if (mm->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE &&
+            chaseTarget && chaseTarget->GetObjectGuid() == target->GetObjectGuid())
+        {
+            return attackStarted;
+        }
+
+        if (!ai->AllowPressureWork(PerfStats::BOT_PRESSURE_WORK_FORCE_CHASE, 1200, 3500))
+            return attackStarted;
+
+        mm->Clear(false, true);
+        mm->MoveChase(target, ATTACK_DISTANCE, bot->GetAngle(target));
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogChaseInProgress(bot, target))
+        {
+            std::ostringstream out;
+            out << "target=" << target->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << distance
+                << " dist3d=" << std::fixed << std::setprecision(2) << distance3d
+                << " dz=" << std::fixed << std::setprecision(2) << verticalDelta
+                << " los=" << (inLos ? 1 : 0)
+                << " movingGen=" << mm->GetCurrentMovementGeneratorType()
+                << " victim=" << ((bot->GetVictim() == target) ? 1 : 0)
+                << " attackStarted=" << (attackStarted ? 1 : 0)
+                << " moving=" << (sServerFacade.isMoving(bot) ? 1 : 0)
+                << " stopped=" << (bot->IsStopped() ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "AttackForceChase", std::to_string(target->GetGUIDLow()), out.str());
+        }
+
+        return true;
+    };
+
+    auto meleeChaseInProgress = [this, target]() -> bool
     {
         if (!target || ai->IsRanged(bot))
             return false;
@@ -164,27 +357,28 @@ bool AttackAction::Attack(Player* requester, Unit* target)
         if (bot->CanReachWithMeleeAutoAttack(target))
             return false;
 
+        if (bot->GetVictim() != target)
+            return false;
+
         MotionMaster* mm = bot->GetMotionMaster();
         if (!mm)
             return false;
 
-        Unit* chaseTarget = sServerFacade.GetChaseTarget(bot);
-        if (mm->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE &&
-            chaseTarget && chaseTarget->GetObjectGuid() == target->GetObjectGuid())
-        {
+        if (mm->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
             return false;
-        }
 
-        mm->Clear(false, true);
-        mm->MoveChase(target, ATTACK_DISTANCE, bot->GetAngle(target));
+        if (!sServerFacade.isMoving(bot) && bot->IsStopped())
+            return false;
 
-        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogChaseInProgress(bot, target))
         {
             std::ostringstream out;
             out << "target=" << target->GetName()
                 << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target)
+                << " moving=" << (sServerFacade.isMoving(bot) ? 1 : 0)
+                << " stopped=" << (bot->IsStopped() ? 1 : 0)
                 << " movingGen=" << mm->GetCurrentMovementGeneratorType();
-            sPlayerbotAIConfig.logEvent(ai, "AttackForceChase", std::to_string(target->GetGUIDLow()), out.str());
+            sPlayerbotAIConfig.logEvent(ai, "AttackChaseInProgress", std::to_string(target->GetGUIDLow()), out.str());
         }
 
         return true;
@@ -197,7 +391,23 @@ bool AttackAction::Attack(Player* requester, Unit* target)
             if (travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_NONE &&
                 travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_COOLDOWN)
             {
-                travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+                TravelDestination* destination = travelTarget->GetDestination();
+                const bool questTravel =
+                    destination &&
+                    (destination->GetPurpose() == TravelDestinationPurpose::QuestGiver ||
+                     destination->GetPurpose() == TravelDestinationPurpose::QuestTaker ||
+                     destination->GetPurpose() == TravelDestinationPurpose::QuestObjective1 ||
+                     destination->GetPurpose() == TravelDestinationPurpose::QuestObjective2 ||
+                     destination->GetPurpose() == TravelDestinationPurpose::QuestObjective3 ||
+                     destination->GetPurpose() == TravelDestinationPurpose::QuestObjective4);
+
+                travelTarget->SetStatus(questTravel ? TravelStatus::TRAVEL_STATUS_EXPIRED : TravelStatus::TRAVEL_STATUS_COOLDOWN);
+                if (questTravel)
+                {
+                    travelTarget->SetExpireIn(1000);
+                    context->ClearValues("no active travel destinations");
+                    RESET_AI_VALUE(bool, "travel target active");
+                }
             }
         }
 
@@ -250,7 +460,23 @@ bool AttackAction::Attack(Player* requester, Unit* target)
                 if (travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_NONE &&
                     travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_COOLDOWN)
                 {
-                    travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+                    TravelDestination* destination = travelTarget->GetDestination();
+                    const bool questTravel =
+                        destination &&
+                        (destination->GetPurpose() == TravelDestinationPurpose::QuestGiver ||
+                         destination->GetPurpose() == TravelDestinationPurpose::QuestTaker ||
+                         destination->GetPurpose() == TravelDestinationPurpose::QuestObjective1 ||
+                         destination->GetPurpose() == TravelDestinationPurpose::QuestObjective2 ||
+                         destination->GetPurpose() == TravelDestinationPurpose::QuestObjective3 ||
+                         destination->GetPurpose() == TravelDestinationPurpose::QuestObjective4);
+
+                    travelTarget->SetStatus(questTravel ? TravelStatus::TRAVEL_STATUS_EXPIRED : TravelStatus::TRAVEL_STATUS_COOLDOWN);
+                    if (questTravel)
+                    {
+                        travelTarget->SetExpireIn(1000);
+                        context->ClearValues("no active travel destinations");
+                        RESET_AI_VALUE(bool, "travel target active");
+                    }
                 }
             }
 
@@ -272,10 +498,18 @@ bool AttackAction::Attack(Player* requester, Unit* target)
             if (!isRangedBot)
             {
                 const float engagedDistance = sServerFacade.GetDistance2d(bot, target);
+                if (settleMeleeIfClose())
+                    return true;
+
                 if (!bot->CanReachWithMeleeAutoAttack(target))
                 {
+                    suspendTravelForCombat();
+                    if (meleeChaseInProgress())
+                        return true;
+
                     logAttackYield("AttackYieldReachMelee", "already_engaged_out_of_melee", engagedDistance);
-                    return runReachAction("reach melee", "AttackReachMeleeDispatch", engagedDistance);
+                    const bool chaseStarted = ensureMeleeChase();
+                    return chaseStarted || runReachAction("reach melee", "AttackReachMeleeDispatch", engagedDistance);
                 }
 
                 if (ai->CanMove() && !sServerFacade.IsInFront(bot, target, sPlayerbotAIConfig.sightDistance, CAST_ANGLE_IN_FRONT))
@@ -349,10 +583,17 @@ bool AttackAction::Attack(Player* requester, Unit* target)
 
         if (!isRangedBot && !bot->CanReachWithMeleeAutoAttack(target))
         {
-            logAttackYield("AttackYieldReachMelee", "target_out_of_melee", targetDistance);
             suspendTravelForCombat();
             ai->OnCombatStarted();
-            return runReachAction("reach melee", "AttackReachMeleeDispatch", targetDistance);
+            if (settleMeleeIfClose())
+                return true;
+
+            if (meleeChaseInProgress())
+                return true;
+
+            logAttackYield("AttackYieldReachMelee", "target_out_of_melee", targetDistance);
+            const bool chaseStarted = ensureMeleeChase();
+            return chaseStarted || runReachAction("reach melee", "AttackReachMeleeDispatch", targetDistance);
         }
 
         if (isRangedBot && (!hasLineOfSight || targetDistance > (spellRange + sPlayerbotAIConfig.contactDistance)))

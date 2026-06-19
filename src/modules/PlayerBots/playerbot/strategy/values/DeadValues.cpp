@@ -2,8 +2,24 @@
 #include "playerbot/playerbot.h"
 #include "DeadValues.h"
 #include "playerbot/TravelMgr.h"
+#include <sstream>
+#include <unordered_map>
 
 using namespace ai;
+
+namespace
+{
+    std::unordered_map<uint32, time_t> sLastDeadRouteLogTime;
+
+    float EstimateTravelSeconds(const WorldPosition& from, const WorldPosition& to, Player* bot)
+    {
+        if (!bot || !from || !to || from.getMapId() != to.getMapId())
+            return std::numeric_limits<float>::max();
+
+        const float speed = std::max(1.0f, bot->GetSpeed(MOVE_RUN));
+        return from.distance(to) / speed;
+    }
+}
 
 GuidPosition GraveyardValue::Calculate()
 {
@@ -167,41 +183,13 @@ GuidPosition BestGraveyardValue::Calculate()
         );
     }
 
-    //Revive near travel target if it's far away from last death.
-    if (AI_VALUE2(GuidPosition, "graveyard", "travel") && AI_VALUE2(GuidPosition, "graveyard", "travel").fDist(corpse) > sPlayerbotAIConfig.reactDistance)
-    {
-        GuidPosition travelGraveyard = AI_VALUE2(GuidPosition, "graveyard", "travel");
-        if (travelGraveyard)
-        {
-            return travelGraveyard;
-        }
-        sLog.outDetail(
-            "ERROR: Unable to find travel graveyard in BestGraveyardValue, resorting to self graveyard - bot #%d %s:%d <%s>",
-            bot->GetGUIDLow(),
-            bot->GetTeam() == ALLIANCE ? "A" : "H",
-            bot->GetLevel(),
-            bot->GetName()
-        );
-    }
-
     return AI_VALUE2(GuidPosition, "graveyard", "self");
 }
 
 bool ShouldSpiritHealerValue::Calculate()
 {
-    uint32 deathCount = AI_VALUE(uint32, "death count");
-    uint8 durability = AI_VALUE(uint8, "durability");
-
     if (ai->HasActivePlayerMaster()) //Only use spirit healers with direct command with active master.
         return false;
-
-    //Nothing to lose
-    if (ai->HasAura(SPELL_ID_PASSIVE_RESURRECTION_SICKNESS, bot) || durability < 10)
-        return true;
-
-    //Died too many times
-    if (deathCount > DEATH_COUNT_BEFORE_REVIVING_AT_SPIRIT_HEALER)
-        return true;
 
     Corpse* corpse = bot->GetCorpse();
     if (!corpse)
@@ -210,28 +198,34 @@ bool ShouldSpiritHealerValue::Calculate()
         return true;
     }
 
+    uint32 deathCount = AI_VALUE(uint32, "death count");
+
     uint32 deadTime = time(nullptr) - corpse->GetGhostTime();
 
-    //Dead for a long time
-    if (deadTime > 10 * MINUTE && deathCount > 1)
-        return true;
-
-    //Dead for a long time
-    if (deadTime > 20 * MINUTE)
-        return true;
-
-    //If there are enemies near grave and corpse we go to corpse first.
-    if (AI_VALUE2(bool, "manual bool", "enemies near graveyard"))
-        return false;
-
-    //Enemies near corpse so try grave first.
-    if (AI_VALUE2(bool, "manual bool", "enemies near corpse"))
-        return true;
-
     GuidPosition graveyard = AI_VALUE(GuidPosition, "best graveyard");
+    WorldPosition botPos(bot);
+    WorldPosition corpsePos(corpse);
+    WorldPosition gravePos(graveyard);
 
-    float corpseDistance = WorldPosition(bot).fDist(corpse);
-    float graveYardDistance = WorldPosition(bot).fDist(graveyard);
+    TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+    WorldPosition nextObjective;
+    if (travelTarget && travelTarget->GetPosition())
+        nextObjective = *travelTarget->GetPosition();
+
+    const float corpseRouteSecs = EstimateTravelSeconds(botPos, corpsePos, bot);
+    float corpsePlusNextSecs = corpseRouteSecs;
+    if (nextObjective && nextObjective.getMapId() == corpsePos.getMapId())
+        corpsePlusNextSecs += EstimateTravelSeconds(corpsePos, nextObjective, bot);
+
+    const float graveRouteSecs = EstimateTravelSeconds(botPos, gravePos, bot);
+    float gravePlusNextSecs = graveRouteSecs;
+    if (nextObjective && nextObjective.getMapId() == gravePos.getMapId())
+        gravePlusNextSecs += EstimateTravelSeconds(gravePos, nextObjective, bot);
+
+    const float sicknessPenaltySecs = bot->GetLevel() >= 10 ? 10.0f * MINUTE : 0.0f;
+
+    float corpseDistance = botPos.fDist(corpse);
+    float graveYardDistance = botPos.fDist(graveyard);
     bool corpseInSight = corpseDistance < sPlayerbotAIConfig.sightDistance;
     bool graveInSight = graveYardDistance < sPlayerbotAIConfig.sightDistance;
     bool enemiesNear = !AI_VALUE(std::list<ObjectGuid>, "possible targets").empty();
@@ -246,14 +240,28 @@ bool ShouldSpiritHealerValue::Calculate()
         if (corpseInSight)
         {
             SET_AI_VALUE2(bool, "manual bool", "enemies near corpse", true);
-            return true;
+            return false;
         }
     }
 
-    //If grave is near and no ress sickness go there.
-    if (graveInSight && !corpseInSight && ai->HasCheat(BotCheatMask::repair))
-        return true;
+    const time_t now = time(nullptr);
+    time_t& lastRouteLog = sLastDeadRouteLogTime[bot->GetGUIDLow()];
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && (!lastRouteLog || now - lastRouteLog >= 5))
+    {
+        std::ostringstream out;
+        out << "decision=corpse"
+            << " level=" << (uint32)bot->GetLevel()
+            << " deathCount=" << deathCount
+            << " deadTimeSec=" << deadTime
+            << " corpseRouteSec=" << corpsePlusNextSecs
+            << " spiritRouteSec=" << gravePlusNextSecs
+            << " sicknessPenaltySec=" << sicknessPenaltySecs
+            << " corpseInSight=" << (corpseInSight ? 1 : 0)
+            << " graveInSight=" << (graveInSight ? 1 : 0)
+            << " enemiesNear=" << (enemiesNear ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(ai, "DeadRecoveryRouteDecision", "", out.str());
+        lastRouteLog = now;
+    }
 
-    //Stick to corpse.
     return false;
 }

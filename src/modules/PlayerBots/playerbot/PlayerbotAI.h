@@ -377,11 +377,13 @@ public:
 	void HandleBotOutgoingPacket(const WorldPacket& packet);
     void HandleMasterIncomingPacket(const WorldPacket& packet);
     void HandleMasterOutgoingPacket(const WorldPacket& packet);
-	void HandleTeleportAck();
-    uint32 GetPendingTeleportAckCounter() const;
-    void ChangeEngine(BotState type);
-    void DoNextAction(bool minimal = false);
-    bool CanDoSpecificAction(const std::string& name, bool isUseful = true, bool isPossible = true);
+	    void HandleTeleportAck();
+	    uint32 GetPendingTeleportAckCounter() const;
+	    void ChangeEngine(BotState type);
+	    void DoNextAction(bool minimal = false);
+        bool AllowExpensivePlanner(uint32 intervalMs = 2500, uint32 activeIntervalMs = 900);
+        bool AllowPressureWork(uint32 workType, uint32 pressureIntervalMs, uint32 criticalIntervalMs);
+	    bool CanDoSpecificAction(const std::string& name, bool isUseful = true, bool isPossible = true);
     virtual bool DoSpecificAction(const std::string& name, Event event = Event(), bool silent = false);
     void ChangeStrategy(const std::string& name, BotState type);
     void PrintStrategies(Player* requester, BotState type);
@@ -632,11 +634,23 @@ public:
         std::string const& addr = ((Player*)unit)->GetSession()->GetRemoteAddress();
         return addr != "disconnected/bot" && addr != "<BOT>";
     }
-    bool IsSelfMaster() { return master ? (master == bot) : false; }
+    bool IsSelfMaster()
+    {
+        RevalidateMasterPointer();
+        return master ? (master == bot) : false;
+    }
     //Bot has a master that is a player.
-    bool HasRealPlayerMaster() { return master && (!master->GetPlayerbotAI() || master->GetPlayerbotAI()->IsRealPlayer()); } 
+    bool HasRealPlayerMaster()
+    {
+        RevalidateMasterPointer();
+        return master && (!master->GetPlayerbotAI() || master->GetPlayerbotAI()->IsRealPlayer());
+    }
     //Bot has a master that is actively playing.
-    bool HasActivePlayerMaster() const { return master && !master->GetPlayerbotAI(); }
+    bool HasActivePlayerMaster()
+    {
+        RevalidateMasterPointer();
+        return master && !master->GetPlayerbotAI();
+    }
     //Checks if the bot is summoned as alt of a player
     bool IsAlt() { return HasRealPlayerMaster() && !sRandomPlayerbotMgr.IsRandomBot(bot); }
     //Get the group leader or the master of the bot.
@@ -687,6 +701,18 @@ public:
     {
         this->master = m;
         this->masterGuid = m ? m->GetObjectGuid() : ObjectGuid();
+    }
+    void RevalidateMasterPointer()
+    {
+        if (!master)
+            return;
+
+        Player* live = masterGuid ? sObjectAccessor.FindPlayer(masterGuid) : nullptr;
+        if (live != master)
+        {
+            master = nullptr;
+            masterGuid = ObjectGuid();
+        }
     }
     AiObjectContext* GetAiObjectContext() { return aiObjectContext; }
     void SetAiObjectContext(AiObjectContext* aiObjectContext) { this->aiObjectContext = aiObjectContext; }
@@ -762,6 +788,11 @@ private:
     void UpdateFaceTarget(uint32 elapsed, bool minimal);
     void ResetStaleTargetState();
     bool DetectAndClearStaleTarget();
+    void TrackActionMetrics(bool minimal, bool actionExecuted, bool staleReset);
+    void LogActionMetricsSnapshot(time_t now);
+    void LogVisibleActivitySnapshot(time_t now);
+    void LogDecisionStallSnapshot(time_t now, const std::string& loopReason);
+    std::string BuildCurrentTaskSummary();
 
 protected:
 	Player* bot;
@@ -799,7 +830,28 @@ protected:
     float staleTargetLastX = 0.0f;
     float staleTargetLastY = 0.0f;
     float staleTargetLastZ = 0.0f;
+    float staleTargetLastDistance = 0.0f;
     uint32 staleTargetLastTargetHealth = 0;
+    time_t actionMetricWindowStart = 0;
+    time_t actionMetricLastProgress = 0;
+    time_t actionMetricLastSnapshot = 0;
+    time_t actionMetricLastVisibleSnapshot = 0;
+    time_t actionMetricLastStallSnapshot = 0;
+    uint32 actionMetricTicks = 0;
+    uint32 actionMetricExecutedTicks = 0;
+    uint32 actionMetricMinimalTicks = 0;
+    uint32 actionMetricAfkTicks = 0;
+    uint32 actionMetricMovingTicks = 0;
+    uint32 actionMetricCombatTicks = 0;
+    uint32 actionMetricTargetTicks = 0;
+    uint32 actionMetricTravelTicks = 0;
+    uint32 actionMetricQuestTravelTicks = 0;
+    uint32 actionMetricStaleResets = 0;
+    uint32 actionMetricNoProgressTicks = 0;
+    uint32 actionMetricSameActionStreak = 0;
+    uint32 expensivePlannerNextAllowedMs = 0;
+    uint32 pressureWorkNextAllowedMs[5] = {};
+    std::string actionMetricLastActionName;
     BotCheatMask cheatMask = BotCheatMask::none;
     WorldPosition jumpDestination;
     uint32 jumpTime;

@@ -13,6 +13,19 @@ using namespace ai;
 
 bool RpgTrigger::IsActive() 
 { 
+    TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+    if (travelTarget && travelTarget->GetDestination())
+    {
+        TravelStatus status = travelTarget->GetStatus();
+        if (status != TravelStatus::TRAVEL_STATUS_NONE &&
+            status != TravelStatus::TRAVEL_STATUS_COOLDOWN &&
+            status != TravelStatus::TRAVEL_STATUS_EXPIRED &&
+            dynamic_cast<QuestTravelDestination*>(travelTarget->GetDestination()))
+        {
+            return false;
+        }
+    }
+
     if (!ai->HasRealPlayerMaster())
         return true;
 

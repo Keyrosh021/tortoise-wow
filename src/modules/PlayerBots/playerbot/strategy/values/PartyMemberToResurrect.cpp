@@ -37,7 +37,11 @@ public:
 				return false;
 		}
 
-        return player && !player->isRessurectRequested() && sServerFacade.GetDistance2d(ai->GetBot(), player) <= ai->GetRange("spell") && sServerFacade.GetDeathState(player) == CORPSE && !value->IsTargetOfSpellCast(player, predicate);
+        Player* bot = ai->GetBot();
+        return player && bot && player->IsInWorld() && bot->IsInWorld() && player->GetMapId() == bot->GetMapId() &&
+            player->GetGroup() && bot->GetGroup() && player->IsInGroup(bot) &&
+            !player->isRessurectRequested() && sServerFacade.GetDistance2d(bot, player) <= ai->GetRange("spell") &&
+            sServerFacade.GetDeathState(player) == CORPSE && !value->IsTargetOfSpellCast(player, predicate);
     }
 
 private:
@@ -47,6 +51,9 @@ private:
 
 Unit* PartyMemberToResurrect::Calculate()
 {
+    if (!ai->GetBot() || !ai->GetBot()->GetGroup())
+        return nullptr;
+
 	FindDeadPlayer finder(ai, this);
-    return FindPartyMember(finder);
+    return FindPartyMember(finder, true);
 }

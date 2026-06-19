@@ -69,6 +69,12 @@ namespace
 
         return false;
     }
+
+    uint64 GetSteadyMs()
+    {
+        return static_cast<uint64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
 }
 
 #ifdef CMANGOS
@@ -285,6 +291,8 @@ RandomPlayerbotMgr::RandomPlayerbotMgr()
 , processTicks(0)
 , loginProgressBar(NULL)
 {
+    StartUpdateWatchdog();
+
     if (sPlayerbotAIConfig.enabled && sPlayerbotAIConfig.randomBotAutologin)
     {
         sPlayerbotCommandServer.Start();
@@ -359,6 +367,89 @@ RandomPlayerbotMgr::RandomPlayerbotMgr()
 
 RandomPlayerbotMgr::~RandomPlayerbotMgr()
 {
+    StopUpdateWatchdog();
+}
+
+const char* RandomPlayerbotMgr::GetWatchdogPhaseName(UpdateWatchdogPhase phase)
+{
+    switch (phase)
+    {
+        case UpdateWatchdogPhase::Idle: return "idle";
+        case UpdateWatchdogPhase::UpdateSessions: return "UpdateSessions";
+        case UpdateWatchdogPhase::ScaleBotActivity: return "ScaleBotActivity";
+        case UpdateWatchdogPhase::AsyncBotLogin: return "AsyncBotLogin";
+        case UpdateWatchdogPhase::AddRandomBots: return "AddRandomBots";
+        case UpdateWatchdogPhase::CheckPlayers: return "CheckPlayers";
+        case UpdateWatchdogPhase::CheckLfgQueue: return "CheckLfgQueue";
+        case UpdateWatchdogPhase::CheckBgQueue: return "CheckBgQueue";
+        case UpdateWatchdogPhase::AddOfflineGroupBots: return "AddOfflineGroupBots";
+        case UpdateWatchdogPhase::ProcessBotLoop: return "ProcessBotLoop";
+        case UpdateWatchdogPhase::LoginQueue: return "LoginQueue";
+        case UpdateWatchdogPhase::LoginFreeBots: return "LoginFreeBots";
+        case UpdateWatchdogPhase::LogPlayerLocation: return "LogPlayerLocation";
+        case UpdateWatchdogPhase::DelayedFacingFix: return "DelayedFacingFix";
+        case UpdateWatchdogPhase::MirrorAh: return "MirrorAh";
+        case UpdateWatchdogPhase::PerfInit: return "PerfInit";
+        case UpdateWatchdogPhase::DatabasePing: return "DatabasePing";
+        case UpdateWatchdogPhase::HolderUpdate: return "PlayerbotHolder::UpdateAIInternal";
+    }
+
+    return "unknown";
+}
+
+uint64 RandomPlayerbotMgr::GetWatchdogSteadyMs()
+{
+    return GetSteadyMs();
+}
+
+void RandomPlayerbotMgr::StartUpdateWatchdog()
+{
+    m_updateWatchdogStop = false;
+    m_updateWatchdogPhase = static_cast<uint32>(UpdateWatchdogPhase::Idle);
+    m_updateWatchdogPhaseSinceMs = GetWatchdogSteadyMs();
+    m_updateWatchdogThread = std::thread([this]()
+    {
+        uint64 lastLoggedSince = 0;
+        while (!m_updateWatchdogStop.load())
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+
+            const auto phase = static_cast<UpdateWatchdogPhase>(m_updateWatchdogPhase.load());
+            if (phase == UpdateWatchdogPhase::Idle)
+                continue;
+
+            const uint64 phaseSinceMs = m_updateWatchdogPhaseSinceMs.load();
+            const uint64 nowMs = GetWatchdogSteadyMs();
+            const uint64 ageMs = nowMs > phaseSinceMs ? nowMs - phaseSinceMs : 0;
+
+            if (ageMs < 10000)
+                continue;
+
+            if (phaseSinceMs == lastLoggedSince && ageMs < 30000)
+                continue;
+
+            lastLoggedSince = phaseSinceMs;
+            sLog.outError(
+                "RandomPlayerbotMgr watchdog: stuck in %s for " UI64FMTD "ms [available %u|online %u|playersMap " SIZEFMTD "]",
+                GetWatchdogPhaseName(phase), ageMs, m_updateWatchdogAvailableBots.load(),
+                m_updateWatchdogOnlineBots.load(), players.size());
+        }
+    });
+}
+
+void RandomPlayerbotMgr::StopUpdateWatchdog()
+{
+    m_updateWatchdogStop = true;
+    if (m_updateWatchdogThread.joinable())
+        m_updateWatchdogThread.join();
+}
+
+void RandomPlayerbotMgr::SetUpdateWatchdogPhase(UpdateWatchdogPhase phase, uint32 availableBotCount, uint32 onlineBotCount)
+{
+    m_updateWatchdogAvailableBots = availableBotCount;
+    m_updateWatchdogOnlineBots = onlineBotCount;
+    m_updateWatchdogPhase = static_cast<uint32>(phase);
+    m_updateWatchdogPhaseSinceMs = GetWatchdogSteadyMs();
 }
 
 int RandomPlayerbotMgr::GetMaxAllowedBotCount()
@@ -725,6 +816,13 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     // See PlayerbotMgr::UpdateAIInternal for the rationale — same call,
     // same purpose, applied to the random-bot pool.
     uint32 phaseStart = WorldTimer::getMSTime();
+    uint32 availableBotCount = 0;
+    uint32 onlineBotCount = 0;
+    auto setPhaseState = [this, &availableBotCount, &onlineBotCount](UpdateWatchdogPhase phase)
+    {
+        SetUpdateWatchdogPhase(phase, availableBotCount, onlineBotCount);
+    };
+    setPhaseState(UpdateWatchdogPhase::UpdateSessions);
     UpdateSessions(elapsed);
     updateSessionsTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
@@ -735,12 +833,14 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
         playersLevel = sPlayerbotAIConfig.syncLevelNoPlayer;
 
     phaseStart = WorldTimer::getMSTime();
+    setPhaseState(UpdateWatchdogPhase::ScaleBotActivity);
     ScaleBotActivity();
     scaleActivityTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     if (sPlayerbotAIConfig.asyncBotLogin)
     {
         phaseStart = WorldTimer::getMSTime();
+        setPhaseState(UpdateWatchdogPhase::AsyncBotLogin);
         auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "AsyncBotLogin");
         sPlayerBotLoginMgr.Update(players);
         pmo.reset();
@@ -756,8 +856,8 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     }
 
     std::list<uint32> availableBots = GetBots();    
-    uint32 availableBotCount = availableBots.size();
-    uint32 onlineBotCount = GetPlayerbotsAmount();
+    availableBotCount = availableBots.size();
+    onlineBotCount = GetPlayerbotsAmount();
     
     SetAIInternalUpdateDelay(sPlayerbotAIConfig.randomBotUpdateInterval);
 
@@ -778,6 +878,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
         if (logInAllowed)
         {
             phaseStart = WorldTimer::getMSTime();
+            setPhaseState(UpdateWatchdogPhase::AddRandomBots);
             AddRandomBots();
             addRandomBotsTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
         }
@@ -788,6 +889,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
         if (time(nullptr) > (PlayersCheckTimer + 60))
         {
             phaseStart = WorldTimer::getMSTime();
+            setPhaseState(UpdateWatchdogPhase::CheckPlayers);
             CheckPlayers();
             checkPlayersTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
         }
@@ -798,6 +900,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
         if (time(nullptr) > (LfgCheckTimer + 30))
         {
             phaseStart = WorldTimer::getMSTime();
+            setPhaseState(UpdateWatchdogPhase::CheckLfgQueue);
             CheckLfgQueue();
             checkLfgTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
         }
@@ -808,6 +911,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
         if (time(nullptr) > (BgCheckTimer + 30))
         {
             phaseStart = WorldTimer::getMSTime();
+            setPhaseState(UpdateWatchdogPhase::CheckBgQueue);
             CheckBgQueue();
             checkBgTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
         }
@@ -816,6 +920,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     if (time(nullptr) > (OfflineGroupBotsTimer + 5) && players.size())
     {
         phaseStart = WorldTimer::getMSTime();
+        setPhaseState(UpdateWatchdogPhase::AddOfflineGroupBots);
         AddOfflineGroupBots();
         addOfflineGroupBotsTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
     }
@@ -824,6 +929,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
 
     //Update bots
     phaseStart = WorldTimer::getMSTime();
+    setPhaseState(UpdateWatchdogPhase::ProcessBotLoop);
     uint32 processScanBudget = availableBotCount;
     if (!sPlayerbotAIConfig.disableBotOptimizations)
     {
@@ -852,6 +958,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     if (sRandomPlayerbotMgr.GetDatabaseDelay("CharacterDatabase") < 10 * IN_MILLISECONDS && !sPlayerbotAIConfig.asyncBotLogin && onlineBotCount < maxAllowedBotCount && maxLogins > 0)
     {
         phaseStart = WorldTimer::getMSTime();
+        setPhaseState(UpdateWatchdogPhase::LoginQueue);
         uint32 loginScanBudget = availableBotCount;
         if (!sPlayerbotAIConfig.disableBotOptimizations)
             loginScanBudget = std::min<uint32>(availableBotCount, std::max<uint32>(maxLogins * 12, 600u));
@@ -886,24 +993,29 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     }
 
     phaseStart = WorldTimer::getMSTime();
+    setPhaseState(UpdateWatchdogPhase::LoginFreeBots);
     LoginFreeBots();
     loginFreeBotsTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     //sLog.outString("[char %d, bot %d]", CharacterDatabase.m_threadBody->m_sqlQueue.size(), CharacterDatabase.m_threadBody->m_sqlQueue.size());
    
     phaseStart = WorldTimer::getMSTime();
+    setPhaseState(UpdateWatchdogPhase::LogPlayerLocation);
     LogPlayerLocation();
     logPlayerLocationTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     phaseStart = WorldTimer::getMSTime();
+    setPhaseState(UpdateWatchdogPhase::DelayedFacingFix);
     DelayedFacingFix();
     delayedFacingFixTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     phaseStart = WorldTimer::getMSTime();
+    setPhaseState(UpdateWatchdogPhase::MirrorAh);
     MirrorAh();
     mirrorAhTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
     phaseStart = WorldTimer::getMSTime();
+    setPhaseState(UpdateWatchdogPhase::PerfInit);
     for (auto& [mapId, map] : sMapMgr.Maps())
     {
         sPerformanceMonitor.Init(map->GetId(), map->GetInstanceId());
@@ -912,6 +1024,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
 
     //Ping character database.
     phaseStart = WorldTimer::getMSTime();
+    setPhaseState(UpdateWatchdogPhase::DatabasePing);
     CharacterDatabase.AsyncPQuery(&RandomPlayerbotMgr::DatabasePing, sWorld.GetCurrentMSTime(), std::string("CharacterDatabase"), "SELECT 1");
     databasePingTime = WorldTimer::getMSTimeDiffToNow(phaseStart);
 
@@ -929,7 +1042,9 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
             loginQueueInspected, loginAttemptsStarted);
     }
 
+    setPhaseState(UpdateWatchdogPhase::HolderUpdate);
     PlayerbotHolder::UpdateAIInternal(elapsed, minimal);
+    SetUpdateWatchdogPhase(UpdateWatchdogPhase::Idle, availableBotCount, onlineBotCount);
 }
 
 void RandomPlayerbotMgr::ScaleBotActivity()
@@ -2077,8 +2192,11 @@ void RandomPlayerbotMgr::CheckLfgQueue()
 
 void RandomPlayerbotMgr::AddOfflineGroupBots()
 {
-    if (!OfflineGroupBotsTimer || time(NULL) > (OfflineGroupBotsTimer + 5))
-        OfflineGroupBotsTimer = time(NULL);
+    time_t now = time(nullptr);
+    if (OfflineGroupBotsTimer && now <= (OfflineGroupBotsTimer + 5))
+        return;
+
+    OfflineGroupBotsTimer = now;
 
     uint32 totalCounter = 0;
     for (const auto& i : players)
@@ -2112,7 +2230,7 @@ void RandomPlayerbotMgr::AddOfflineGroupBots()
             }
 
             if (botsToAdd.empty())
-                return;
+                continue;
 
             uint32 maxToAdd = urand(1, 5);
             uint32 counter = 0;
@@ -2670,6 +2788,15 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
         uint32 zoneId, areaId;
         sTerrainMgr.GetZoneAndAreaId(zoneId, areaId, mapId, l.coord_x, l.coord_y, l.coord_z);
         AreaTableEntry const* area = GetAreaEntryByAreaID(areaId);
+        if (bot->GetLevel() < 30)
+        {
+            if ((zoneId == 5225 || areaId == 5225 || zoneId == 2040 || areaId == 2040 || zoneId == 1220 || areaId == 1220) &&
+                bot->getRace() != RACE_HIGH_ELF)
+                return true;
+            if ((zoneId == 5536 || areaId == 5536) && bot->getRace() != RACE_GOBLIN)
+                return true;
+        }
+
         if (zoneId && zoneId != areaId)
         {
             AreaTableEntry const* zone = GetAreaEntryByAreaID(zoneId);
@@ -2697,7 +2824,7 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
             {
                 if ((zoneId == 12 || zoneId == 40) && bot->getRace() != RACE_HUMAN)
                     return true;
-                if ((zoneId == 1 || zoneId == 38) && bot->getRace() != RACE_DWARF)
+                if ((zoneId == 1 || zoneId == 38) && !(bot->getRace() == RACE_DWARF || bot->getRace() == RACE_GNOME))
                     return true;
                 if ((zoneId == 85 || zoneId == 130) && bot->getRace() != RACE_UNDEAD)
                     return true;

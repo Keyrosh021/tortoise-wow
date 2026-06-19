@@ -60,9 +60,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     }
 
     std::list<ObjectGuid> targets = *context->GetValue<std::list<ObjectGuid> >("possible targets");
-
-    if (targets.empty())
-        return NULL;
+    const uint32 possibleTargetCount = targets.size();
 
     float distance = 0;
     Unit* result = NULL;
@@ -76,6 +74,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
     TravelDestination* travelDestination = travelTarget ? travelTarget->GetDestination() : nullptr;
     bool isGrindTravelDest = travelDestination && dynamic_cast<GrindTravelDestination*>(travelDestination);
+    bool isQuestObjectiveTravelDest = travelDestination && dynamic_cast<QuestObjectiveTravelDestination*>(travelDestination);
     bool hasNullTravelDest = travelDestination && dynamic_cast<NullTravelDestination*>(travelDestination);
     const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
     TravelStatus travelStatus = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
@@ -86,6 +85,10 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
         travelStatus != TravelStatus::TRAVEL_STATUS_EXPIRED &&
         !isGrindTravelDest &&
         !hasNullTravelDest;
+    const bool hasBlockingNonObjectiveTravelTarget =
+        hasActiveNonGrindTravelTarget && !isQuestObjectiveTravelDest;
+    const bool hasActiveQuestObjectiveTravelTarget =
+        hasActiveNonGrindTravelTarget && isQuestObjectiveTravelDest;
     bool hasQuestObjectivesPending = false;
     bool hasQuestTurnInsPending = false;
     bool hasUnrewardedQuestStatus = false;
@@ -124,6 +127,11 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     const bool mustCommitToQuestTravel =
         autonomousRandomBot &&
         (hasQuestPickupsPending || hasQuestTurnInsPending || hasActiveNonGrindTravelTarget);
+    const bool skipGrindTargetScan =
+        autonomousRandomBot &&
+        mustCommitToQuestTravel &&
+        (questPickupOnlyPending || (hasQuestTurnInsPending && !hasActiveQuestObjectiveTravelTarget) ||
+            hasBlockingNonObjectiveTravelTarget);
 
     struct RejectStats
     {
@@ -159,7 +167,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
     std::unordered_map<uint32, bool> needForQuestCache;
 
-    for (std::list<ObjectGuid>::iterator tIter = targets.begin(); tIter != targets.end(); tIter++)
+    for (std::list<ObjectGuid>::iterator tIter = skipGrindTargetScan ? targets.end() : targets.begin(); tIter != targets.end(); tIter++)
     {
         Unit* unit = ai->GetUnit(*tIter);
         if (!unit)
@@ -341,7 +349,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
                 continue;
             }
-            else if (hasActiveNonGrindTravelTarget)
+            else if (hasBlockingNonObjectiveTravelTarget)
             {
                 ++rejectStats.notQuest;
                 if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
@@ -465,7 +473,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     {
         std::ostringstream out;
         out << "attackers=" << attackers.size()
-            << " possible=" << targets.size()
+            << " possible=" << possibleTargetCount
             << " assistCount=" << assistCount;
 
         if (result)
@@ -498,6 +506,9 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
                 << " travelWorking=" << (travelTargetWorking ? 1 : 0)
                 << " travelTraveling=" << (travelTargetTraveling ? 1 : 0)
                 << " activeNonGrindTravel=" << (hasActiveNonGrindTravelTarget ? 1 : 0)
+                << " activeObjectiveTravel=" << (hasActiveQuestObjectiveTravelTarget ? 1 : 0)
+                << " objectiveTravel=" << (isQuestObjectiveTravelDest ? 1 : 0)
+                << " skippedScan=" << (skipGrindTargetScan ? 1 : 0)
                 << " questPickups=" << (hasQuestPickupsPending ? 1 : 0)
                 << " questTurnIns=" << (hasQuestTurnInsPending ? 1 : 0)
                 << " questObjectives=" << (hasQuestObjectivesPending ? 1 : 0)

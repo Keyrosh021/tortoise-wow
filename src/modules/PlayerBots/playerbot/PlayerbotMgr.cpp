@@ -7,6 +7,7 @@
 #include "playerbot/ServerFacade.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/PlayerbotLoginMgr.h"
+#include "playerbot/BotLearningMgr.h"
 #include "BotDiagnostics.h"
 #include "BotActionLog.h"
 #include "Chat/ChannelMgr.h"
@@ -77,6 +78,11 @@ namespace {
 
         bot->SetHardcoreStatus(HARDCORE_MODE_STATUS_NONE);
 
+        if (bot->HasTitle(TITLE_STILL_ALIVE))
+            bot->AwardTitle(-TITLE_STILL_ALIVE);
+        if (bot->GetActiveTitle() == TITLE_STILL_ALIVE)
+            bot->ChangeTitle(0);
+
         for (uint32 spellId : challengeSpells)
         {
             if (bot->HasAura(spellId))
@@ -87,6 +93,7 @@ namespace {
         }
 
         CharacterDatabase.DirectPExecute("UPDATE `characters` SET `mortality_status` = 0 WHERE `guid` = %u", bot->GetGUIDLow());
+        CharacterDatabase.DirectPExecute("DELETE FROM `character_titles` WHERE `guid` = %u AND `title` = %u", bot->GetGUIDLow(), uint32(TITLE_STILL_ALIVE));
         CharacterDatabase.DirectPExecute("DELETE FROM `character_spell` WHERE `guid` = %u AND `spell` IN (50000, 50004, 50008, 50001, 50014, 50071)", bot->GetGUIDLow());
         CharacterDatabase.DirectPExecute("DELETE FROM `character_aura` WHERE `guid` = %u AND `spell` IN (50000, 50004, 50008, 50001, 50014, 50071)", bot->GetGUIDLow());
         CharacterDatabase.DirectPExecute("DELETE FROM `character_aura_suspended` WHERE `guid` = %u AND `spell` IN (50000, 50004, 50008, 50001, 50014, 50071)", bot->GetGUIDLow());
@@ -380,6 +387,8 @@ void PlayerbotHolder::MovePlayerBot(uint32 guid, PlayerbotHolder* newHolder)
 
 void PlayerbotHolder::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
+    sBotLearningMgr.FlushTelemetry();
+
     std::vector<CompletedBotLogin> completedBotLogins;
     {
         std::lock_guard<std::mutex> guard(m_completedBotLoginsLock);

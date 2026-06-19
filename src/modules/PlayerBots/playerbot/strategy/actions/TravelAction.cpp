@@ -34,10 +34,24 @@ bool TravelAction::Execute(Event& event)
                 bot->SetSelectionGuid(targetGuid);
 
             bool didQuestWork = false;
+            bool usedFallback = false;
+            const std::string questIdParam = std::to_string(questDest->GetQuestId());
             if (questDest->GetRelation() == 0)
-                didQuestWork = ai->DoSpecificAction("accept quest", Event("quest travel", "*", bot), true);
+            {
+                if (targetGuid)
+                    didQuestWork = ai->DoSpecificAction("talk to quest giver", Event("quest travel", targetGuid, bot), true);
+
+                if (!didQuestWork)
+                {
+                    usedFallback = true;
+                    didQuestWork = ai->DoSpecificAction("accept quest", Event("quest travel", questIdParam, bot), true);
+                }
+            }
             else
-                didQuestWork = ai->DoSpecificAction("talk to quest giver", targetGuid ? Event("quest travel", targetGuid, bot) : Event("quest travel", "", bot), true);
+            {
+                didQuestWork = targetGuid &&
+                    ai->DoSpecificAction("talk to quest giver", Event("quest travel", targetGuid, bot), true);
+            }
 
             if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
             {
@@ -45,12 +59,31 @@ bool TravelAction::Execute(Event& event)
                 out << "entry=" << questDest->GetEntry()
                     << " questId=" << questDest->GetQuestId()
                     << " relation=" << (uint32)questDest->GetRelation()
+                    << " requestedQuestId=" << questIdParam
                     << " guid=" << (targetGuid ? targetGuid.GetRawValue() : 0)
-                    << " didQuestWork=" << (didQuestWork ? 1 : 0);
+                    << " didQuestWork=" << (didQuestWork ? 1 : 0)
+                    << " fallback=" << (usedFallback ? 1 : 0);
                 sPlayerbotAIConfig.logEvent(ai, "QuestTravelWorkAction", target->GetDestination()->GetTitle(), out.str());
             }
 
-            target->SetStatus(didQuestWork ? TravelStatus::TRAVEL_STATUS_EXPIRED : TravelStatus::TRAVEL_STATUS_COOLDOWN);
+            target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+            if (!didQuestWork)
+            {
+                const time_t suppressUntil = time(0) + 30;
+                std::ostringstream skipQualifier;
+                skipQualifier << "quest relation skip::" << questDest->GetEntry() << ":" << questDest->GetQuestId() << ":" << (uint32)questDest->GetRelation();
+                SET_AI_VALUE2(time_t, "manual time", skipQualifier.str(), suppressUntil);
+                std::ostringstream entrySkipQualifier;
+                entrySkipQualifier << "quest relation entry skip::" << questDest->GetEntry() << ":" << (uint32)questDest->GetRelation();
+                SET_AI_VALUE2(time_t, "manual time", entrySkipQualifier.str(), suppressUntil);
+                target->SetExpireIn(15000);
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    sPlayerbotAIConfig.logEvent(ai, "QuestTravelReplan",
+                        target->GetDestination()->GetTitle(),
+                        "reason=no-work refreshMs=15000 suppressSec=30");
+                }
+            }
             context->ClearValues("no active travel destinations");
             RESET_AI_VALUE(bool, "travel target active");
         }

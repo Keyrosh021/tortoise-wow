@@ -6,8 +6,10 @@
 #include "PlayerbotMgr.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "WorldPosition.h"
+#include <atomic>
 #include <map>
 #include <list>
+#include <thread>
 
 class WorldPacket;
 class Player;
@@ -58,6 +60,28 @@ private:
 class RandomPlayerbotMgr : public PlayerbotHolder
 {
     public:
+        enum class UpdateWatchdogPhase : uint32
+        {
+            Idle = 0,
+            UpdateSessions,
+            ScaleBotActivity,
+            AsyncBotLogin,
+            AddRandomBots,
+            CheckPlayers,
+            CheckLfgQueue,
+            CheckBgQueue,
+            AddOfflineGroupBots,
+            ProcessBotLoop,
+            LoginQueue,
+            LoginFreeBots,
+            LogPlayerLocation,
+            DelayedFacingFix,
+            MirrorAh,
+            PerfInit,
+            DatabasePing,
+            HolderUpdate
+        };
+
         RandomPlayerbotMgr();
         virtual ~RandomPlayerbotMgr() override;
         static RandomPlayerbotMgr& instance()
@@ -226,6 +250,12 @@ public:
 
         void MirrorAh();
     private:
+        static const char* GetWatchdogPhaseName(UpdateWatchdogPhase phase);
+        void StartUpdateWatchdog();
+        void StopUpdateWatchdog();
+        void SetUpdateWatchdogPhase(UpdateWatchdogPhase phase, uint32 availableBotCount, uint32 onlineBotCount);
+        static uint64 GetWatchdogSteadyMs();
+
         PlayerBotMap players;
         int processTicks;
         size_t processBotCursor = 0;
@@ -256,6 +286,12 @@ public:
 
         bool showLoginWarning;
         std::unordered_map<uint32, std::unordered_map<uint32, std::vector<std::pair<ObjectGuid, time_t>>>> facingFix;
+        std::atomic<bool> m_updateWatchdogStop{false};
+        std::atomic<uint32> m_updateWatchdogPhase{static_cast<uint32>(UpdateWatchdogPhase::Idle)};
+        std::atomic<uint64> m_updateWatchdogPhaseSinceMs{0};
+        std::atomic<uint32> m_updateWatchdogAvailableBots{0};
+        std::atomic<uint32> m_updateWatchdogOnlineBots{0};
+        std::thread m_updateWatchdogThread;
 
         //                   itemId,             buyout, count
         std::unordered_map < uint32, std::vector<AuctionEntry>> ahMirror;

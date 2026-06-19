@@ -119,6 +119,23 @@ bool TalkToQuestGiverAction::TurnInQuest(Player* requester, Quest const* quest, 
     if(quest->GetRewChoiceItemsCount() || quest->GetRewItemsCount())
         ai->DoSpecificAction("equip upgrades");
 
+    if (bot->GetQuestRewardStatus(questID))
+    {
+        const int32 questGiverEntry = questGiver ? static_cast<int32>(questGiver->GetEntry()) : 0;
+        SET_AI_VALUE2(int32, "manual int", "recent quest turnin entry", questGiverEntry);
+        SET_AI_VALUE2(int32, "manual int", "recent quest turnin quest", static_cast<int32>(questID));
+        SET_AI_VALUE2(time_t, "manual time", "recent quest turnin until", time(nullptr) + 120);
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream anchor;
+            anchor << "questId=" << questID
+                   << " entry=" << questGiverEntry
+                   << " holdSec=120";
+            sPlayerbotAIConfig.logEvent(ai, "QuestTurnInAnchor", quest->GetTitle(), anchor.str());
+        }
+    }
+
     return true;
 }
 

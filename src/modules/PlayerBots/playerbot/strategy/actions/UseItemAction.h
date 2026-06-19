@@ -678,7 +678,13 @@ namespace ai
                     return false;
                 }
 
-                bot->addUnitState(UNIT_STAND_STATE_SIT);
+                RESET_AI_VALUE(Unit*, "current target");
+                RESET_AI_VALUE(Unit*, "pull target");
+                RESET_AI_VALUE(ObjectGuid, "attack target");
+                bot->AttackStop(true);
+                bot->SetSelectionGuid(ObjectGuid());
+                bot->SetTargetGuid(ObjectGuid());
+                bot->SetStandState(UNIT_STAND_STATE_SIT);
                 ai->InterruptSpell();
 
                 float drinkDuration = AI_VALUE(float, "drink duration");
@@ -755,7 +761,13 @@ namespace ai
                     return false;
                 }
 
-                bot->addUnitState(UNIT_STAND_STATE_SIT);
+                RESET_AI_VALUE(Unit*, "current target");
+                RESET_AI_VALUE(Unit*, "pull target");
+                RESET_AI_VALUE(ObjectGuid, "attack target");
+                bot->AttackStop(true);
+                bot->SetSelectionGuid(ObjectGuid());
+                bot->SetTargetGuid(ObjectGuid());
+                bot->SetStandState(UNIT_STAND_STATE_SIT);
                 ai->InterruptSpell();
 
                 float eatDuration = AI_VALUE(float, "eat duration");

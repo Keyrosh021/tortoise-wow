@@ -19,6 +19,21 @@ bool SpellCastUsefulValue::Calculate()
 	if (!spellInfo)
 		return true; // there can be known alternatives
 
+    if (!(spellInfo->Attributes & SPELL_ATTR_PASSIVE) && spellInfo->powerType < MAX_POWERS)
+    {
+        uint32 powerCost = Spell::CalculatePowerCost(spellInfo, bot);
+        Powers powerType = Powers(spellInfo->powerType);
+        if (spellInfo->powerType == POWER_HEALTH)
+        {
+            if (bot->GetHealth() <= powerCost)
+                return false;
+        }
+        else if (bot->GetPower(powerType) < powerCost)
+        {
+            return false;
+        }
+    }
+
 	if (spellInfo->Attributes & SPELL_ATTR_ON_NEXT_SWING ||
 		spellInfo->Attributes & SPELL_ATTR_ON_NEXT_SWING_NO_DAMAGE)
 	{

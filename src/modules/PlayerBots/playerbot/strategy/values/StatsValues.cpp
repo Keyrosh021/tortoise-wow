@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "StatsValues.h"
 
+#include "Database/CharacterDatabaseCache.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/actions/CheckMountStateAction.h"
 
@@ -34,11 +35,7 @@ bool PetIsDeadValue::Calculate()
     if (!bot->GetPet())
     {
         uint32 ownerid = bot->GetGUIDLow();
-        auto result = CharacterDatabase.PQuery("SELECT id FROM character_pet WHERE owner = '%u'", ownerid);
-        if (!result)
-            return false;
-
-        return true;
+        return sCharacterDatabaseCache.GetCharacterPetByOwner(ownerid) != nullptr;
     }
     if (bot->GetPetGuid() && !bot->GetPet())
         return true;
@@ -268,4 +265,3 @@ uint8 SpeedValue::Calculate()
 
     return (uint8) (100.0f * target->GetSpeedRate(MOVE_RUN));
 }
-

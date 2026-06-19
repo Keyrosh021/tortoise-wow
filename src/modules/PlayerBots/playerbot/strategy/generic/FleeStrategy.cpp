@@ -6,6 +6,9 @@ using namespace ai;
 
 void FleeStrategy::InitCombatTriggers(std::list<TriggerNode*> &triggers)
 {
+    if (!ai->HasRealPlayerMaster())
+        return;
+
     triggers.push_back(new TriggerNode(
         "panic",
         NextAction::array(0, new NextAction("flee", ACTION_EMERGENCY + 9), NULL)));

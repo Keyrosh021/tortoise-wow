@@ -554,9 +554,6 @@ bool ChooseRpgTargetAction::isUseful()
     if (AI_VALUE(bool, "travel target traveling"))
         return false;
 
-    if (AI_VALUE(std::list<ObjectGuid>, "possible rpg targets").empty())
-        return false;
-
     //Not stay, not guard, not combat, not trading and group ready.
     if (!AI_VALUE(bool, "can move around"))
         return false;

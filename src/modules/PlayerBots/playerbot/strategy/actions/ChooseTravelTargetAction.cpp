@@ -7,10 +7,23 @@
 #include "playerbot/strategy/values/SharedValueContext.h"
 #include "playerbot/strategy/values/GuildValues.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
+#include "playerbot/QuestGuideMgr.h"
+#include "playerbot/BotLearningMgr.h"
 #include "Guild/GuildMgr.h"
+#include "PerfStats.h"
+#include "Timer.h"
+#include <algorithm>
 #include <iomanip>
 
 using namespace ai;
+
+namespace
+{
+    std::string QuestObjectiveGuidSkipQualifier(ObjectGuid guid)
+    {
+        return "quest objective guid skip::" + std::to_string(guid.GetRawValue());
+    }
+}
 
 inline std::string GetTravelPurposeName(std::string purpose)
 {
@@ -35,6 +48,8 @@ bool ChooseTravelTargetAction::Execute(Event& event)
     std::string futureTravelPurpose = AI_VALUE2(std::string, "manual string", "future travel purpose");
     std::string futureTravelPurposeName = GetTravelPurposeName(futureTravelPurpose);
     uint32 targetRelevance = AI_VALUE2(int, "manual int", "future travel relevance");
+    const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
+    const bool lowLevelQuestBot = autonomousRandomBot && bot->GetLevel() <= 12 && futureTravelPurpose == "quest";
 
     if (!futureDestinations->valid())
     {
@@ -49,6 +64,20 @@ bool ChooseTravelTargetAction::Execute(Event& event)
     PartitionedTravelList destinationList = futureDestinations->get();
 
     travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+
+    if (futureTravelPurpose == "quest" && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        size_t totalPoints = 0;
+        for (auto& [partition, travelPointList] : destinationList)
+            totalPoints += travelPointList.size();
+
+        std::ostringstream out;
+        out << "dests=" << destinationList.size()
+            << " points=" << totalPoints
+            << " relevance=" << targetRelevance
+            << " detail=" << AI_VALUE2(std::string, "manual string", "future travel detail");
+        sPlayerbotAIConfig.logEvent(ai, "QuestAsyncResult", futureTravelPurposeName, out.str());
+    }
 
     ai->TellDebug(ai->GetMaster(), "Got " + std::to_string(destinationList.size()) + " new destination ranges for " + futureTravelPurposeName, "debug travel");
 
@@ -72,10 +101,30 @@ bool ChooseTravelTargetAction::Execute(Event& event)
         newTarget.SetRelevance(targetRelevance);
     }
 
-    if (!SetBestTarget(requester, &newTarget, destinationList))
+    std::string primaryFailureReason;
+    if (!SetBestTarget(requester, &newTarget, destinationList, true, &primaryFailureReason))
     {
-        if (SetBestTarget(requester, &newTarget, destinationList, false))
+        const bool allowInactiveFallback =
+            futureTravelPurpose != "quest" ||
+            (futureTravelPurpose == "quest" && lowLevelQuestBot);
+        std::string fallbackFailureReason;
+        if (allowInactiveFallback && SetBestTarget(requester, &newTarget, destinationList, false, &fallbackFailureReason))
         {
+            if (futureTravelPurpose == "quest")
+            {
+                const bool forceInactiveQuestTravel = lowLevelQuestBot;
+                if (forceInactiveQuestTravel)
+                    newTarget.SetForced(true);
+
+                std::ostringstream out;
+                out << "level=" << (uint32)bot->GetLevel()
+                    << " purpose=" << futureTravelPurposeName
+                    << " lowLevelQuestBot=" << (lowLevelQuestBot ? 1 : 0)
+                    << " forcedTravel=" << (forceInactiveQuestTravel ? 1 : 0)
+                    << " primaryReason=" << (primaryFailureReason.empty() ? "unknown" : primaryFailureReason);
+                sPlayerbotAIConfig.logEvent(ai, "QuestInactiveFallbackUsed", futureTravelPurposeName, out.str());
+            }
+
             setNewTarget(requester, &newTarget, travelTarget);
             return true;
         }
@@ -88,11 +137,43 @@ bool ChooseTravelTargetAction::Execute(Event& event)
             ai,
             "TravelTargetSelectFailed",
             futureTravelPurposeName,
-            "dests=" + std::to_string(destinationList.size()) + " points=" + std::to_string(totalPoints));
+            "dests=" + std::to_string(destinationList.size()) + " points=" + std::to_string(totalPoints) +
+                " inactiveFallback=" + std::to_string(allowInactiveFallback ? 1 : 0) +
+                " detail=" + AI_VALUE2(std::string, "manual string", "future travel detail") +
+                " primaryReason=" + (primaryFailureReason.empty() ? "unknown" : primaryFailureReason) +
+                " fallbackReason=" + (fallbackFailureReason.empty() ? "n/a" : fallbackFailureReason));
 
-        SET_AI_VALUE2(bool, "no active travel destinations", futureTravelPurpose, true);
         sTravelMgr.SetNullTravelTarget(travelTarget);
         travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+        const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
+        if (lowLevelQuestBot)
+        {
+            // Do not strand starter-zone bots in a 5-minute null-travel penalty:
+            // let them broaden their quest giver search and retry quickly.
+            travelTarget->SetExpireIn(15000);
+            context->ClearValues("no active travel destinations");
+
+            std::ostringstream out;
+            out << "reason=low-level-quest-retry"
+                << " level=" << (uint32)bot->GetLevel()
+                << " cooldownMs=" << travelTarget->GetTimeLeft();
+            sPlayerbotAIConfig.logEvent(ai, "QuestTravelRetryWindow", futureTravelPurposeName, out.str());
+        }
+        else
+        {
+            if (autonomousRandomBot)
+            {
+                travelTarget->SetExpireIn(15000);
+                context->ClearValues("no active travel destinations");
+
+                std::ostringstream out;
+                out << "purpose=" << futureTravelPurposeName
+                    << " cooldownMs=" << travelTarget->GetTimeLeft()
+                    << " primaryReason=" << (primaryFailureReason.empty() ? "unknown" : primaryFailureReason);
+                sPlayerbotAIConfig.logEvent(ai, "NullTravelRetryWindow", futureTravelPurposeName, out.str());
+            }
+            SET_AI_VALUE2(bool, "no active travel destinations", futureTravelPurpose, true);
+        }
         ai->TellDebug(ai->GetMaster(), "No target set", "debug travel");
         return false;
     }
@@ -184,6 +265,19 @@ void ChooseTravelTargetAction::setNewTarget(Player* requester, TravelTarget* new
     }
     else if (QuestRelationTravelDestination* dest = dynamic_cast<QuestRelationTravelDestination*>(oldTarget->GetDestination()))
     {
+        const bool skipForcedQuestRelationCondition = oldTarget->IsForced();
+        if (skipForcedQuestRelationCondition)
+        {
+            sPlayerbotAIConfig.logEvent(
+                ai,
+                "QuestForcedConditionBypass",
+                newTarget->GetDestination()->GetTitle(),
+                "entry=" + std::to_string(dest->GetEntry()) +
+                    " purpose=" + std::string(dest->GetPurpose() == TravelDestinationPurpose::QuestGiver ? "giver" : "taker"));
+        }
+
+        if (!skipForcedQuestRelationCondition)
+        {
         std::string condition, qualifier = std::to_string(dest->GetEntry());
         if (dest->GetPurpose() == TravelDestinationPurpose::QuestGiver)
 
@@ -192,6 +286,7 @@ void ChooseTravelTargetAction::setNewTarget(Player* requester, TravelTarget* new
             condition = "group or::{following party,can turn in quest npc::" + qualifier + "}";
 
         oldTarget->AddCondition(condition);
+        }
     }
 
     oldTarget->SetStatus(TravelStatus::TRAVEL_STATUS_READY);
@@ -203,6 +298,24 @@ void ChooseTravelTargetAction::setNewTarget(Player* requester, TravelTarget* new
             "TravelTargetSelected",
             newTarget->GetDestination()->GetTitle(),
             purpose + "|" + newTarget->GetDestination()->GetShortName());
+
+        if (AI_VALUE2(std::string, "manual string", "future travel purpose") == "quest")
+        {
+            std::ostringstream out;
+            out << "purpose=" << purpose
+                << " short=" << newTarget->GetDestination()->GetShortName()
+                << " entry=" << newTarget->GetEntry()
+                << " status=" << (uint32)oldTarget->GetStatus()
+                << " forced=" << (oldTarget->IsForced() ? 1 : 0)
+                << " relevance=" << oldTarget->GetRelevance()
+                << " point=" << newTarget->GetPosStr()
+                << " detail=" << AI_VALUE2(std::string, "manual string", "future travel detail");
+            sPlayerbotAIConfig.logEvent(
+                ai,
+                "QuestTravelSelected",
+                newTarget->GetDestination()->GetTitle(),
+                out.str());
+        }
 
         if (purpose == "QuestTaker")
         {
@@ -387,10 +500,19 @@ inline std::string PrintPartion(uint32 sqPartition)
 }
 
 //Sets the target to the best destination.
-bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* target, PartitionedTravelList& partitionedList, bool onlyActive)
+bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* target, PartitionedTravelList& partitionedList, bool onlyActive, std::string* failureReason)
 {
     bool distanceCheck = true;
     std::unordered_map<TravelDestination*, bool> isActive;
+    size_t consideredPoints = 0;
+    size_t duplicateInactiveSkips = 0;
+    size_t inactiveSkips = 0;
+    size_t phaseMismatchSkips = 0;
+    size_t bannedEntrySkips = 0;
+    size_t learnedPenaltySkips = 0;
+    size_t partitionSkipBreaks = 0;
+    float strongestLearnedPenalty = 0.0f;
+    std::string strongestLearnedReason;
 
     bool hasTarget = false;
 
@@ -398,10 +520,76 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
     {
         ai->TellDebug(requester, "Found " + std::to_string(travelPointList.size()) + " points at range " + PrintPartion(partition), "debug travel");
 
+        if (sBotLearningMgr.HasData())
+        {
+            std::stable_sort(travelPointList.begin(), travelPointList.end(),
+                [this](TravelPoint const& left, TravelPoint const& right)
+                {
+                    TravelDestination* leftDest = std::get<TravelDestination*>(left);
+                    WorldPosition* leftPos = std::get<WorldPosition*>(left);
+                    float leftDistance = std::get<float>(left);
+
+                    TravelDestination* rightDest = std::get<TravelDestination*>(right);
+                    WorldPosition* rightPos = std::get<WorldPosition*>(right);
+                    float rightDistance = std::get<float>(right);
+
+                    const float leftPenalty = sBotLearningMgr.GetTravelPenalty(bot, leftDest, leftPos);
+                    const float rightPenalty = sBotLearningMgr.GetTravelPenalty(bot, rightDest, rightPos);
+                    const float leftAdjustedDistance = leftDistance + leftPenalty * 500.0f;
+                    const float rightAdjustedDistance = rightDistance + rightPenalty * 500.0f;
+
+                    if (leftAdjustedDistance != rightAdjustedDistance)
+                        return leftAdjustedDistance < rightAdjustedDistance;
+
+                    return leftDistance < rightDistance;
+                });
+        }
+
         for (auto& [destination, position, distance] : travelPointList)
         {
-            if (onlyActive && !target->IsForced() && isActive.find(destination) != isActive.end() && !isActive[destination])
+            ++consideredPoints;
+
+            if (destination && destination->GetEntry() == 81030)
+            {
+                ++bannedEntrySkips;
                 continue;
+            }
+
+            if (onlyActive && !target->IsForced() && isActive.find(destination) != isActive.end() && !isActive[destination])
+            {
+                ++duplicateInactiveSkips;
+                continue;
+            }
+
+            if (QuestRelationTravelDestination* questRelationDest = dynamic_cast<QuestRelationTravelDestination*>(destination))
+            {
+                std::ostringstream skipQualifier;
+                skipQualifier << "quest relation skip::" << questRelationDest->GetEntry() << ":" << questRelationDest->GetQuestId()
+                              << ":" << static_cast<uint32>(questRelationDest->GetRelation());
+                if (AI_VALUE2(time_t, "manual time", skipQualifier.str()) > time(0))
+                {
+                    ++duplicateInactiveSkips;
+                    continue;
+                }
+
+                std::ostringstream entrySkipQualifier;
+                entrySkipQualifier << "quest relation entry skip::" << questRelationDest->GetEntry() << ":"
+                                   << static_cast<uint32>(questRelationDest->GetRelation());
+                if (AI_VALUE2(time_t, "manual time", entrySkipQualifier.str()) > time(0))
+                {
+                    ++duplicateInactiveSkips;
+                    continue;
+                }
+            }
+
+            if (GuidPosition* guidP = dynamic_cast<GuidPosition*>(position))
+            {
+                if (AI_VALUE2(time_t, "manual time", QuestObjectiveGuidSkipQualifier(*guidP)) > time(0))
+                {
+                    ++duplicateInactiveSkips;
+                    continue;
+                }
+            }
 
             if (distanceCheck) //Check if we have moved significantly after getting the destinations.
             {
@@ -409,6 +597,18 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
                 if (position->distance(center) > distance * 2 && position->distance(center) > 100)
                 {
                     ai->TellDebug(requester, "We had some destinations but we moved too far since. Trying to get a new list.", "debug travel");
+                    if (failureReason)
+                    {
+                        std::ostringstream out;
+                        out << "moved-too-far considered=" << consideredPoints
+                            << " inactive=" << inactiveSkips
+                            << " duplicateInactive=" << duplicateInactiveSkips
+                            << " phaseMismatch=" << phaseMismatchSkips
+                            << " banned=" << bannedEntrySkips
+                            << " learnedPenalty=" << learnedPenaltySkips
+                            << " partitionSkips=" << partitionSkipBreaks;
+                        *failureReason = out.str();
+                    }
                     return false;
                 }
 
@@ -424,6 +624,7 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
                 if (partition != std::prev(partitionedList.end())->first && !urand(0, 10)) //10% chance to skip to a longer partition.
                 {
                     ai->TellDebug(requester, "Skipping range " + PrintPartion(partition), "debug travel");
+                    ++partitionSkipBreaks;
                     break;
                 }
 
@@ -433,10 +634,35 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
                     if (!bot->InSamePhase(guidP->GetPhaseMask()))
                     {
                         ai->TellDebug(requester, "Not same phase: " + destination->GetTitle() + " " + std::to_string(round(destination->DistanceTo(bot))) + "y", "debug travel");
+                        ++phaseMismatchSkips;
                         continue;
                     }
                 }
 #endif
+
+                std::string learnedReason;
+                const float learnedPenalty = sBotLearningMgr.GetTravelPenalty(bot, destination, position, &learnedReason);
+                if (learnedPenalty > strongestLearnedPenalty)
+                {
+                    strongestLearnedPenalty = learnedPenalty;
+                    strongestLearnedReason = learnedReason;
+                }
+
+                if (!target->IsForced() && learnedPenalty >= 2.5f && travelPointList.size() > 1)
+                {
+                    ++learnedPenaltySkips;
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 25) == 1)
+                    {
+                        std::ostringstream out;
+                        out << "penalty=" << std::fixed << std::setprecision(2) << learnedPenalty
+                            << " reason=" << learnedReason
+                            << " entry=" << (destination ? destination->GetEntry() : 0)
+                            << " title=" << (destination ? destination->GetTitle() : "none")
+                            << " point=" << (position ? position->print() : "none");
+                        sPlayerbotAIConfig.logEvent(ai, "LearnedTravelPenaltySkip", destination ? destination->GetTitle() : "travel", out.str());
+                    }
+                    continue;
+                }
 
                 target->SetTarget(destination, position);
                 hasTarget = true;
@@ -445,6 +671,7 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
             else
             {
                 ai->TellDebug(requester, "Not active: " + destination->GetTitle() + " " + std::to_string((uint32)round(destination->DistanceTo(bot))) + "y", "debug travel");
+                ++inactiveSkips;
             }
 
         }
@@ -455,6 +682,22 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
      
     if(hasTarget)
         ai->TellDebug(requester, "Point at " + std::to_string(uint32(target->Distance(bot))) + "y selected.", "debug travel");
+    else if (failureReason)
+    {
+        std::ostringstream out;
+        out << "no-target considered=" << consideredPoints
+            << " inactive=" << inactiveSkips
+            << " duplicateInactive=" << duplicateInactiveSkips
+            << " phaseMismatch=" << phaseMismatchSkips
+            << " banned=" << bannedEntrySkips
+            << " learnedPenalty=" << learnedPenaltySkips
+            << " maxLearnedPenalty=" << std::fixed << std::setprecision(2) << strongestLearnedPenalty
+            << " learnedReason=" << strongestLearnedReason
+            << " partitionSkips=" << partitionSkipBreaks
+            << " onlyActive=" << (onlyActive ? 1 : 0)
+            << " forced=" << (target->IsForced() ? 1 : 0);
+        *failureReason = out.str();
+    }
 
     return hasTarget;
 }
@@ -667,8 +910,11 @@ bool ChooseGroupTravelTargetAction::isUseful()
 bool RefreshTravelTargetAction::Execute(Event& event)
 {
     TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+    if (!target)
+        return false;
 
     TravelDestination* oldDestination = target->GetDestination();
+    WorldPosition* oldPosition = target->GetPosition();
 
     Player* requester = event.getOwner() ? event.getOwner() : GetMaster();
 
@@ -678,7 +924,7 @@ bool RefreshTravelTargetAction::Execute(Event& event)
         return false;
     }
 
-    if (!oldDestination) //Does this target have a destination?
+    if (!oldDestination || !oldPosition) //Does this target have a destination and current point?
         return false;
 
     if (!target->IsDestinationActive()) //Is the destination still valid?
@@ -689,14 +935,16 @@ bool RefreshTravelTargetAction::Execute(Event& event)
 
     PlayerTravelInfo info(bot);
     
-    WorldPosition* newPosition;
+    WorldPosition* newPosition = nullptr;
 
     for (uint8 i = 0; i < 5; i++)
     {
         std::list<uint8> chancesToGoFar = { 10,20,90 }; //Closest map, grid, cell.
-        newPosition = oldDestination->GetNextPoint(*target->GetPosition(), chancesToGoFar);
+        newPosition = oldDestination->GetNextPoint(*oldPosition, chancesToGoFar);
         if (newPosition && sTravelMgr.IsLocationLevelValid(*newPosition, info))
             break;        
+
+        newPosition = nullptr;
     }
 
     if (!newPosition)
@@ -735,7 +983,11 @@ bool RefreshTravelTargetAction::isUseful()
     if (!ChooseTravelTargetAction::isUseful())
         return false;
 
-    if (AI_VALUE(TravelTarget*, "travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_PREPARE)
+    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+    if (!target)
+        return false;
+
+    if (target->GetStatus() == TravelStatus::TRAVEL_STATUS_PREPARE)
         return false;
 
     if (!WorldPosition(bot).isOverworld())
@@ -744,7 +996,8 @@ bool RefreshTravelTargetAction::isUseful()
     if (urand(1, 100) <= 10)
         return false;
 
-    if (!AI_VALUE(TravelTarget*, "travel target")->GetDestination()->IsActive(bot, PlayerTravelInfo(bot)))
+    TravelDestination* destination = target->GetDestination();
+    if (!destination || !destination->IsActive(bot, PlayerTravelInfo(bot)))
         return false;
 
     return true;
@@ -1340,7 +1593,7 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
         uint32 useFlags;
 
         if (travelName == "city")
-            useFlags = NPCFlags::UNIT_NPC_FLAG_BANKER | NPCFlags::UNIT_NPC_FLAG_BATTLEMASTER | NPCFlags::UNIT_NPC_FLAG_AUCTIONEER;
+            useFlags = NPCFlags::UNIT_NPC_FLAG_BANKER | NPCFlags::UNIT_NPC_FLAG_AUCTIONEER;
         else if (travelName == "tabard")
             useFlags = NPCFlags::UNIT_NPC_FLAG_TABARDDESIGNER;
         else if (travelName == "petition")
@@ -1423,7 +1676,13 @@ bool RequestNamedTravelTargetAction::isAllowed() const
 
 bool RequestQuestTravelTargetAction::Execute(Event& event)
 {
+    const uint32 requestStartMs = WorldTimer::getMSTime();
     WorldPosition center = event.getOwner() ? event.getOwner() : (GetMaster() ? GetMaster() : bot);
+    const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
+    const time_t recentTurnInUntil = AI_VALUE2(time_t, "manual time", "recent quest turnin until");
+    const int32 recentTurnInEntry = AI_VALUE2(int32, "manual int", "recent quest turnin entry");
+    const int32 recentTurnInQuest = AI_VALUE2(int32, "manual int", "recent quest turnin quest");
+    const bool hasRecentTurnInAnchor = recentTurnInUntil > time(nullptr) && recentTurnInEntry > 0;
 
     ai->TellDebug(ai->GetMaster(), "Getting new destination ranges for travel quest", "debug travel");
 
@@ -1432,9 +1691,13 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
         switch (race)
         {
             case RACE_HUMAN: return 783;      // A Threat Within
+            case RACE_ORC:
+            case RACE_TROLL: return 788;     // Cutting Teeth
             case RACE_DWARF:
             case RACE_GNOME: return 179;     // Dwarven Outfitters
             case RACE_NIGHTELF: return 458;  // The Woodland Protector
+            case RACE_UNDEAD: return 364;    // The Mindless Ones
+            case RACE_TAUREN: return 747;    // The Hunt Begins
             default: return 0;
         }
     };
@@ -1442,6 +1705,8 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
     std::vector<std::tuple<uint32, int32, float>> turnInFetches;
     std::vector<std::tuple<uint32, int32, float>> objectiveFetches;
     std::vector<std::tuple<uint32, int32, float>> destinationFetches;
+    std::vector<std::tuple<uint32, int32, float>> rescueFetches;
+    QuestGuideHubIntent directorHubIntent;
     uint32 turnInQuestCount = 0;
     uint32 objectiveQuestCount = 0;
     bool hasAnyQuestHistory = false;
@@ -1508,10 +1773,16 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
             if (!flag)
                 continue;
 
+            float questWorkRange = 1000.0f + (bot->GetLevel() * bot->GetLevel()) * 75.0f;
+            if (autonomousRandomBot && bot->GetLevel() <= 12)
+                questWorkRange = std::max(questWorkRange, 4200.0f + bot->GetLevel() * 320.0f);
+            else if (autonomousRandomBot && bot->GetLevel() <= 18)
+                questWorkRange = std::max(questWorkRange, 3000.0f + bot->GetLevel() * 220.0f);
+
             if (flag == (uint32)TravelDestinationPurpose::QuestTaker)
-                turnInFetches.push_back({ flag, questId, 1000 + (bot->GetLevel() * bot->GetLevel()) * 75 });
+                turnInFetches.push_back({ flag, questId, questWorkRange });
             else
-                objectiveFetches.push_back({ flag, questId, 1000 + (bot->GetLevel() * bot->GetLevel()) * 75 });
+                objectiveFetches.push_back({ flag, questId, questWorkRange });
 
             if (onlyClassQuest && queuedQuestCount() > 1) //Only do class quests if we have any.
             {
@@ -1538,8 +1809,11 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
 
     uint32 starterQuest = starterQuestForRace(bot->getRace());
     bool starterQuestSeeded = false;
-    if (bot->GetLevel() <= 8 && starterQuest && !hasAnyQuestHistory && !hasActiveQuestWork &&
-        bot->GetQuestStatus(starterQuest) == QUEST_STATUS_NONE)
+    const bool starterQuestAvailable = starterQuest &&
+        bot->GetQuestStatus(starterQuest) == QUEST_STATUS_NONE &&
+        !bot->GetQuestRewardStatus(starterQuest);
+
+    if (bot->GetLevel() <= 8 && starterQuestAvailable && !hasActiveQuestWork)
     {
         destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, (int32)starterQuest, 1200.0f });
         starterQuestSeeded = true;
@@ -1548,67 +1822,281 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
         out << "race=" << (uint32)bot->getRace()
             << " level=" << (uint32)bot->GetLevel()
             << " questId=" << starterQuest
-            << " reason=empty-quest-log";
+            << " reason=" << (hasAnyQuestHistory ? "stalled-low-level-chain" : "empty-quest-log");
         sPlayerbotAIConfig.logEvent(ai, "StarterQuestTravelSeed", "QuestFetches", out.str());
     }
 
-    if (!starterQuestSeeded)
-        destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, 0, 400 + bot->GetLevel() * 10 });
+    float genericQuestGiverRange = 400.0f + bot->GetLevel() * 10.0f;
+    if (autonomousRandomBot && bot->GetLevel() <= 12 && !hasActiveQuestWork)
+    {
+        // Low-level random bots need a much larger quest-giver search radius or
+        // they never "see" the next hub beyond the starter cluster.
+        genericQuestGiverRange = std::max(genericQuestGiverRange, 2200.0f + bot->GetLevel() * 120.0f);
+    }
+    else if (autonomousRandomBot && bot->GetLevel() <= 18 && !turnInQuestCount && !objectiveQuestCount)
+    {
+        genericQuestGiverRange = std::max(genericQuestGiverRange, 1600.0f + bot->GetLevel() * 80.0f);
+    }
 
-    destinationFetches.insert(destinationFetches.begin() + 1, turnInFetches.begin(), turnInFetches.end());
-    destinationFetches.insert(destinationFetches.end(), objectiveFetches.begin(), objectiveFetches.end());
+    if (hasRecentTurnInAnchor)
+        genericQuestGiverRange = std::max(genericQuestGiverRange, 900.0f);
+
+    const bool hasQueuedQuestWork = turnInQuestCount || objectiveQuestCount;
+
+    const size_t objectiveFetchesBeforeBudget = objectiveFetches.size();
+    const size_t objectiveFetchBudget =
+        autonomousRandomBot && bot->GetLevel() <= 12 ? 8 :
+        autonomousRandomBot && bot->GetLevel() <= 30 ? 10 : 12;
+
+    if (objectiveFetches.size() > objectiveFetchBudget)
+    {
+        const uint32 botLevel = bot->GetLevel();
+        const uint32 botZone = bot->GetZoneId();
+        const uint32 botArea = bot->GetAreaId();
+        Player* botPlayer = bot;
+
+        std::stable_sort(objectiveFetches.begin(), objectiveFetches.end(),
+            [botPlayer, botLevel, botZone, botArea](std::tuple<uint32, int32, float> const& left,
+                                                    std::tuple<uint32, int32, float> const& right)
+            {
+                auto scoreQuest = [botPlayer, botLevel, botZone, botArea](std::tuple<uint32, int32, float> const& fetch) -> int32
+                {
+                    Quest const* quest = sObjectMgr.GetQuestTemplate(std::get<1>(fetch));
+                    if (!quest)
+                        return -100000;
+
+                    int32 score = 0;
+                    const int32 questLevel = botPlayer->GetQuestLevelForPlayer(quest);
+                    const int32 levelGap = std::abs((int32)botLevel - questLevel);
+                    score -= levelGap * 8;
+
+                    if (quest->GetRequiredClasses())
+                        score += 80;
+
+                    const int32 zoneOrSort = quest->GetZoneOrSort();
+                    if (zoneOrSort > 0)
+                    {
+                        if ((uint32)zoneOrSort == botZone)
+                            score += 120;
+                        else if ((uint32)zoneOrSort == botArea)
+                            score += 60;
+                    }
+
+                    if (quest->GetMinLevel() && botLevel >= quest->GetMinLevel())
+                        score += 25;
+
+                    // A small stable wobble keeps same-level bots from converging on
+                    // identical quest choices while preserving deterministic behavior.
+                    score += (int32)((botPlayer->GetGUIDLow() ^ quest->GetQuestId()) % 17);
+
+                    return score;
+                };
+
+                const int32 leftScore = scoreQuest(left);
+                const int32 rightScore = scoreQuest(right);
+                if (leftScore != rightScore)
+                    return leftScore > rightScore;
+
+                return std::get<1>(left) < std::get<1>(right);
+            });
+
+        objectiveFetches.resize(objectiveFetchBudget);
+    }
+
+    if (objectiveFetchesBeforeBudget > objectiveFetches.size() && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "before=" << objectiveFetchesBeforeBudget
+            << " after=" << objectiveFetches.size()
+            << " budget=" << objectiveFetchBudget
+            << " level=" << (uint32)bot->GetLevel()
+            << " zone=" << bot->GetZoneId()
+            << " area=" << bot->GetAreaId();
+        sPlayerbotAIConfig.logEvent(ai, "QuestObjectiveFetchBudget", "QuestFetches", out.str());
+    }
+
+    if (turnInQuestCount)
+        destinationFetches.insert(destinationFetches.end(), turnInFetches.begin(), turnInFetches.end());
+
+    if (!objectiveFetches.empty())
+        destinationFetches.insert(destinationFetches.end(), objectiveFetches.begin(), objectiveFetches.end());
+
+    // Only broaden into generic quest-giver discovery when the bot has no concrete
+    // turn-in or objective work queued. This prevents starter-zone bots from
+    // re-centering on nearby questgivers while they should be finishing and
+    // advancing their current chain toward the next hub.
+    if (!starterQuestSeeded && !hasQueuedQuestWork && hasRecentTurnInAnchor)
+    {
+        destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, recentTurnInEntry, std::max(genericQuestGiverRange, 450.0f) });
+
+        std::ostringstream out;
+        out << "entry=" << recentTurnInEntry
+            << " questId=" << recentTurnInQuest
+            << " range=" << std::fixed << std::setprecision(1) << std::max(genericQuestGiverRange, 450.0f);
+        sPlayerbotAIConfig.logEvent(ai, "RecentQuestTurnInAnchor", "QuestFetches", out.str());
+    }
+
+    bool hasGuideQuestCandidates = false;
+    if (!starterQuestSeeded && !hasQueuedQuestWork)
+    {
+        std::string directorTrace;
+        directorHubIntent = sQuestGuideMgr.SelectNextHub(bot, &directorTrace);
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "valid=" << (directorHubIntent.valid ? 1 : 0)
+                << " hubId=" << directorHubIntent.hubId
+                << " hub=" << directorHubIntent.hubName
+                << " score=" << directorHubIntent.score
+                << " reason=" << directorHubIntent.reason
+                << " pickups=" << directorHubIntent.pickupCandidates
+                << " active=" << directorHubIntent.activeQuests
+                << " rewarded=" << directorHubIntent.rewardedQuests
+                << " required=" << directorHubIntent.requiredQuests
+                << " rewardedRequired=" << directorHubIntent.rewardedRequiredQuests
+                << " crossRace=" << (directorHubIntent.crossRace ? 1 : 0)
+                << " nativeMask=" << directorHubIntent.nativeRouteMask
+                << " preferredMask=" << directorHubIntent.preferredRouteMask
+                << " area=" << directorHubIntent.areaId
+                << " next=" << directorHubIntent.nextHubIds
+                << " " << directorTrace;
+            sPlayerbotAIConfig.logEvent(ai, "QuestDirectorHubSelected", "QuestDirector", out.str());
+        }
+
+        std::string guideTrace;
+        std::vector<uint32> guideQuestIds;
+        if (directorHubIntent.valid)
+            guideQuestIds = sQuestGuideMgr.GetQuestGiverQuestIdsForHub(bot, directorHubIntent.hubId, 8, &guideTrace);
+
+        bool usedDirectorHub = !guideQuestIds.empty();
+        if (guideQuestIds.empty())
+            guideQuestIds = sQuestGuideMgr.GetQuestGiverQuestIds(bot, 8, &guideTrace);
+
+        for (uint32 questId : guideQuestIds)
+        {
+            destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, (int32)questId, std::max(genericQuestGiverRange, 1200.0f) });
+            hasGuideQuestCandidates = true;
+        }
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "count=" << guideQuestIds.size()
+                << " range=" << std::fixed << std::setprecision(1) << std::max(genericQuestGiverRange, 1200.0f)
+                << " fallback=" << (hasGuideQuestCandidates ? 0 : 1)
+                << " directorHub=" << (usedDirectorHub ? 1 : 0)
+                << " hubId=" << directorHubIntent.hubId
+                << " " << guideTrace;
+            sPlayerbotAIConfig.logEvent(ai, "QuestGuideCandidates", "QuestFetches", out.str());
+        }
+    }
+
+    const bool sparseActiveQuestWork =
+        hasQueuedQuestWork &&
+        !turnInQuestCount &&
+        objectiveFetches.size() <= 2;
+    const bool shouldPrepareQuestRescue =
+        autonomousRandomBot &&
+        bot->GetLevel() <= 12 &&
+        (sparseActiveQuestWork || hasRecentTurnInAnchor);
+
+    bool hasRescueQuestCandidates = false;
+    if (shouldPrepareQuestRescue)
+    {
+        std::string guideTrace;
+        std::vector<uint32> guideQuestIds = sQuestGuideMgr.GetQuestGiverQuestIds(bot, 4, &guideTrace);
+        for (uint32 questId : guideQuestIds)
+        {
+            rescueFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, (int32)questId, std::max(genericQuestGiverRange, 1200.0f) });
+            hasRescueQuestCandidates = true;
+        }
+
+        if (hasRecentTurnInAnchor)
+        {
+            rescueFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, recentTurnInEntry, std::max(genericQuestGiverRange, 450.0f) });
+            hasRescueQuestCandidates = true;
+        }
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "count=" << rescueFetches.size()
+                << " activeFetches=" << destinationFetches.size()
+                << " activeObjectives=" << objectiveQuestCount
+                << " activeTurnIns=" << turnInQuestCount
+                << " sparseActiveWork=" << (sparseActiveQuestWork ? 1 : 0)
+                << " recentTurnInAnchor=" << (hasRecentTurnInAnchor ? 1 : 0)
+                << " range=" << std::fixed << std::setprecision(1) << std::max(genericQuestGiverRange, 1200.0f)
+                << " " << guideTrace;
+            sPlayerbotAIConfig.logEvent(ai, "QuestRescueFetchPlan", "QuestFetches", out.str());
+        }
+    }
+
+    if (!starterQuestSeeded && !hasQueuedQuestWork)
+    {
+        if (!hasGuideQuestCandidates)
+            destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, 0, genericQuestGiverRange });
+    }
+    else if (starterQuestSeeded)
+        destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, 0, std::min(genericQuestGiverRange, 1200.0f) });
 
     {
         std::ostringstream out;
         out << "total=" << destinationFetches.size()
             << " turnIns=" << turnInQuestCount
             << " objectives=" << objectiveQuestCount
-            << " baseQuestGiver=1";
+            << " baseQuestGiver=1"
+            << " genericRange=" << std::fixed << std::setprecision(1) << genericQuestGiverRange
+            << " recentTurnInAnchor=" << (hasRecentTurnInAnchor ? 1 : 0)
+            << " hasHistory=" << (hasAnyQuestHistory ? 1 : 0)
+            << " hasActiveQuestWork=" << (hasActiveQuestWork ? 1 : 0)
+            << " guideCandidates=" << (hasGuideQuestCandidates ? 1 : 0)
+            << " rescueCandidates=" << (hasRescueQuestCandidates ? 1 : 0)
+            << " autonomous=" << (autonomousRandomBot ? 1 : 0);
         sPlayerbotAIConfig.logEvent(ai, "RequestQuestTravelTargetAction", "QuestFetches", out.str());
     }
 
-    if (turnInQuestCount || objectiveQuestCount)
+    const bool suppressBroadQuestgiverFallback =
+        hasQueuedQuestWork ||
+        (autonomousRandomBot && bot->GetLevel() <= 12 && !hasQueuedQuestWork && starterQuest != 0 && !starterQuestSeeded);
+    const bool hasDirectorHubFallback =
+        directorHubIntent.valid &&
+        !starterQuestSeeded &&
+        !hasQueuedQuestWork &&
+        (directorHubIntent.x != 0.0f || directorHubIntent.y != 0.0f || directorHubIntent.z != 0.0f);
+    WorldPosition directorHubPosition(directorHubIntent.mapId, directorHubIntent.x, directorHubIntent.y, directorHubIntent.z);
+
     {
-        PlayerTravelInfo debugTravelInfo(bot);
-        size_t debugFetchIndex = 0;
+        uint32 strictFetches = destinationFetches.size();
+        uint32 softFetches = destinationFetches.size();
+        uint32 broadFallbackFetches = suppressBroadQuestgiverFallback ? 0 : 1;
 
-        for (auto const& [purpose, questId, range] : destinationFetches)
-        {
-            if (debugFetchIndex++ >= 3)
-                break;
-
-            std::vector<int32> entries;
-            if (questId)
-                entries.push_back(questId);
-
-            DestinationList allDestinations = sTravelMgr.GetDestinations(debugTravelInfo, purpose, entries, false, 0.0f);
-            DestinationList rawDestinations = sTravelMgr.GetDestinations(debugTravelInfo, purpose, entries, true, 0.0f);
-            DestinationList destinations = sTravelMgr.GetDestinations(debugTravelInfo, purpose, entries, true, range);
-            PartitionedTravelList partitions = sTravelMgr.GetPartitions(center, travelPartitions, debugTravelInfo, purpose, entries, true, range);
-
-            size_t totalPoints = 0;
-            for (auto const& [partition, points] : partitions)
-                totalPoints += points.size();
-
-            std::ostringstream out;
-            out << "purpose=" << purpose
-                << " questId=" << questId
-                << " range=" << range
-                << " hasRpgQuest=" << debugTravelInfo.GetBoolValue2("has strategy", "rpg quest")
-                << " freeSlots=" << (uint32)debugTravelInfo.GetUint8Value("free quest log slots")
-                << " canFightEqual=" << debugTravelInfo.GetBoolValue("can fight equal")
-                << " canFightElite=" << debugTravelInfo.GetBoolValue("can fight elite")
-                << " allDests=" << allDestinations.size()
-                << " rawDests=" << rawDestinations.size()
-                << " dests=" << destinations.size()
-                << " partitions=" << partitions.size()
-                << " points=" << totalPoints;
-            sPlayerbotAIConfig.logEvent(ai, "QuestFetchDebug", "QuestFetch", out.str());
-        }
+        std::ostringstream out;
+        out << "fetches=" << destinationFetches.size()
+            << " strictFetches=" << strictFetches
+            << " softFallbackFetches=" << softFetches
+            << " broadFallbackFetches=" << broadFallbackFetches
+            << " suppressBroadFallback=" << (suppressBroadQuestgiverFallback ? 1 : 0)
+            << " level=" << (uint32)bot->GetLevel()
+            << " activeQuestWork=" << (hasActiveQuestWork ? 1 : 0)
+            << " queuedQuestWork=" << (hasQueuedQuestWork ? 1 : 0)
+            << " starterSeeded=" << (starterQuestSeeded ? 1 : 0)
+            << " rescueEligible=" << (shouldPrepareQuestRescue ? 1 : 0)
+            << " rescueFetches=" << rescueFetches.size()
+            << " directorHubFallback=" << (hasDirectorHubFallback ? 1 : 0)
+            << " directorHubId=" << directorHubIntent.hubId;
+        sPlayerbotAIConfig.logEvent(ai, "QuestFetchPlan", "QuestFetches", out.str());
     }
 
-    *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [partitions = travelPartitions, travelInfo = PlayerTravelInfo(bot), center, destinationFetches]()
+    PerfStats::RecordTravelQuestRequest(WorldTimer::getMSTimeDiffToNow(requestStartMs), destinationFetches.size());
+
+    *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async,
+        [partitions = travelPartitions, travelInfo = PlayerTravelInfo(bot), center, destinationFetches, rescueFetches, suppressBroadQuestgiverFallback, hasDirectorHubFallback, directorHubPosition]()
         {
+            const uint32 asyncStartMs = WorldTimer::getMSTime();
+            uint32 strictCalls = 0;
+            uint32 softCalls = 0;
+            uint32 broadCalls = 0;
             PartitionedTravelList list;
             for (auto [purpose, questId, range] : destinationFetches)
             {
@@ -1616,6 +2104,7 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
                 if (questId)
                     entries.push_back(questId);
 
+                ++strictCalls;
                 PartitionedTravelList subList = sTravelMgr.GetPartitions(center, partitions, travelInfo, purpose, entries, true, range);
 
                 for (auto& [partition, points] : subList)
@@ -1633,6 +2122,7 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
                     if (questId)
                         entries.push_back(questId);
 
+                    ++softCalls;
                     PartitionedTravelList subList = sTravelMgr.GetPartitions(center, partitions, travelInfo, purpose, entries, false, range);
 
                     for (auto& [partition, points] : subList)
@@ -1641,7 +2131,42 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
             }
 
             if (list.empty())
-                list = sTravelMgr.GetPartitions(center, partitions, travelInfo, (uint32)TravelDestinationPurpose::QuestGiver, {}, false);
+            {
+                for (auto [purpose, questId, range] : rescueFetches)
+                {
+                    std::vector<int32> entries;
+                    if (questId)
+                        entries.push_back(questId);
+
+                    ++softCalls;
+                    PartitionedTravelList subList = sTravelMgr.GetPartitions(center, partitions, travelInfo, purpose, entries, false, range);
+
+                    for (auto& [partition, points] : subList)
+                        list[partition].insert(list[partition].end(), points.begin(), points.end());
+                }
+            }
+
+            if (list.empty() && hasDirectorHubFallback && directorHubPosition.getMapId() == travelInfo.GetPosition().getMapId())
+            {
+                TemporaryTravelDestination* destination = new TemporaryTravelDestination(directorHubPosition);
+                list[0].push_back(TravelPoint(destination, destination->GetPosition(), destination->GetPosition()->distance(center)));
+            }
+
+            if (list.empty())
+            {
+                if (!suppressBroadQuestgiverFallback)
+                {
+                    ++broadCalls;
+                    list = sTravelMgr.GetPartitions(center, partitions, travelInfo, (uint32)TravelDestinationPurpose::QuestGiver, {}, false);
+                }
+            }
+
+            uint32 resultPoints = 0;
+            for (auto const& [partition, points] : list)
+                resultPoints += points.size();
+
+            PerfStats::RecordTravelQuestPlanCalls(strictCalls, softCalls, broadCalls);
+            PerfStats::RecordTravelQuestAsyncJob(WorldTimer::getMSTimeDiffToNow(asyncStartMs), resultPoints == 0, resultPoints);
 
             return list;
         }
@@ -1650,6 +2175,20 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
     AI_VALUE(TravelTarget*, "travel target")->SetStatus(TravelStatus::TRAVEL_STATUS_PREPARE);
     SET_AI_VALUE2(std::string, "manual string", "future travel purpose", "quest");
     SET_AI_VALUE2(std::string, "manual string", "future travel condition", event.getSource());
+    {
+        std::ostringstream out;
+        out << "fetches=" << destinationFetches.size()
+            << " rescueFetches=" << rescueFetches.size()
+            << " activeQuestWork=" << (hasActiveQuestWork ? 1 : 0)
+            << " queuedQuestWork=" << (hasQueuedQuestWork ? 1 : 0)
+            << " guideCandidates=" << (hasGuideQuestCandidates ? 1 : 0)
+            << " rescueCandidates=" << (hasRescueQuestCandidates ? 1 : 0)
+            << " rescueEligible=" << (shouldPrepareQuestRescue ? 1 : 0)
+            << " starterSeeded=" << (starterQuestSeeded ? 1 : 0)
+            << " directorHubFallback=" << (hasDirectorHubFallback ? 1 : 0)
+            << " directorHubId=" << directorHubIntent.hubId;
+        SET_AI_VALUE2(std::string, "manual string", "future travel detail", out.str());
+    }
     SET_AI_VALUE2(int, "manual int", "future travel relevance", relevance * 100);
 
     return true;
@@ -1680,9 +2219,16 @@ bool RequestQuestTravelTargetAction::isUseful()
         return false;
 
     if (AI_VALUE2(bool, "no active travel destinations", "quest"))
-        return false;
+    {
+        const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
+        if (!(autonomousRandomBot && bot->GetLevel() <= 12))
+            return false;
+    }
 
     if (!AI_VALUE(bool, "can move around"))
+        return false;
+
+    if (!ai->AllowExpensivePlanner(2500, 900))
         return false;
 
     if (!isAllowed())

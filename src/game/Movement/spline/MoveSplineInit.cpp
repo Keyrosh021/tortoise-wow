@@ -120,35 +120,6 @@ int32 MoveSplineInit::Launch()
     else
         realSpeedRun = unit.GetSpeed(MOVE_RUN);
 
-    if (Player* player = unit.GetTypeId() == TYPEID_PLAYER ? static_cast<Player*>(&unit) : nullptr)
-    {
-        if (player->GetPlayerbotAI())
-        {
-            const bool walkMode = (moveFlags & MOVEFLAG_WALK_MODE) != 0;
-            const bool lowVelocity = args.velocity < 2.5f;
-            const bool suspiciousRun = !walkMode && args.velocity < 5.0f;
-
-            if (walkMode || lowVelocity || suspiciousRun)
-            {
-                sLog.outString(
-                    "[BotMoveLaunch] bot=%s moveFlags=%u walk=%u forward=%u onTransport=%u velocity=%.2f realRun=%.2f pathPoints=%zu splineFlags(run=%u fly=%u falling=%u cyclic=%u) origin=%s",
-                    player->GetName(),
-                    moveFlags,
-                    walkMode ? 1u : 0u,
-                    (moveFlags & MOVEFLAG_FORWARD) ? 1u : 0u,
-                    (moveFlags & MOVEFLAG_ONTRANSPORT) ? 1u : 0u,
-                    args.velocity,
-                    realSpeedRun,
-                    args.path.size(),
-                    args.flags.runmode ? 1u : 0u,
-                    args.flags.flying ? 1u : 0u,
-                    args.flags.falling ? 1u : 0u,
-                    args.flags.cyclic ? 1u : 0u,
-                    movementType ? movementType : "unknown");
-            }
-        }
-    }
-
     if (!args.Validate(&unit))
         return 0;
 

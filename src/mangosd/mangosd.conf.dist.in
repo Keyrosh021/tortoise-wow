@@ -2055,6 +2055,8 @@ DynamicRespawn.AffectRespawnTimeBelow = 900
 DynamicRespawn.AffectLevelBelow = 60
 DynamicRespawn.PlayersThreshold = 4
 DynamicRespawn.PlayersMaxLevelDiff = 5
+DynamicRespawn.CorpseCloneMax = 5
+DynamicRespawn.UnlootedCorpseCloneMax = 0
 
 Spells.CCDelay = 200
 

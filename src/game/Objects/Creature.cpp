@@ -58,18 +58,139 @@
 #include "Anticheat/Movement/Movement.hpp"
 #include "CreatureLinkingMgr.h"
 #include "TemporarySummon.h"
+#include <set>
 #include "ScriptedEscortAI.h"
 #include "GuardMgr.h"
 #include "GuidObjectScaling.h"
 #include "PerfStats.h"
 #include "Autoscaling/AutoScaler.hpp"
+#include <atomic>
+#include <shared_mutex>
 #include <sstream>
+#include <unordered_map>
 
 // apply implementation of the singletons
 #include "Policies/SingletonImp.h"
 
 namespace
 {
+    struct RespawnCorpseCloneStats
+    {
+        std::mutex lock;
+        std::unordered_map<uint32, uint32> activeBySource;
+        std::atomic<uint64> totalCreated{0};
+        std::atomic<uint64> totalRemoved{0};
+        std::atomic<uint64> totalOverCapCulled{0};
+        std::atomic<uint32> activeClones{0};
+        time_t lastLogAt = 0;
+    };
+
+    RespawnCorpseCloneStats sRespawnCorpseCloneStats;
+
+    struct RespawnCorpseSourceState
+    {
+        uint32 lootedCorpseCount = 0;
+        uint32 unlootedCorpseCount = 0;
+        Creature* oldestLootedCorpse = nullptr;
+        uint32 oldestLootedCorpseDecayTimer = 0;
+        Creature* oldestUnlootedCorpse = nullptr;
+        uint32 oldestUnlootedCorpseDecayTimer = 0;
+    };
+
+    struct RespawnSourceMapKey
+    {
+        Map const* map = nullptr;
+        uint32 sourceGuid = 0;
+
+        bool operator==(RespawnSourceMapKey const& other) const
+        {
+            return map == other.map && sourceGuid == other.sourceGuid;
+        }
+    };
+
+    struct RespawnSourceMapKeyHash
+    {
+        std::size_t operator()(RespawnSourceMapKey const& key) const
+        {
+            return std::hash<Map const*>()(key.map) ^ (std::hash<uint32>()(key.sourceGuid) << 1);
+        }
+    };
+
+    struct LiveRespawnReplacementRegistry
+    {
+        std::mutex lock;
+        std::unordered_map<RespawnSourceMapKey, uint32, RespawnSourceMapKeyHash> activeBySource;
+    };
+
+    LiveRespawnReplacementRegistry sLiveRespawnReplacementRegistry;
+
+    void MaybeLogRespawnCorpseCloneStats(time_t now)
+    {
+        std::lock_guard<std::mutex> guard(sRespawnCorpseCloneStats.lock);
+        if (sRespawnCorpseCloneStats.lastLogAt && (now - sRespawnCorpseCloneStats.lastLogAt) < 60)
+            return;
+
+        uint32 hottestSource = 0;
+        uint32 hottestSourceActive = 0;
+        for (const auto& itr : sRespawnCorpseCloneStats.activeBySource)
+        {
+            if (itr.second > hottestSourceActive)
+            {
+                hottestSource = itr.first;
+                hottestSourceActive = itr.second;
+            }
+        }
+
+        sRespawnCorpseCloneStats.lastLogAt = now;
+        sLog.outString("[RespawnCloneStats] active=%u created=%" PRIu64 " removed=%" PRIu64 " overcap_culled=%" PRIu64 " tracked_sources=%zu hottest_source=%u hottest_active=%u",
+            sRespawnCorpseCloneStats.activeClones.load(),
+            sRespawnCorpseCloneStats.totalCreated.load(),
+            sRespawnCorpseCloneStats.totalRemoved.load(),
+            sRespawnCorpseCloneStats.totalOverCapCulled.load(),
+            sRespawnCorpseCloneStats.activeBySource.size(),
+            hottestSource,
+            hottestSourceActive);
+    }
+
+    void RecordRespawnCorpseCloneCreated(uint32 sourceGuid)
+    {
+        time_t now = time(nullptr);
+        {
+            std::lock_guard<std::mutex> guard(sRespawnCorpseCloneStats.lock);
+            ++sRespawnCorpseCloneStats.activeBySource[sourceGuid];
+        }
+
+        ++sRespawnCorpseCloneStats.totalCreated;
+        ++sRespawnCorpseCloneStats.activeClones;
+        MaybeLogRespawnCorpseCloneStats(now);
+    }
+
+    void RecordRespawnCorpseCloneOverCapCull()
+    {
+        ++sRespawnCorpseCloneStats.totalOverCapCulled;
+    }
+
+    void RecordRespawnCorpseCloneRemoved(uint32 sourceGuid)
+    {
+        time_t now = time(nullptr);
+        {
+            std::lock_guard<std::mutex> guard(sRespawnCorpseCloneStats.lock);
+            auto itr = sRespawnCorpseCloneStats.activeBySource.find(sourceGuid);
+            if (itr != sRespawnCorpseCloneStats.activeBySource.end())
+            {
+                if (itr->second > 1)
+                    --itr->second;
+                else
+                    sRespawnCorpseCloneStats.activeBySource.erase(itr);
+            }
+        }
+
+        ++sRespawnCorpseCloneStats.totalRemoved;
+        if (sRespawnCorpseCloneStats.activeClones.load() > 0)
+            --sRespawnCorpseCloneStats.activeClones;
+        MaybeLogRespawnCorpseCloneStats(now);
+    }
+
     uint32 GetRespawnSourceGuidLow(Creature const* creature)
     {
         if (!creature)
@@ -93,6 +214,237 @@ namespace
         return sObjectMgr.GetCreatureData(sourceGuid);
     }
 
+    bool IsTrackedLiveRespawnReplacement(Creature const* creature)
+    {
+        return creature &&
+            creature->GetLootCorpseSourceGuidLow() &&
+            !creature->IsLootCorpseClone() &&
+            !creature->HasStaticDBSpawnData();
+    }
+
+    void RegisterLiveRespawnReplacement(Creature* creature)
+    {
+        if (!IsTrackedLiveRespawnReplacement(creature) || !creature->IsAlive() || creature->IsLiveRespawnReplacementTracked())
+            return;
+
+        RespawnSourceMapKey key{creature->GetMap(), GetRespawnSourceGuidLow(creature)};
+        if (!key.map || !key.sourceGuid)
+            return;
+
+        {
+            std::lock_guard<std::mutex> guard(sLiveRespawnReplacementRegistry.lock);
+            ++sLiveRespawnReplacementRegistry.activeBySource[key];
+        }
+
+        creature->SetLiveRespawnReplacementTracked(true);
+    }
+
+    void UnregisterLiveRespawnReplacement(Creature* creature)
+    {
+        if (!creature || !creature->IsLiveRespawnReplacementTracked())
+            return;
+
+        RespawnSourceMapKey key{creature->GetMap(), GetRespawnSourceGuidLow(creature)};
+        if (key.map && key.sourceGuid)
+        {
+            std::lock_guard<std::mutex> guard(sLiveRespawnReplacementRegistry.lock);
+            auto itr = sLiveRespawnReplacementRegistry.activeBySource.find(key);
+            if (itr != sLiveRespawnReplacementRegistry.activeBySource.end())
+            {
+                if (itr->second > 1)
+                    --itr->second;
+                else
+                    sLiveRespawnReplacementRegistry.activeBySource.erase(itr);
+            }
+        }
+
+        creature->SetLiveRespawnReplacementTracked(false);
+    }
+
+    bool HasAnyTrackedLiveRespawnReplacement(Creature const* creature)
+    {
+        if (!creature)
+            return false;
+
+        RespawnSourceMapKey key{creature->GetMap(), GetRespawnSourceGuidLow(creature)};
+        if (!key.map || !key.sourceGuid)
+            return false;
+
+        std::lock_guard<std::mutex> guard(sLiveRespawnReplacementRegistry.lock);
+        auto itr = sLiveRespawnReplacementRegistry.activeBySource.find(key);
+        return itr != sLiveRespawnReplacementRegistry.activeBySource.end() && itr->second > 0;
+    }
+
+    bool HasUnlootedCorpseLoot(Creature const* creature)
+    {
+        if (!creature || !creature->IsCorpse())
+            return false;
+
+        return creature->lootForBody && !creature->loot.isLooted();
+    }
+
+    RespawnCorpseSourceState GetRespawnCorpseSourceState(Creature* creature)
+    {
+        RespawnCorpseSourceState state;
+        if (!creature || !creature->IsInWorld() || !creature->GetMap())
+            return state;
+
+        uint32 sourceGuid = GetRespawnSourceGuidLow(creature);
+        if (!sourceGuid)
+            return state;
+
+        Map* map = creature->GetMap();
+        std::shared_lock<std::shared_mutex> guard(map->GetObjectLock());
+        auto& container = const_cast<TypeUnorderedMapContainer<AllMapStoredObjectTypes, ObjectGuid>&>(map->GetObjectStore());
+        auto pairItr = container.range<Creature>();
+
+        while (pairItr.first != pairItr.second)
+        {
+            Creature* other = pairItr.first->second;
+            ++pairItr.first;
+
+            if (!other || !other->IsCorpse())
+                continue;
+
+            if (GetRespawnSourceGuidLow(other) != sourceGuid)
+                continue;
+
+            if (HasUnlootedCorpseLoot(other))
+            {
+                ++state.unlootedCorpseCount;
+
+                if (!state.oldestUnlootedCorpse)
+                {
+                    state.oldestUnlootedCorpse = other;
+                    state.oldestUnlootedCorpseDecayTimer = other->GetCorpseDecayTimer();
+                    continue;
+                }
+
+                uint32 otherDecayTimer = other->GetCorpseDecayTimer();
+                if (otherDecayTimer < state.oldestUnlootedCorpseDecayTimer)
+                {
+                    state.oldestUnlootedCorpse = other;
+                    state.oldestUnlootedCorpseDecayTimer = otherDecayTimer;
+                    continue;
+                }
+
+                if (otherDecayTimer == state.oldestUnlootedCorpseDecayTimer)
+                {
+                    bool otherIsOriginalCorpse = !other->IsLootCorpseClone();
+                    bool oldestIsOriginalCorpse = !state.oldestUnlootedCorpse->IsLootCorpseClone();
+                    if (otherIsOriginalCorpse && !oldestIsOriginalCorpse)
+                    {
+                        state.oldestUnlootedCorpse = other;
+                        state.oldestUnlootedCorpseDecayTimer = otherDecayTimer;
+                        continue;
+                    }
+
+                    if (otherIsOriginalCorpse == oldestIsOriginalCorpse &&
+                        other->GetObjectGuid().GetCounter() < state.oldestUnlootedCorpse->GetObjectGuid().GetCounter())
+                    {
+                        state.oldestUnlootedCorpse = other;
+                        state.oldestUnlootedCorpseDecayTimer = otherDecayTimer;
+                    }
+                }
+
+                continue;
+            }
+
+            ++state.lootedCorpseCount;
+
+            if (!state.oldestLootedCorpse)
+            {
+                state.oldestLootedCorpse = other;
+                state.oldestLootedCorpseDecayTimer = other->GetCorpseDecayTimer();
+                continue;
+            }
+
+            uint32 otherDecayTimer = other->GetCorpseDecayTimer();
+            if (otherDecayTimer < state.oldestLootedCorpseDecayTimer)
+            {
+                state.oldestLootedCorpse = other;
+                state.oldestLootedCorpseDecayTimer = otherDecayTimer;
+                continue;
+            }
+
+            if (otherDecayTimer == state.oldestLootedCorpseDecayTimer)
+            {
+                bool otherIsOriginalCorpse = !other->IsLootCorpseClone();
+                bool oldestIsOriginalCorpse = !state.oldestLootedCorpse->IsLootCorpseClone();
+                if (otherIsOriginalCorpse && !oldestIsOriginalCorpse)
+                {
+                    state.oldestLootedCorpse = other;
+                    state.oldestLootedCorpseDecayTimer = otherDecayTimer;
+                    continue;
+                }
+
+                if (otherIsOriginalCorpse == oldestIsOriginalCorpse &&
+                    other->GetObjectGuid().GetCounter() < state.oldestLootedCorpse->GetObjectGuid().GetCounter())
+                {
+                    state.oldestLootedCorpse = other;
+                    state.oldestLootedCorpseDecayTimer = otherDecayTimer;
+                }
+            }
+        }
+
+        return state;
+    }
+
+    uint32 CountLootedRespawnCorpses(Creature* creature)
+    {
+        return GetRespawnCorpseSourceState(creature).lootedCorpseCount;
+    }
+
+    bool TrimRespawnCorpsesToCap(Creature* creature)
+    {
+        if (!creature || !creature->IsInWorld() || !creature->IsCorpse())
+            return false;
+
+        uint32 sourceGuid = GetRespawnSourceGuidLow(creature);
+        if (!sourceGuid)
+            return false;
+
+        uint32 lootedCap = sWorld.getConfig(CONFIG_UINT32_DYN_RESPAWN_CORPSE_CLONE_MAX);
+        uint32 unlootedCap = sWorld.getConfig(CONFIG_UINT32_DYN_RESPAWN_UNLOOTED_CORPSE_CLONE_MAX);
+        if (!lootedCap && !unlootedCap)
+            return false;
+
+        while (true)
+        {
+            RespawnCorpseSourceState state = GetRespawnCorpseSourceState(creature);
+
+            Creature* corpseToCull = nullptr;
+            if (lootedCap && state.lootedCorpseCount > lootedCap)
+                corpseToCull = state.oldestLootedCorpse;
+            else if (unlootedCap && state.unlootedCorpseCount > unlootedCap)
+                corpseToCull = state.oldestUnlootedCorpse;
+
+            if (!corpseToCull)
+                return false;
+
+            sLog.outString("[RespawnCloneSource] source=%u looted=%u unlooted=%u looted_cap=%u unlooted_cap=%u cull_guid=%u cull_looted=%u",
+                sourceGuid,
+                state.lootedCorpseCount,
+                state.unlootedCorpseCount,
+                lootedCap,
+                unlootedCap,
+                corpseToCull->GetGUIDLow(),
+                HasUnlootedCorpseLoot(corpseToCull) ? 0u : 1u);
+
+            if (corpseToCull == creature)
+            {
+                RecordRespawnCorpseCloneOverCapCull();
+                creature->RemoveCorpse();
+                DEBUG_FILTER_LOG(LOG_FILTER_AI_AND_MOVEGENSS, "Removing extra respawn corpse... %u ", creature->GetEntry());
+                return true;
+            }
+
+            RecordRespawnCorpseCloneOverCapCull();
+            corpseToCull->RemoveCorpse();
+            DEBUG_FILTER_LOG(LOG_FILTER_AI_AND_MOVEGENSS, "Removing extra respawn corpse... %u ", corpseToCull->GetEntry());
+        }
+    }
+
     uint32 CountAliveRespawnSources(Creature* creature)
     {
         if (!creature)
@@ -101,6 +453,18 @@ namespace
         uint32 sourceGuid = GetRespawnSourceGuidLow(creature);
         if (!creature->IsInWorld() || !sourceGuid)
             return 0;
+
+        if (CreatureData const* sourceData = GetRespawnSourceCreatureData(creature))
+        {
+            if (Creature* sourceCreature = creature->GetMap()->GetCreature(sourceData->GetObjectGuid(sourceGuid)))
+            {
+                if (sourceCreature != creature && sourceCreature->IsAlive())
+                    return 1;
+            }
+        }
+
+        if (HasAnyTrackedLiveRespawnReplacement(creature))
+            return 1;
 
         std::list<Creature*> nearbyCreatures;
         MaNGOS::AnyUnitInObjectRangeCheck check(creature, 500.0f);
@@ -122,9 +486,12 @@ namespace
         return aliveCount;
     }
 
-    bool CreateRespawnReplacementCreature(Creature* creature, char const* eventName)
+    bool CreateRespawnReplacementCreature(Creature* creature, char const* /*eventName*/)
     {
         if (!creature || !creature->IsCorpse())
+            return false;
+
+        if (!sWorld.getConfig(CONFIG_BOOL_DYN_RESPAWN_PRESERVE_CREATURE_CORPSES))
             return false;
 
         Map* map = creature->GetMap();
@@ -338,6 +705,7 @@ Creature::Creature(CreatureSubtype subtype) :
 
 Creature::~Creature()
 {
+    UnregisterLiveRespawnReplacement(this);
     CleanupsBeforeDelete();
 
     m_vendorItemCounts.clear();
@@ -351,6 +719,8 @@ Creature::~Creature()
 void Creature::AddToWorld()
 {
     bool bWasInWorld = IsInWorld();
+
+    RegisterLiveRespawnReplacement(this);
 
     ///- Register the creature for guid lookup
     if (!IsInWorld() && GetObjectGuid().GetHigh() == HIGHGUID_UNIT)
@@ -374,6 +744,8 @@ void Creature::AddToWorld()
 
 void Creature::RemoveFromWorld()
 {
+    UnregisterLiveRespawnReplacement(this);
+
     ///- Remove the creature from the accessor
     if (IsInWorld())
     {
@@ -391,6 +763,12 @@ void Creature::RemoveCorpse()
 {
     if ((GetDeathState() != CORPSE && !IsDeadByDefault()) || (GetDeathState() != ALIVE && IsDeadByDefault()))
         return;
+
+    if (IsLootCorpseClone())
+    {
+        uint32 sourceGuid = GetRespawnSourceGuidLow(this);
+        RecordRespawnCorpseCloneRemoved(sourceGuid);
+    }
 
     m_corpseRemovedAt = time(nullptr);
     m_corpseDecayTimer = 0;
@@ -924,6 +1302,9 @@ void Creature::Update(uint32 update_diff, uint32 diff)
             if (IsDeadByDefault())
                 break;
 
+            if (TrimRespawnCorpsesToCap(this))
+                break;
+
             // Youfie - <Nostalrius>
             // Cf. fix de Daemon [c1491] & mon autre bricolage de celui-ci [c1527)
             // Les mobs 11357, 8901, 14826 etc. : ont des minuscules temps de repop. Sans rajouter cette condition, tous les
@@ -1369,6 +1750,8 @@ bool Creature::Create(uint32 guidlow, CreatureCreatePos& cPos, CreatureInfo cons
 
 bool Creature::IsTrainerOf(Player* pPlayer, bool msg) const
 {
+    static std::set<uint32> sLoggedEmptyTrainerEntries;
+
     if (!IsTrainer())
         return false;
 
@@ -1378,8 +1761,11 @@ bool Creature::IsTrainerOf(Player* pPlayer, bool msg) const
     // for not pet trainer expected not empty trainer list always
     if ((!cSpells || cSpells->spellList.empty()) && (!tSpells || tSpells->spellList.empty()))
     {
-        sLog.outErrorDb("Creature %u (Entry: %u) have UNIT_NPC_FLAG_TRAINER but have empty trainer spell list.",
-                        GetGUIDLow(), GetEntry());
+        if (sLoggedEmptyTrainerEntries.insert(GetEntry()).second)
+        {
+            sLog.outErrorDb("Creature %u (Entry: %u) have UNIT_NPC_FLAG_TRAINER but have empty trainer spell list.",
+                            GetGUIDLow(), GetEntry());
+        }
         return false;
     }
 
@@ -2098,12 +2484,14 @@ float Creature::GetAttackDistance(Unit const* pTarget) const
     return (finalDistance * aggroRate);
 }
 
-    void Creature::SetDeathState(DeathState s)
+void Creature::SetDeathState(DeathState s)
 {
     time_t now = time(nullptr);
 
     if ((s == JUST_DIED && !IsDeadByDefault()) || (s == JUST_ALIVED && IsDeadByDefault()))
     {
+        UnregisterLiveRespawnReplacement(this);
+
         CreatureData const* data = GetRespawnSourceCreatureData(this);
 
         uint32 respawnDelay = m_respawnDelay;
@@ -2127,6 +2515,9 @@ float Creature::GetAttackDistance(Unit const* pTarget) const
     }
 
     Unit::SetDeathState(s);
+
+    if (s == JUST_ALIVED || s == ALIVE)
+        RegisterLiveRespawnReplacement(this);
 
     if (s == JUST_DIED)
     {

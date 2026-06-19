@@ -66,6 +66,21 @@ bool AddAllLootAction::isUseful()
 
 bool AddAllLootAction::AddLoot(Player* requester, ObjectGuid guid)
 {
+    if (IsLootGuidSkippedForBot(bot, guid))
+        return false;
+
+    if (guid.IsCreature())
+    {
+        Creature* creature = ai->GetCreature(guid);
+        if (creature && sServerFacade.GetDeathState(creature) == CORPSE &&
+            !creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE) &&
+            !bot->IsAllowedToLoot(creature))
+        {
+            DeferForeignLootGuidForBot(bot, guid);
+            return false;
+        }
+    }
+
     LootObject loot(bot, guid);
 
     if (ai->HasStrategy("debug loot", BotState::BOT_STATE_NON_COMBAT))

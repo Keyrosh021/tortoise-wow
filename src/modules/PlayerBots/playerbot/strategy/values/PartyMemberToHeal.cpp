@@ -215,8 +215,16 @@ std::vector<Player*> PartyMemberToHeal::GetPartyMembers()
         Group* group = bot->GetGroup();
         if (group)
         {
+            uint32 scanned = 0;
             for (GroupReference* gref = group->GetFirstMember(); gref; gref = gref->next())
             {
+                if (++scanned > 40)
+                {
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                        sPlayerbotAIConfig.logEvent(ai, "GroupIterationGuard", "party member heal", "reason=group-reference-scan-cap");
+                    break;
+                }
+
                 Player* player = gref->getSource();
                 if (player && ai->IsSafe(player))
                 {

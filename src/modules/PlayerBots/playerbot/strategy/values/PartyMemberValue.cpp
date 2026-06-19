@@ -14,7 +14,7 @@ Unit* PartyMemberValue::FindPartyMember(std::list<Player*>* party, FindPlayerPre
     {
         Player* player = *i;
 
-        if (!player)
+        if (!player || !player->IsInWorld() || player->GetMapId() != bot->GetMapId())
             continue;
 
         if (ignoreTanks && ai->IsTank(player))
@@ -27,7 +27,7 @@ Unit* PartyMemberValue::FindPartyMember(std::list<Player*>* party, FindPlayerPre
             return player;
 
         Pet* pet = player->GetPet();
-        if (pet && Check(pet) && predicate.Check(pet))
+        if (pet && pet->IsInWorld() && pet->GetMapId() == bot->GetMapId() && Check(pet) && predicate.Check(pet))
             return pet;
     }
 
@@ -43,8 +43,16 @@ Unit* PartyMemberValue::FindPartyMember(FindPlayerPredicate &predicate, bool ign
     Group* group = bot->GetGroup();
     if (group)
     {
+        uint32 scanned = 0;
         for (GroupReference *ref = group->GetFirstMember(); ref; ref = ref->next())
         {
+            if (++scanned > 40)
+            {
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                    sPlayerbotAIConfig.logEvent(ai, "GroupIterationGuard", "party member value", "reason=group-reference-scan-cap");
+                break;
+            }
+
             if (!ref->getSource() || bot->GetMapId() != ref->getSource()->GetMapId()) continue;
 
             if (ref->getSource() != bot)
@@ -139,20 +147,27 @@ Unit* PartyMemberValue::FindPartyMember(FindPlayerPredicate &predicate, bool ign
 
 bool PartyMemberValue::Check(Unit* player)
 {
-    return player && player != bot && player->GetMapId() == bot->GetMapId() &&
+    return player && player != bot && player->IsInWorld() && player->GetMapId() == bot->GetMapId() &&
         bot->IsWithinDistInMap(player, sPlayerbotAIConfig.sightDistance, false);
 }
 
 bool PartyMemberValue::IsTargetOfSpellCast(Player* target, SpellEntryPredicate &predicate)
 {
+    if (!target || !target->IsInWorld() || target->GetMapId() != bot->GetMapId())
+        return false;
+
     std::list<ObjectGuid> nearestPlayers = AI_VALUE(std::list<ObjectGuid>, "nearest friendly players");
     ObjectGuid targetGuid = target ? target->GetObjectGuid() : bot->GetObjectGuid();
     ObjectGuid corpseGuid = target && target->GetCorpse() ? target->GetCorpse()->GetObjectGuid() : ObjectGuid();
 
+    uint32 scanned = 0;
     for (std::list<ObjectGuid>::iterator i = nearestPlayers.begin(); i != nearestPlayers.end(); ++i)
     {
+        if (++scanned > 40)
+            break;
+
         Player* player = dynamic_cast<Player*>(ai->GetUnit(*i));
-        if (!player || player == bot)
+        if (!player || player == bot || !player->IsInWorld() || player->GetMapId() != bot->GetMapId())
             continue;
 
         if (player->IsNonMeleeSpellCasted(true))

@@ -161,6 +161,14 @@ Value<Unit*>* BuffOnPartyTrigger::GetTargetValue()
 	return context->GetValue<Unit*>("friendly unit without aura", qualifier);
 }
 
+bool BuffOnPartyTrigger::IsActive()
+{
+    if (!ai->HasRealPlayerMaster())
+        return false;
+
+    return BuffTrigger::IsActive();
+}
+
 Value<Unit*>* GreaterBuffOnPartyTrigger::GetTargetValue()
 {
     const std::string qualifier = spell + "-" + (ignoreTanks ? "1" : "0");
@@ -813,6 +821,9 @@ bool InRaidFightTrigger::IsActive()
 
 bool GreaterBuffOnPartyTrigger::IsActive()
 {
+    if (!ai->HasRealPlayerMaster())
+        return false;
+
     Unit* target = GetTarget();
     return target && bot->IsInGroup(target) && BuffOnPartyTrigger::IsActive() && !ai->HasAura(lowerSpell, target, false, checkIsOwner);
 }
@@ -1000,6 +1011,33 @@ bool ItemTargetTrigger::IsTargetValid(Unit* target)
     }
 
     return false;
+}
+
+bool ItemTargetTrigger::IsActive()
+{
+    if (!IsSpellReady())
+        return false;
+
+    // Item-target lists can contain many stale group/raid GUIDs. Bound the
+    // per-tick scan so one utility item trigger cannot monopolize map update.
+    constexpr uint32 maxTargetsPerCheck = 12;
+    const std::list<ObjectGuid>& possibleTargets = AI_VALUE(std::list<ObjectGuid>, targetsValue);
+    if (!possibleTargets.empty())
+    {
+        uint32 checked = 0;
+        for (const ObjectGuid& possibleTargetGuid : possibleTargets)
+        {
+            if (++checked > maxTargetsPerCheck)
+                break;
+
+            if (IsTargetValid(ai->GetUnit(possibleTargetGuid)))
+                return true;
+        }
+
+        return false;
+    }
+
+    return IsTargetValid(GetTarget());
 }
 
 bool ItemTargetTrigger::IsSpellReady()

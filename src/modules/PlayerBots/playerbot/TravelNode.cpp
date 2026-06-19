@@ -2191,6 +2191,7 @@ void TravelNodeMap::generateStartNodes()
     startNames[RACE_GNOME] = "Dwarf and Gnome";
     startNames[RACE_TROLL] = "Orc and Troll";
     startNames[RACE_GOBLIN] = "Goblin";
+    startNames[RACE_HIGH_ELF] = "High Elf";
 #ifndef MANGOSBOT_ZERO
     startNames[RACE_BLOODELF] = "Blood elf";
     startNames[RACE_DRAENEI] = "Draenei";

@@ -207,6 +207,9 @@ namespace ai
 
         virtual WorldPosition* GetNextPoint(const WorldPosition& point, std::list<uint8>& chancesToGoFar, bool allowSame = false) const
         {
+            if (points.empty())
+                return nullptr;
+
             if (!ShouldGoFar(chancesToGoFar))
                 return GetClosestPoint(point);
 
@@ -343,6 +346,9 @@ namespace ai
 
         virtual WorldPosition* GetNextPoint(const WorldPosition& point, std::list<uint8>& chancesToGoFar, bool allowSame = false) const
         {
+            if (subSquares.empty())
+                return nullptr;
+
             const T* nextSq = nullptr;
 
             WorldPosition* nextPoint = nullptr;
@@ -364,8 +370,6 @@ namespace ai
                 return nullptr;
 
             nextPoint = nextSq->GetNextPoint(point, chancesToGoFar, true);
-
-            MANGOS_ASSERT(nextPoint);
 
             return nextPoint;
         }
@@ -391,7 +395,14 @@ namespace ai
                 sq.printWKT(out, squares);
         }
 
-        virtual uint32 GetSize() const override { return subSquares.begin()->second.GetSize(); }
+        virtual uint32 GetSize() const override
+        {
+            uint32 size = 0;
+            for (auto& [id, sq] : subSquares)
+                size += sq.GetSize();
+
+            return size;
+        }
     protected:
         virtual uint32 GetSubSquareId(const WorldPosition& point) const = 0;
 

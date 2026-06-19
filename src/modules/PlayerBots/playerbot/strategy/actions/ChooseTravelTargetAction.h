@@ -19,7 +19,7 @@ namespace ai
     protected:
         void setNewTarget(Player* requester, TravelTarget* newTarget, TravelTarget* oldTarget);        
 
-        bool SetBestTarget(Player* requester, TravelTarget* target, PartitionedTravelList& travelPartitions, bool onlyActive = true);
+        bool SetBestTarget(Player* requester, TravelTarget* target, PartitionedTravelList& travelPartitions, bool onlyActive = true, std::string* failureReason = nullptr);
     public:
         static DestinationList FindDestination(PlayerTravelInfo info, std::string name, bool zones = true, bool npcs = true, bool quests = true, bool mobs = true, bool bosses = true, bool gather = true);
     private:

@@ -6,6 +6,7 @@
 #include "Movement/MovementGenerator.h"
 #include "playerbot/FleeManager.h"
 #include "playerbot/LootObjectStack.h"
+#include "playerbot/BotLearningMgr.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/PositionValue.h"
@@ -17,20 +18,125 @@
 #include "Entities/Vehicle.h"
 #endif
 #include "playerbot/strategy/generic/CombatStrategy.h"
+#include "PerfStats.h"
+#include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 using namespace ai;
 
 namespace
 {
-    uint32 BuildMoveOptions(bool walk, bool pathfinding, bool fly = false)
+    void ClearActiveLootState(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        if (WorldSession* session = bot->GetSession())
+        {
+            if (ObjectGuid lootGuid = bot->GetLootGuid())
+                session->DoLootRelease(lootGuid);
+        }
+
+        if (bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING))
+            bot->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING);
+
+        if (!bot->IsStandState())
+            bot->SetStandState(UNIT_STAND_STATE_STAND);
+    }
+
+    uint32 BuildMoveOptions(bool walk, bool pathfinding, bool fly = false, bool excludeSteepSlopes = false)
     {
         uint32 options = pathfinding ? MOVE_PATHFINDING : MOVE_NONE;
+        if (pathfinding && excludeSteepSlopes)
+            options |= MOVE_EXCLUDE_STEEP_SLOPES;
         options |= walk ? MOVE_WALK_MODE : MOVE_RUN_MODE;
         if (fly)
             options |= MOVE_FLY_MODE;
         return options;
+    }
+
+    void ScrubFakeBotFlight(Player* bot, bool /*notify*/ = false)
+    {
+        if (!bot || bot->IsTaxiFlying())
+            return;
+
+        bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_FLYING);
+#ifdef MANGOSBOT_ONE
+        bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_FLYING2);
+#endif
+        bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_CAN_FLY);
+        bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_LEVITATING);
+    }
+
+    bool IsPathTerrainSane(Player* bot, const std::vector<WorldPosition>& path, std::string* reason = nullptr)
+    {
+        if (!bot || path.empty() || bot->IsTaxiFlying() || bot->IsInWater())
+            return true;
+
+        WorldPosition previous(bot);
+        float totalXY = 0.0f;
+        float totalZ = 0.0f;
+        float maxStepZ = 0.0f;
+
+        for (WorldPosition const& point : path)
+        {
+            if (point.getMapId() != bot->GetMapId())
+                continue;
+
+            const float dx = point.getX() - previous.getX();
+            const float dy = point.getY() - previous.getY();
+            const float stepXY = std::sqrt(dx * dx + dy * dy);
+            const float stepZ = std::fabs(point.getZ() - previous.getZ());
+
+            totalXY += stepXY;
+            totalZ += stepZ;
+            maxStepZ = std::max(maxStepZ, stepZ);
+
+            if (stepXY > 0.1f && stepXY < 25.0f && stepZ > 4.0f && stepZ / stepXY > 1.0f)
+            {
+                if (reason)
+                {
+                    std::ostringstream out;
+                    out << "steep-local-slope xy=" << std::fixed << std::setprecision(2) << stepXY
+                        << " dz=" << stepZ
+                        << " ratio=" << (stepZ / stepXY);
+                    *reason = out.str();
+                }
+                return false;
+            }
+
+            if ((stepXY < 1.0f && stepZ > 12.0f) || (stepXY < 4.0f && stepZ > 18.0f))
+            {
+                if (reason)
+                {
+                    std::ostringstream out;
+                    out << "short-steep-step xy=" << std::fixed << std::setprecision(2) << stepXY
+                        << " dz=" << stepZ;
+                    *reason = out.str();
+                }
+                return false;
+            }
+
+            previous = point;
+        }
+
+        if (totalXY > 0.1f && totalZ > 12.0f && totalZ / totalXY > 1.25f && maxStepZ > 4.0f)
+        {
+            if (reason)
+            {
+                std::ostringstream out;
+                out << "steep-ratio xy=" << std::fixed << std::setprecision(2) << totalXY
+                    << " z=" << totalZ
+                    << " ratio=" << (totalZ / totalXY)
+                    << " maxStepZ=" << maxStepZ;
+                *reason = out.str();
+            }
+            return false;
+        }
+
+        return true;
     }
 
     std::mutex s_humanLikeDispatchTraceMutex;
@@ -47,9 +153,27 @@ namespace
 
     std::mutex s_movementTraceMutex;
     std::unordered_map<std::string, time_t> s_movementTraceNextLog;
+    std::unordered_map<std::string, uint32> s_rejectedMovementCounts;
+    std::unordered_map<std::string, time_t> s_suppressedMovementDestinations;
+    const std::unordered_set<std::string> s_disabledMovementTraceEvents =
+    {
+        // Keep bot_events.csv enabled, but silence the highest-volume movement traces
+        // that are useful for deep pathing work yet too expensive for normal runs.
+        "MovementSpeedTrace",
+        "MovementActionTrace",
+        "HumanLikeMoveDispatch",
+        "FollowTrace",
+        "ChaseToTrace",
+        "ReachTargetTrace",
+        "MoveToLootTrace",
+        "RangedChaseHold"
+    };
 
     bool ShouldLogMovementTrace(Player* bot, const std::string& eventName, uint32 intervalSeconds = 10)
     {
+        if (s_disabledMovementTraceEvents.find(eventName) != s_disabledMovementTraceEvents.end())
+            return false;
+
         std::lock_guard<std::mutex> guard(s_movementTraceMutex);
         const std::string key = eventName + ":" + std::to_string(bot->GetGUIDLow());
         time_t now = time(0);
@@ -59,6 +183,28 @@ namespace
 
         nextLog = now + intervalSeconds;
         return true;
+    }
+
+    bool IsVerticalLosBlocked(Player* bot, Unit* target, float minVerticalDelta = 6.0f)
+    {
+        return bot && target &&
+            target->IsInWorld() &&
+            target->GetMapId() == bot->GetMapId() &&
+            !bot->IsWithinLOSInMap(target, true) &&
+            std::fabs(bot->GetPositionZ() - target->GetPositionZ()) > minVerticalDelta;
+    }
+
+    bool IsCastingSelfHeal(Player* bot)
+    {
+        if (!bot)
+            return false;
+
+        Spell* currentSpell = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+        if (!currentSpell || currentSpell->getState() != SPELL_STATE_CASTING || !PlayerbotAI::IsHealSpell(currentSpell->m_spellInfo))
+            return false;
+
+        Unit* target = currentSpell->m_targets.getUnitTarget();
+        return target && target->GetObjectGuid() == bot->GetObjectGuid();
     }
 
     bool HasNullTravelDestination(PlayerbotAI* ai)
@@ -94,6 +240,178 @@ namespace
 
         return isCasterRanged && hasManaBar && manaPct > sPlayerbotAIConfig.lowMana;
     }
+
+    bool IsTravelMovementAction(std::string const& actionName)
+    {
+        return actionName == "move to travel target" ||
+            actionName == "move to rpg target" ||
+            actionName == "find corpse";
+    }
+
+    std::string BuildMovementDestinationKey(Player* bot, TravelTarget* travelTarget, WorldPosition const& end, std::string const& actionName)
+    {
+        if (!bot)
+            return std::string();
+
+        const int32 travelEntry = travelTarget ? travelTarget->GetEntry() : 0;
+        const int32 endX = int32(std::round(end.getX() / 10.0f));
+        const int32 endY = int32(std::round(end.getY() / 10.0f));
+        const int32 endZ = int32(std::round(end.getZ() / 5.0f));
+        std::ostringstream key;
+        key << bot->GetGUIDLow() << ':' << actionName << ':' << travelEntry << ':'
+            << end.getMapId() << ':' << endX << ':' << endY << ':' << endZ;
+        return key.str();
+    }
+
+    uint32 RecordRejectedMovement(Player* bot, TravelTarget* travelTarget, WorldPosition const& end, std::string const& actionName)
+    {
+        std::string key = BuildMovementDestinationKey(bot, travelTarget, end, actionName);
+        if (key.empty())
+            return 0;
+
+        std::lock_guard<std::mutex> guard(s_movementTraceMutex);
+        uint32& count = s_rejectedMovementCounts[key];
+        ++count;
+        return count;
+    }
+
+    void SuppressMovementDestination(Player* bot, TravelTarget* travelTarget, WorldPosition const& end, std::string const& actionName, uint32 seconds)
+    {
+        std::string key = BuildMovementDestinationKey(bot, travelTarget, end, actionName);
+        if (key.empty())
+            return;
+
+        std::lock_guard<std::mutex> guard(s_movementTraceMutex);
+        s_suppressedMovementDestinations[key] = time(nullptr) + seconds;
+    }
+
+    bool IsMovementDestinationSuppressed(Player* bot, TravelTarget* travelTarget, WorldPosition const& end, std::string const& actionName, uint32* ttlSeconds = nullptr)
+    {
+        std::string key = BuildMovementDestinationKey(bot, travelTarget, end, actionName);
+        if (key.empty())
+            return false;
+
+        std::lock_guard<std::mutex> guard(s_movementTraceMutex);
+        auto itr = s_suppressedMovementDestinations.find(key);
+        if (itr == s_suppressedMovementDestinations.end())
+            return false;
+
+        time_t now = time(nullptr);
+        if (itr->second <= now)
+        {
+            s_suppressedMovementDestinations.erase(itr);
+            return false;
+        }
+
+        if (ttlSeconds)
+            *ttlSeconds = uint32(itr->second - now);
+        return true;
+    }
+
+    void ExpireActiveTravelTarget(AiObjectContext* aiContext, TravelTarget* travelTarget)
+    {
+        if (!aiContext || !travelTarget)
+            return;
+
+        travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+        aiContext->ClearValues("no active travel destinations");
+        aiContext->GetValue<LootObject>("loot target")->Reset();
+    }
+
+    void RecoverFromRejectedMovement(PlayerbotAI* ai, Player* bot, std::string const& actionName, WorldPosition const& end, std::string const& rejectReason)
+    {
+        if (!ai || !bot || !ai->GetAiObjectContext())
+            return;
+
+        AiObjectContext* aiContext = ai->GetAiObjectContext();
+        LastMovement& lastMove = aiContext->GetValue<LastMovement&>("last movement")->Get();
+        lastMove.clear();
+
+        if (actionName == "move to rpg target")
+        {
+            GuidPosition rpgTarget = aiContext->GetValue<GuidPosition>("rpg target")->Get();
+            if (rpgTarget)
+            {
+                aiContext->GetValue<std::set<ObjectGuid>&>("ignore rpg target")->Get().insert(rpgTarget);
+                aiContext->GetValue<GuidPosition>("rpg target")->Reset();
+                aiContext->ClearValues("rpg target");
+                aiContext->GetValue<LootObject>("loot target")->Reset();
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "action=" << actionName
+                        << " reason=" << rejectReason
+                        << " targetEntry=" << rpgTarget.GetEntry()
+                        << " targetGuid=" << rpgTarget.GetRawValue()
+                        << " endMap=" << end.getMapId()
+                        << " endX=" << std::fixed << std::setprecision(2) << end.getX()
+                        << " endY=" << end.getY()
+                        << " endZ=" << end.getZ();
+                    sPlayerbotAIConfig.logEvent(ai, "RpgTargetPathRejectedDrop", std::to_string(bot->GetMapId()), out.str());
+                }
+            }
+
+            return;
+        }
+
+        TravelTarget* travelTarget = aiContext->GetValue<TravelTarget*>("travel target")->Get();
+        if (!IsTravelMovementAction(actionName) || !travelTarget || !travelTarget->IsActive())
+            return;
+
+        const uint32 rejectCount = RecordRejectedMovement(bot, travelTarget, end, actionName);
+        travelTarget->IncRetry(true);
+        const uint32 moveRetryCount = travelTarget->GetRetryCount(true);
+
+        std::string learnedReason;
+        const float learnedPenalty = sBotLearningMgr.GetTravelPenalty(bot, travelTarget->GetDestination(), &end, &learnedReason);
+        const bool learnedBadRoute = learnedPenalty >= 2.5f || (learnedPenalty >= 1.5f && rejectCount >= 2);
+        const bool runawayRetry = moveRetryCount >= 30;
+
+        if (learnedBadRoute || rejectCount >= 4 || travelTarget->IsMaxRetry(true) || runawayRetry)
+        {
+            const uint32 suppressSeconds = runawayRetry ? 300 : (learnedBadRoute ? 180 : 90);
+            SuppressMovementDestination(bot, travelTarget, end, actionName, suppressSeconds);
+            ExpireActiveTravelTarget(aiContext, travelTarget);
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << actionName
+                    << " reason=" << rejectReason
+                    << " rejectCount=" << rejectCount
+                    << " moveRetryCount=" << moveRetryCount
+                    << " learnedPenalty=" << std::fixed << std::setprecision(2) << learnedPenalty
+                    << " learnedReason=" << learnedReason
+                    << " suppressSeconds=" << suppressSeconds
+                    << " entry=" << travelTarget->GetEntry()
+                    << " title=" << (travelTarget->GetDestination() ? travelTarget->GetDestination()->GetTitle() : "none");
+                sPlayerbotAIConfig.logEvent(ai, "MovementTravelExpired", std::to_string(bot->GetMapId()), out.str());
+            }
+
+            return;
+        }
+
+        travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+        travelTarget->SetExpireIn(std::min<uint32>(15000, 3000 + moveRetryCount * 1500));
+        aiContext->ClearValues("no active travel destinations");
+        aiContext->GetValue<LootObject>("loot target")->Reset();
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementTravelRetry", 5))
+        {
+            std::ostringstream out;
+            out << "action=" << actionName
+                << " reason=" << rejectReason
+                << " rejectCount=" << rejectCount
+                << " moveRetryCount=" << moveRetryCount
+                << " learnedPenalty=" << std::fixed << std::setprecision(2) << learnedPenalty
+                << " learnedReason=" << learnedReason
+                << " cooldownMs=" << travelTarget->GetTimeLeft()
+                << " entry=" << travelTarget->GetEntry()
+                << " title=" << (travelTarget->GetDestination() ? travelTarget->GetDestination()->GetTitle() : "none");
+            sPlayerbotAIConfig.logEvent(ai, "MovementTravelRetry", std::to_string(bot->GetMapId()), out.str());
+        }
+    }
 }
 
 void MovementAction::CreateWp(Player* wpOwner, float x, float y, float z, float o, uint32 entry, bool important)
@@ -113,6 +431,9 @@ void MovementAction::CreateWp(Player* wpOwner, float x, float y, float z, float 
 
 bool MovementAction::isPossible()
 {
+    if (IsCastingSelfHeal(bot))
+        return false;
+
     return ai->CanMove();
 }
 
@@ -168,6 +489,12 @@ bool MovementAction::FlyDirect(const WorldPosition &startPosition, const WorldPo
 #ifdef MANGOSBOT_ZERO
     return false;
 #else
+    if (!bot->IsTaxiFlying())
+    {
+        ScrubFakeBotFlight(bot, true);
+        return false;
+    }
+
     if (!bot->IsFreeFlying())
         return false;
 
@@ -947,6 +1274,12 @@ void MovementAction::UpdateFlyingState(
     bool isWalking)
 {
 #ifndef MANGOSBOT_ZERO
+    if (!bot->IsTaxiFlying())
+    {
+        ScrubFakeBotFlight(bot, true);
+        return;
+    }
+
     bool isFly = bot->IsFlying();
     bool isFar = false;
     bool needFly = false;
@@ -1042,6 +1375,9 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
 {
     MotionMaster& mm = *bot->GetMotionMaster();
 
+    if (!ai->AllowPressureWork(PerfStats::BOT_PRESSURE_WORK_PATH_RETRY, 1000, 3500))
+        return;
+
     mm.Clear();
 
     bool shouldWalk = masterWalking || forceWalk;
@@ -1055,6 +1391,34 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
 
     ForcedMovement moveMode = shouldWalk ? FORCED_MOVEMENT_WALK : FORCED_MOVEMENT_RUN;
 #ifndef MANGOSBOT_ZERO
+    if (!bot->IsTaxiFlying())
+    {
+        bool scrubFlightFlags = !sServerFacade.isMoving(bot);
+
+        if (const TerrainInfo* terrain = bot->GetTerrain())
+        {
+            float height = terrain->GetHeightStatic(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+            float ground = terrain->GetWaterOrGroundLevel(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), height);
+
+            if (fabs(bot->GetPositionZ() - ground) < 3.0f)
+                scrubFlightFlags = true;
+        }
+
+        if (scrubFlightFlags)
+        {
+            if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_FLYING))
+                bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_FLYING);
+#ifdef MANGOSBOT_ONE
+            if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_FLYING2))
+                bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_FLYING2);
+#endif
+            if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_CAN_FLY))
+                bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_CAN_FLY);
+            if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_LEVITATING))
+                bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_LEVITATING);
+        }
+    }
+
     if (bot->IsFlying())
         moveMode = FORCED_MOVEMENT_FLIGHT;
 #endif
@@ -1079,30 +1443,57 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
 
     std::vector<WorldPosition> path = movePath.getPointPath();
 
-    if (!generatePath || !bot->IsFreeFlying())
-    {
-        WorldPosition movePosition = path.back();
+    GeneratePathAvoidingHazards(path);
 
-#ifdef MANGOSBOT_ZERO
-        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, false);
-        mm.MovePoint(movePosition.getMapId(),
-            movePosition.getX(),
-            movePosition.getY(),
-            movePosition.getZ(),
-            moveOptions,
-            0.0f,
-            -10.0f);
-#else
-        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, bot->IsFlying());
-        mm.MovePoint(movePosition.getMapId(),
-            Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f),
-            moveOptions,
-            bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.f,
-            -10.0f);
-#endif
+    if (path.empty())
+        return;
+
+    AiObjectContext* aiContext = ai->GetAiObjectContext();
+    TravelTarget* travelTarget = aiContext ? aiContext->GetValue<TravelTarget*>("travel target")->Get() : nullptr;
+    uint32 suppressedTtl = 0;
+    if (travelTarget && travelTarget->IsActive() && IsTravelMovementAction(getName()) &&
+        IsMovementDestinationSuppressed(bot, travelTarget, path.back(), getName(), &suppressedTtl))
+    {
+        ExpireActiveTravelTarget(aiContext, travelTarget);
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementDestinationSuppressed", 5))
+        {
+            WorldPosition const& end = path.back();
+            std::ostringstream out;
+            out << "action=" << getName()
+                << " ttlSeconds=" << suppressedTtl
+                << " entry=" << travelTarget->GetEntry()
+                << " title=" << (travelTarget->GetDestination() ? travelTarget->GetDestination()->GetTitle() : "none")
+                << " endMap=" << end.getMapId()
+                << " endX=" << std::fixed << std::setprecision(2) << end.getX()
+                << " endY=" << end.getY()
+                << " endZ=" << end.getZ();
+            sPlayerbotAIConfig.logEvent(ai, "MovementDestinationSuppressed", std::to_string(bot->GetMapId()), out.str());
+        }
+        return;
     }
 
-    GeneratePathAvoidingHazards(path);
+    std::string rejectReason;
+    if (!IsPathTerrainSane(bot, path, &rejectReason))
+    {
+        WorldPosition end = path.back();
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementPathRejected", 15))
+        {
+            std::ostringstream out;
+            out << "action=" << getName()
+                << " reason=" << rejectReason
+                << " points=" << path.size()
+                << " endMap=" << end.getMapId()
+                << " endX=" << std::fixed << std::setprecision(2) << end.getX()
+                << " endY=" << end.getY()
+                << " endZ=" << end.getZ()
+                << " generatePath=" << (generatePath ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "MovementPathRejected", std::to_string(bot->GetMapId()), out.str());
+        }
+
+        RecoverFromRejectedMovement(ai, bot, getName(), end, rejectReason);
+        return;
+    }
 
     std::vector<G3D::Vector3> pointPath = WorldPosition().toPointsArray(path);
     float size = WorldPosition().getPathLength(path);
@@ -1136,7 +1527,7 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
         WorldPosition movePosition = path.back();
 
 #ifdef MANGOSBOT_ZERO
-        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, false);
+        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, false, generatePath);
         mm.MovePoint(movePosition.getMapId(),
             movePosition.getX(),
             movePosition.getY(),
@@ -1145,7 +1536,7 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
             0.0f,
             -10.0f);
 #else
-        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, bot->IsFlying());
+        uint32 moveOptions = BuildMoveOptions(shouldWalk, generatePath, bot->IsFlying(), generatePath && !bot->IsFlying());
         mm.MovePoint(movePosition.getMapId(),
             Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f),
             moveOptions,
@@ -1187,6 +1578,13 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
 
     if (!ai->CanMove())
         return false;
+
+    if (IsCastingSelfHeal(bot))
+    {
+        ai->StopMoving();
+        SetDuration(250);
+        return true;
+    }
 
     Unit* mover = GetMover(bot);
 
@@ -1311,7 +1709,7 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
         if (!bot->IsStandState())
             bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-        if (bot->IsNonMeleeSpellCasted(true, false, true))
+        if (bot->IsNonMeleeSpellCasted(true, false, true) && !IsCastingSelfHeal(bot))
             ai->InterruptSpell(false);
     }
 
@@ -1432,6 +1830,13 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
 
 bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, bool react, bool noPath, bool ignoreEnemyTargets, bool forceWalk)
 {
+    if (IsCastingSelfHeal(bot))
+    {
+        ai->StopMoving();
+        SetDuration(250);
+        return true;
+    }
+
     if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementActionTrace"))
     {
         std::ostringstream out;
@@ -2266,7 +2671,7 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
         if (!bot->IsStandState())
             bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-        if (bot->IsNonMeleeSpellCasted(true, false, true))
+        if (bot->IsNonMeleeSpellCasted(true, false, true) && !IsCastingSelfHeal(bot))
         {
             ai->InterruptSpell(false);
         }
@@ -2321,16 +2726,18 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
     }
 
 #ifdef MANGOSBOT_ZERO
-        uint32 moveOptions = BuildMoveOptions(masterWalking, generatePath, false);
+        uint32 moveOptions = BuildMoveOptions(masterWalking, generatePath, false, generatePath);
         mm.MovePoint(movePosition.getMapId(), movePosition.getX(), movePosition.getY(), movePosition.getZ(), moveOptions, 0.0f, -10.0f);
 #else
-    if (!bot->IsFreeFlying())
+    if (!bot->IsTaxiFlying())
     {
+        ScrubFakeBotFlight(bot, true);
+
         // water transition
         if (bot->HasMovementFlag(MOVEFLAG_SWIMMING) && startPosition.isInWater() && !startPosition.isUnderWater() && !movePosition.isInWater())
             generatePath = true;
 
-        uint32 moveOptions = BuildMoveOptions(masterWalking, generatePath, false);
+        uint32 moveOptions = BuildMoveOptions(masterWalking, generatePath, false, generatePath);
         mm.MovePoint(movePosition.getMapId(), movePosition.getX(), movePosition.getY(), movePosition.getZ(), moveOptions, 0.0f, -10.0f);
     }
     else
@@ -2442,6 +2849,13 @@ bool MovementAction::MoveTo(Unit* target, float distance)
     {
         //ai->TellError("Seems I am stuck");
         return false;
+    }
+
+    if (IsCastingSelfHeal(bot))
+    {
+        ai->StopMoving();
+        SetDuration(250);
+        return true;
     }
 
     float bx = bot->GetPositionX(), by = bot->GetPositionY(), bz = bot->GetPositionZ();
@@ -2902,8 +3316,42 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
     if (Unit* targetUnit = dynamic_cast<Unit*>(obj))
     {
         const float distanceToTarget = sServerFacade.GetDistance2d(bot, targetUnit);
+        const float distance3d = bot->GetDistance(targetUnit);
+        const float verticalDelta = std::fabs(bot->GetPositionZ() - targetUnit->GetPositionZ());
         const bool inLos = bot->IsWithinLOSInMap(targetUnit, true);
         const bool allowMeleeFallback = !IsCasterStyleRangedWithMana(ai, bot);
+
+        if (!sServerFacade.IsFriendlyTo(bot, targetUnit) && IsVerticalLosBlocked(bot, targetUnit))
+        {
+            if (AI_VALUE(Unit*, "current target") == targetUnit)
+                SET_AI_VALUE(Unit*, "current target", nullptr);
+
+            if (AI_VALUE(ObjectGuid, "attack target") == targetUnit->GetObjectGuid())
+                SET_AI_VALUE(ObjectGuid, "attack target", ObjectGuid());
+
+            if (bot->GetVictim() == targetUnit)
+                bot->AttackStop(true);
+
+            bot->SetSelectionGuid(ObjectGuid());
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << getName()
+                    << " target=" << targetUnit->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << distanceToTarget
+                    << " dist3d=" << std::fixed << std::setprecision(2) << distance3d
+                    << " dz=" << std::fixed << std::setprecision(2) << verticalDelta
+                    << " desired=" << distance
+                    << " los=0"
+                    << " movingGen=" << bot->GetMotionMaster()->GetCurrentMovementGeneratorType()
+                    << " reason=vertical_los"
+                    << " cleared=1";
+                sPlayerbotAIConfig.logEvent(ai, "ChaseToDeferred", std::to_string(targetUnit->GetGUIDLow()), out.str());
+            }
+
+            return false;
+        }
 
         if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "ChaseToTrace"))
         {
@@ -2911,6 +3359,8 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
             out << "action=" << getName()
                 << " target=" << targetUnit->GetName()
                 << " dist=" << std::fixed << std::setprecision(2) << distanceToTarget
+                << " dist3d=" << std::fixed << std::setprecision(2) << distance3d
+                << " dz=" << std::fixed << std::setprecision(2) << verticalDelta
                 << " desired=" << distance
                 << " los=" << (inLos ? 1 : 0)
                 << " ranged=" << (ai->IsRanged(bot) ? 1 : 0)
@@ -3070,8 +3520,6 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
             sServerFacade.GetChaseOffset(bot) == distance)
         {
             bot->SetTarget(obj); //Needed to keep chase going in combat.
-            const bool allowMeleeFallback = !IsCasterStyleRangedWithMana(ai, bot);
-            bot->Attack((Unit*)obj, !ai->IsRanged(bot) || (allowMeleeFallback && sServerFacade.GetDistance2d(bot, obj) < 5.0f)); //Needed to keep chase going in combat.
             return true;
         }
     }
@@ -3180,6 +3628,12 @@ void MovementAction::WaitForReach(const Movement::PointsArray& path)
 
 bool MovementAction::Flee(Unit *target)
 {
+    // Random open-world bots are numerous enough that expensive flee path
+    // generation can stall a continent worker. Keep flee behavior for
+    // explicitly-mastered bots, where the extra movement is worth the cost.
+    if (!ai->HasRealPlayerMaster())
+        return false;
+
     Player* master = GetMaster();
     if (!target)
         target = master;
@@ -3616,6 +4070,7 @@ bool MoveToLootAction::Execute(Event& event)
 
     if (hasCombatPressure)
     {
+        ClearActiveLootState(bot);
         RESET_AI_VALUE(LootObject, "loot target");
 
         if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MoveToLootDeferredCombat", 2))
@@ -3634,6 +4089,9 @@ bool MoveToLootAction::Execute(Event& event)
     LootObject loot = AI_VALUE(LootObject, "loot target");
     if (!loot.IsLootPossible(bot))
     {
+        ClearActiveLootState(bot);
+        RESET_AI_VALUE(LootObject, "loot target");
+
         if (ai->HasStrategy("debug loot", BotState::BOT_STATE_NON_COMBAT))
         {
             WorldObject* wo = loot.GetWorldObject(bot);
@@ -3652,6 +4110,12 @@ bool MoveToLootAction::Execute(Event& event)
     }
 
     WorldObject *wo = loot.GetWorldObject(bot);
+    if (!wo)
+    {
+        ClearActiveLootState(bot);
+        RESET_AI_VALUE(LootObject, "loot target");
+        return false;
+    }
 
     if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT) || ai->HasStrategy("debug loot", BotState::BOT_STATE_NON_COMBAT))
     {

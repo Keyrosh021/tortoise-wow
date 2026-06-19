@@ -7,6 +7,8 @@
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/PerformanceMonitor.h"
 #include "playerbot/BotActionLog.h"
+#include "MapManager.h"
+#include <algorithm>
 
 #ifdef BUILD_ELUNA
 #include "LuaEngine/LuaEngine.h"
@@ -125,23 +127,37 @@ void Engine::Init()
 
 bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
 {
-    std::lock_guard<std::recursive_mutex> lock(engineMutex);
+    MapManager::SetContinentUpdatePhase("engine-lock", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
+    std::unique_lock<std::recursive_mutex> lock(engineMutex, std::try_to_lock);
+    if (!lock.owns_lock())
+    {
+        MapManager::SetContinentUpdatePhase("engine-busy", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
+        return false;
+    }
+    MapManager::SetContinentUpdatePhase("engine-entry", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     LogAction("--- AI Tick ---");
     if (sPlayerbotAIConfig.logValuesPerTick)
+    {
+        MapManager::SetContinentUpdatePhase("engine-log-values", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
         LogValues();
+    }
 
     bool actionExecuted = false;
     ActionBasket* basket = NULL;
 
     time_t currentTime = time(0);
+    MapManager::SetContinentUpdatePhase("engine-context", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     aiObjectContext->Update();
+    MapManager::SetContinentUpdatePhase("engine-triggers", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     ProcessTriggers(minimal);
+    MapManager::SetContinentUpdatePhase("engine-defaults", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     PushDefaultActions();
 
     std::vector<Action*> modifiedActions;
 
     int iterations = 0;
-    int iterationsPerTick = queue.Size() * (minimal ? (uint32)(sPlayerbotAIConfig.iterationsPerTick / 2) : sPlayerbotAIConfig.iterationsPerTick);
+    uint32 iterationScale = minimal ? std::max<uint32>(1, sPlayerbotAIConfig.iterationsPerTick / 2) : sPlayerbotAIConfig.iterationsPerTick;
+    uint32 iterationsPerTick = std::min<uint32>(queue.Size() * iterationScale, minimal ? 100u : 250u);
     do 
     {
         basket = queue.Peek();
@@ -151,7 +167,12 @@ bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
             bool skipPrerequisites = basket->isSkipPrerequisites();
             Event event = basket->getEvent();
             if (minimal && (relevance < 100))
+            {
+                ActionNode* lowPriority = queue.Pop(basket);
+                if (lowPriority)
+                    delete lowPriority;
                 continue;
+            }
             // NOTE: queue.Pop() deletes basket
             ActionNode* actionNode = queue.Pop();
             Action* action = InitializeAction(actionNode);
@@ -196,6 +217,7 @@ bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
                 bool isUseful = false;
                 if (!isStunned || action->isUsefulWhenStunned())
                 {
+                    MapManager::SetContinentUpdatePhaseNamed("engine-useful", action ? action->getName() : "unknown", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
                     auto pmo2 = sPerformanceMonitor.start(PERF_MON_ACTION, "isUseful", ai);
                     isUseful = action->isUseful();
                     pmo2.reset();
@@ -238,11 +260,13 @@ bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
                     }
 
                     auto pmo3 = sPerformanceMonitor.start(PERF_MON_ACTION, "isPossible", ai);
+                    MapManager::SetContinentUpdatePhase("engine-possible", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
                     bool isPossible = action->isPossible();
                     pmo3.reset();
 
                     if (isPossible && relevance)
                     {
+                        MapManager::SetContinentUpdatePhase("engine-execute", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
                         auto pmo4 = sPerformanceMonitor.start(PERF_MON_ACTION, "Execute", ai);
                         actionExecuted = ListenAndExecute(action, event);
                         pmo4.reset();
@@ -627,6 +651,7 @@ void Engine::ProcessTriggers(bool minimal)
         if (testMode || trigger->IsAlreadyTriggered() || trigger->needCheck())
         {
             auto pmo = sPerformanceMonitor.start(PERF_MON_TRIGGER, trigger->getName(), ai);
+            MapManager::SetContinentUpdatePhaseNamed("trigger-check", trigger->getName(), ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
             Event event = trigger->Check();
 
 #ifdef PLAYERBOT_ELUNA
@@ -638,6 +663,7 @@ void Engine::ProcessTriggers(bool minimal)
             if (!event)
                 continue;
 
+            MapManager::SetContinentUpdatePhase("trigger-handlers", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
             MultiplyAndPush(node->getHandlers(), 0.0f, false, event, "trigger");
             LogAction("T:%s", trigger->getName().c_str());
         }
@@ -730,10 +756,21 @@ bool Engine::ListenAndExecute(Action* action, Event& event)
 {
     bool actionExecuted = false;
     Action* prevExecutedAction = lastExecutedAction;
+    MapManager::SetContinentUpdatePhase("action-before", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     if (actionExecutionListeners.Before(action, event))
     {
         ai->SetLastEvent(event);
-        actionExecuted = actionExecutionListeners.AllowExecution(action, event) ? action->Execute(event) : true;
+        MapManager::SetContinentUpdatePhaseNamed("action-allow", action ? action->getName() : "unknown", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
+        if (actionExecutionListeners.AllowExecution(action, event))
+        {
+            MapManager::SetContinentUpdatePhaseNamed("action-execute", action ? action->getName() : "unknown", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
+            actionExecuted = action->Execute(event);
+        }
+        else
+        {
+            actionExecuted = true;
+        }
+        MapManager::SetContinentUpdatePhase("action-done", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
         if (actionExecuted)
         {
             ai->SetActionDuration(action);
@@ -741,6 +778,7 @@ bool Engine::ListenAndExecute(Action* action, Event& event)
         }
     }
 
+    MapManager::SetContinentUpdatePhase("action-log", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     std::string lastActionName = prevExecutedAction ? prevExecutedAction->getName() : "";
     if (sPlayerbotAIConfig.CanLogAction(ai, action->getName(), true, lastActionName))
     {
@@ -793,6 +831,7 @@ bool Engine::ListenAndExecute(Action* action, Event& event)
         ai->TellPlayerNoFacing(ai->GetMaster(), out);
     }
 
+    MapManager::SetContinentUpdatePhase("action-override", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     actionExecuted = actionExecutionListeners.OverrideResult(action, actionExecuted, event);
     actionExecutionListeners.After(action, actionExecuted, event);
     return actionExecuted;

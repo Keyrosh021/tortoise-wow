@@ -1593,6 +1593,23 @@ void Player::Update(uint32 update_diff, uint32 p_time)
     if (!IsInWorld())
         return;
 
+    struct PlayerUpdatePerfScope
+    {
+        explicit PlayerUpdatePerfScope(Player const* player) :
+            start(WorldTimer::getMSTime()),
+            bot(player && (player->GetPlayerbotAI() || player->GetPlayerbotMgr()))
+        {
+        }
+
+        ~PlayerUpdatePerfScope()
+        {
+            PerfStats::RecordPlayerUpdate(WorldTimer::getMSTimeDiffToNow(start), bot);
+        }
+
+        uint32 start;
+        bool bot;
+    } playerUpdatePerfScope(this);
+
     UpdateMirrorTimers(update_diff);
 
     //used to implement delayed far teleports
@@ -24590,6 +24607,9 @@ uint16 Player::GetPureMaxSkillValue(uint32 skill) const
 // for Hardcore mode
 void Player::SetHardcoreStatus(uint8 status)
 {
+    if (GetPlayerbotAI())
+        status = HARDCORE_MODE_STATUS_NONE;
+
     m_hardcoreStatus = status;
 
     if (PlayerCacheData* pCache = sObjectMgr.GetPlayerDataByGUID(GetGUIDLow()))
@@ -24681,6 +24701,15 @@ void HandleHardcoreMailQuery(QueryResult* result, ObjectGuid guid)
 
 bool Player::SetupHardcoreMode()
 {
+    if (GetPlayerbotAI())
+    {
+        SetHardcoreStatus(HARDCORE_MODE_STATUS_NONE);
+        if (HasTitle(TITLE_STILL_ALIVE))
+            AwardTitle(-TITLE_STILL_ALIVE);
+        ChangeTitle(0);
+        return false;
+    }
+
     if (IsHardcore())
         return false;
 

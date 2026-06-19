@@ -2,11 +2,176 @@
 #include "playerbot/playerbot.h"
 #include "InviteToGroupAction.h"
 #include "playerbot/ServerFacade.h"
+#include "playerbot/TravelMgr.h"
 #include "playerbot/strategy/values/Formations.h"
+#include "playerbot/strategy/values/ItemUsageValue.h"
+#include "playerbot/strategy/values/SharedValueContext.h"
 #include "Guild/GuildMgr.h"
+#include <algorithm>
+#include <cctype>
+#include <iomanip>
+#include <limits>
+#include <set>
 
 namespace ai
 {
+    namespace
+    {
+        struct ActiveQuestObjectiveKey
+        {
+            uint32 questId = 0;
+            uint8 objective = 0;
+            int32 entry = 0;
+
+            bool IsValid() const { return questId && entry; }
+
+            bool Matches(ActiveQuestObjectiveKey const& other) const
+            {
+                return IsValid() && other.IsValid() &&
+                    questId == other.questId &&
+                    objective == other.objective &&
+                    entry == other.entry;
+            }
+        };
+
+        ActiveQuestObjectiveKey GetActiveQuestObjectiveKey(Player* player)
+        {
+            if (!player || !player->GetPlayerbotAI() || !player->GetPlayerbotAI()->GetAiObjectContext())
+                return {};
+
+            TravelTarget* target = player->GetPlayerbotAI()->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+            if (!target || !target->GetDestination())
+                return {};
+
+            if (target->GetStatus() != TravelStatus::TRAVEL_STATUS_READY &&
+                target->GetStatus() != TravelStatus::TRAVEL_STATUS_TRAVEL &&
+                target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
+                return {};
+
+            QuestObjectiveTravelDestination* objective = dynamic_cast<QuestObjectiveTravelDestination*>(target->GetDestination());
+            if (!objective)
+                return {};
+
+            return { objective->GetQuestId(), objective->GetObjective(), objective->GetEntry() };
+        }
+
+        uint32 GetGroupSize(Player* player)
+        {
+            return player && player->GetGroup() ? player->GetGroup()->GetMembersCount() : 0;
+        }
+
+        bool ItemNameSuggestsCreature(ItemPrototype const* proto, CreatureInfo const* creatureInfo)
+        {
+            if (!proto || !creatureInfo)
+                return false;
+
+            std::string itemName = proto->Name1;
+            std::string creatureName = creatureInfo->name;
+            std::transform(itemName.begin(), itemName.end(), itemName.begin(), ::tolower);
+            std::transform(creatureName.begin(), creatureName.end(), creatureName.begin(), ::tolower);
+
+            return !itemName.empty() && !creatureName.empty() && itemName.find(creatureName) != std::string::npos;
+        }
+
+        bool HasSuggestedCreatureDropSource(ItemPrototype const* proto, std::list<int32> const& dropEntries)
+        {
+            for (int32 entry : dropEntries)
+                if (entry > 0 && ItemNameSuggestsCreature(proto, sObjectMgr.GetCreatureTemplate(uint32(entry))))
+                    return true;
+
+            return false;
+        }
+
+        std::set<uint32> GetNeededQuestCreatureEntries(Player* bot)
+        {
+            std::set<uint32> entries;
+            if (!bot)
+                return entries;
+
+            QuestStatusMap& questStatusMap = bot->getQuestStatusMap();
+            for (auto const& [questId, questStatus] : questStatusMap)
+            {
+                Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
+                if (!quest || !quest->IsActive() || questStatus.m_status != QUEST_STATUS_INCOMPLETE)
+                    continue;
+
+                for (uint32 objective = 0; objective < QUEST_OBJECTIVES_COUNT; ++objective)
+                {
+                    if (quest->ReqCreatureOrGOCount[objective] &&
+                        questStatus.m_creatureOrGOcount[objective] < quest->ReqCreatureOrGOCount[objective] &&
+                        quest->ReqCreatureOrGOId[objective] > 0)
+                    {
+                        entries.insert(uint32(quest->ReqCreatureOrGOId[objective]));
+                    }
+
+                    if (!quest->ReqItemCount[objective] || questStatus.m_itemcount[objective] >= quest->ReqItemCount[objective])
+                        continue;
+
+                    uint32 itemId = quest->ReqItemId[objective];
+                    while (itemId)
+                    {
+                        ItemPrototype const* proto = sObjectMgr.GetItemPrototype(itemId);
+                        std::list<int32> dropEntries = GAI_VALUE2(std::list<int32>, "item drop list", itemId);
+                        const bool hasSuggestedSource = HasSuggestedCreatureDropSource(proto, dropEntries);
+
+                        for (int32 entry : dropEntries)
+                        {
+                            if (entry <= 0)
+                                continue;
+
+                            if (hasSuggestedSource && !ItemNameSuggestsCreature(proto, sObjectMgr.GetCreatureTemplate(uint32(entry))))
+                                continue;
+
+                            entries.insert(uint32(entry));
+                        }
+
+                        itemId = ItemUsageValue::ItemCreatedFrom(itemId);
+                    }
+                }
+            }
+
+            return entries;
+        }
+
+        bool HasVisibleQuestObjectiveTarget(PlayerbotAI* ai, Player* bot)
+        {
+            if (!ai || !bot || !bot->IsInWorld() || !ai->GetAiObjectContext())
+                return false;
+
+            std::set<uint32> objectiveEntries = GetNeededQuestCreatureEntries(bot);
+            if (objectiveEntries.empty())
+                return false;
+
+            ActiveQuestObjectiveKey activeObjective = GetActiveQuestObjectiveKey(bot);
+
+            Value<std::list<ObjectGuid>>* possibleTargetsValue = ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid>>("possible targets");
+            if (!possibleTargetsValue)
+                return false;
+
+            std::list<ObjectGuid> possibleTargets = possibleTargetsValue->Get();
+            for (ObjectGuid const& guid : possibleTargets)
+            {
+                if (!guid.IsCreature() || !objectiveEntries.count(guid.GetEntry()))
+                    continue;
+
+                if (activeObjective.IsValid() && activeObjective.entry > 0 && int32(guid.GetEntry()) != activeObjective.entry)
+                    continue;
+
+                Unit* target = ai->GetUnit(guid);
+                if (!target || !target->IsInWorld() || target->GetMapId() != bot->GetMapId() || sServerFacade.UnitIsDead(target))
+                    continue;
+
+                if (sServerFacade.IsFriendlyTo(bot, target))
+                    continue;
+
+                if (bot->IsWithinLOSInMap(target, true))
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
     bool InviteToGroupAction::Invite(Player* inviter, Player* player)
     {
         if (!player)
@@ -300,6 +465,11 @@ namespace ai
             value->Load(newFormation);
         }
 
+        ActiveQuestObjectiveKey botObjective = GetActiveQuestObjectiveKey(bot);
+        Player* bestPlayer = nullptr;
+        int32 bestScore = std::numeric_limits<int32>::min();
+        float bestDistance = std::numeric_limits<float>::max();
+
         std::list<ObjectGuid> nearGuids = ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid> >("nearest friendly players")->Get();
         for (auto& i : nearGuids)
         {
@@ -319,6 +489,7 @@ namespace ai
                 continue;
 #endif
 
+            Group* playerGroup = player->GetGroup();
             if (player->GetGroup())
                 continue;
 
@@ -334,35 +505,61 @@ namespace ai
                 continue;
 
             PlayerbotAI* botAi = player->GetPlayerbotAI();
+            ActiveQuestObjectiveKey playerObjective = GetActiveQuestObjectiveKey(player);
+            const bool sameQuestObjective = botObjective.Matches(playerObjective);
+
+            if (botObjective.IsValid() && botObjective.entry > 0 && !sameQuestObjective)
+                continue;
 
             if (botAi)
             {
-                if (botAi->GetGrouperType() == GrouperType::SOLO && !botAi->HasRealPlayerMaster()) //Do not invite solo players. 
+                if (botAi->GetGrouperType() == GrouperType::SOLO && !botAi->HasRealPlayerMaster() && !sameQuestObjective) //Do not invite solo players, unless we are camping the same objective.
                     continue;
 
                 if (botAi->HasActivePlayerMaster()) //Do not invite alts of active players. 
                     continue;
             }
 
-            if (abs(int32(player->GetLevel() - bot->GetLevel())) > 2)
+            if (abs(int32(player->GetLevel() - bot->GetLevel())) > (sameQuestObjective ? 5 : 2))
                 continue;
 
-            if (sServerFacade.GetDistance2d(bot, player) > sPlayerbotAIConfig.spellDistance)
+            const float distance = sServerFacade.GetDistance2d(bot, player);
+            if (distance > (sameQuestObjective ? sPlayerbotAIConfig.sightDistance : sPlayerbotAIConfig.spellDistance))
                 continue;
+
+            int32 score = sameQuestObjective ? 10000 : 0;
+            score -= int32(distance);
+            score -= abs(int32(player->GetLevel() - bot->GetLevel())) * 25;
+            if (botAi && botAi->GetGrouperType() == GrouperType::MEMBER)
+                score += 100;
+            if (!playerGroup)
+                score += 50;
+
+            if (!bestPlayer || score > bestScore || (score == bestScore && distance < bestDistance))
+            {
+                bestPlayer = player;
+                bestScore = score;
+                bestDistance = distance;
+            }
+        }
+
+        if (bestPlayer)
+        {
+            Group* group = bot->GetGroup();
 
             //When inviting the 5th member of the group convert to raid for future invites.
-            if (group && ai->GetGrouperType() > GrouperType::LEADER_5 && !group->IsRaidGroup() && bot->GetGroup()->GetMembersCount() > 3)
+            if (group && !botObjective.IsValid() && ai->GetGrouperType() > GrouperType::LEADER_5 && !group->IsRaidGroup() && bot->GetGroup()->GetMembersCount() > 3)
                 group->ConvertToRaid();
 
             Guild* guild = sGuildMgr.GetGuildById(bot->GetGuildId());
             if (sPlayerbotAIConfig.inviteChat && (sRandomPlayerbotMgr.IsFreeBot(bot) || !ai->HasActivePlayerMaster()))
             {
-                if (guild && player && bot->IsInGuild(player->GetGuildId()))
+                if (guild && bestPlayer && bot->IsInGuild(bestPlayer->GetGuildId()))
                 {
                     BroadcastHelper::BroadcastGuildGroupOrRaidInvite(
                         ai,
                         bot,
-                        player,
+                        bestPlayer,
                         group,
                         guild
                     );
@@ -371,7 +568,7 @@ namespace ai
                 {
 
                     std::map<std::string, std::string> placeholders;
-                    placeholders["%player"] = player->GetName();
+                    placeholders["%player"] = bestPlayer->GetName();
 
                     if (group && group->IsRaidGroup())
                         bot->Say(BOT_TEXT2("join_raid", placeholders), (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
@@ -380,7 +577,23 @@ namespace ai
                 }
             }
 
-            return Invite(bot, player);
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                ActiveQuestObjectiveKey targetObjective = GetActiveQuestObjectiveKey(bestPlayer);
+                out << "target=" << bestPlayer->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << bestDistance
+                    << " score=" << bestScore
+                    << " sameObjective=" << (botObjective.Matches(targetObjective) ? 1 : 0)
+                    << " questId=" << targetObjective.questId
+                    << " objective=" << uint32(targetObjective.objective)
+                    << " entry=" << targetObjective.entry
+                    << " botGroupSize=" << GetGroupSize(bot)
+                    << " targetGroupSize=" << GetGroupSize(bestPlayer);
+                sPlayerbotAIConfig.logEvent(ai, "InviteNearbySelected", bestPlayer->GetName(), out.str());
+            }
+
+            return Invite(bot, bestPlayer);
         }
 
         return false;
@@ -397,9 +610,13 @@ namespace ai
         if (bot->InBattleGroundQueue())
             return false;
 
+        if (HasVisibleQuestObjectiveTarget(ai, bot))
+            return false;
+
         GrouperType grouperType = ai->GetGrouperType();
 
-        if (grouperType == GrouperType::SOLO || grouperType == GrouperType::MEMBER)
+        ActiveQuestObjectiveKey botObjective = GetActiveQuestObjectiveKey(bot);
+        if (grouperType == GrouperType::SOLO || (grouperType == GrouperType::MEMBER && !botObjective.IsValid()))
             return false;
 
         Group* group = bot->GetGroup();
@@ -413,6 +630,9 @@ namespace ai
                 return false;
 
             uint32 memberCount = group->GetMembersCount();
+
+            if (botObjective.IsValid() && memberCount >= 5)
+                return false;
 
             if (memberCount >= uint8(grouperType))
                 return false;

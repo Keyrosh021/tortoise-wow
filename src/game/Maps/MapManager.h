@@ -191,6 +191,8 @@ class MapManager : public MaNGOS::Singleton<MapManager, MaNGOS::ClassLevelLockab
         void ExecuteSingleDelayedTeleport(Player *player);
         void CancelDelayedPlayerTeleport(Player *player);
         void MarkContinentUpdateFinished();
+        static void SetContinentUpdatePhase(char const* phase, uint32 detail = 0);
+        static void SetContinentUpdatePhaseNamed(char const* phase, std::string const& name, uint32 detail = 0);
         bool IsContinentUpdateFinished() const;
 
         bool waitContinentUpdateFinishedFor(std::chrono::milliseconds time) const;

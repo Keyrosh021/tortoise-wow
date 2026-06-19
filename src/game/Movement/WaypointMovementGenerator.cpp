@@ -17,6 +17,7 @@
  */
 
 #include <ctime>
+#include <set>
 
 #include "WaypointMovementGenerator.h"
 #include "ObjectMgr.h"
@@ -46,7 +47,11 @@ void WaypointMovementGenerator<Creature>::LoadPath(uint32 guid, uint32 entry, Wa
     // No movement found for entry nor guid
     if (!i_path)
     {
-        sLog.outErrorDb("WaypointMovementGenerator::LoadPath: GUID %u Entry %u doesn't have waypoint path", guid, entry);
+        static std::set<uint32> sLoggedMissingWaypointEntries;
+        if (sLoggedMissingWaypointEntries.insert(entry).second)
+        {
+            sLog.outErrorDb("WaypointMovementGenerator::LoadPath: Entry %u doesn't have waypoint path (first seen on GUID %u)", entry, guid);
+        }
         return;
     }
 

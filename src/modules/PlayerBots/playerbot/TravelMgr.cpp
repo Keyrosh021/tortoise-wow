@@ -4,11 +4,14 @@
 
 #include "playerbot/strategy/values/SharedValueContext.h"
 #include "playerbot/strategy/values/TravelValues.h"
+#include "playerbot/LootObjectStack.h"
 #include "Maps/PathFinder.h"
 #include "TravelNode.h"
 #include "PlayerbotAI.h"
 #include "BotTests.h"
 #include "ObjectAccessor.h"
+#include "PerfStats.h"
+#include "Timer.h"
 
 using namespace ai;
 using namespace MaNGOS;
@@ -103,6 +106,9 @@ bool QuestRelationTravelDestination::IsPossible(const PlayerTravelInfo& info) co
     if (!info.GetBoolValue2("has strategy", "rpg quest"))
         return false;
 
+    if (GetEntry() == 81030) // Mysterious Stranger challenge NPC
+        return false;
+
     bool forceThisQuest = info.HasFocusQuest();
 
     if (forceThisQuest && !info.IsFocusQuest(GetQuestId()))
@@ -157,41 +163,66 @@ bool QuestRelationTravelDestination::IsActive(Player* bot, const PlayerTravelInf
     PlayerbotAI* ai = bot->GetPlayerbotAI();
     AiObjectContext* context = ai->GetAiObjectContext();
 
+    if (GetEntry() == 81030) // Mysterious Stranger challenge NPC
+        return false;
+
     if(!IsPossible(info))
         return false;
 
+    std::ostringstream skipQualifier;
+    skipQualifier << "quest relation skip::" << GetEntry() << ":" << GetQuestId() << ":" << (uint32)GetRelation();
+    if (AI_VALUE2(time_t, "manual time", skipQualifier.str()) > time(0))
+        return false;
+
     bool forceThisQuest = info.HasFocusQuest(); //Checked in IsPossible if it's 'this' quest.
+    const std::string questDialogQualifier = std::to_string(GetEntry()) + " " + std::to_string(GetQuestId());
+    const uint32 questDialogStatus = AI_VALUE2(uint32, "dialog status quest", questDialogQualifier);
 
     if (GetRelation() == 0)
     {
         if (!bot->GetMap()->IsContinent() && (GetClosestPoint(bot)->getMapId() != bot->GetMapId())) //This gives issues for bot->CanTakeQuest so stop here.
             return false;
 
+        const bool canAcceptSpecificQuest = questDialogStatus == DIALOG_STATUS_AVAILABLE;
+#ifndef MANGOSBOT_TWO
+        const bool canAcceptSpecificLowLevelQuest = questDialogStatus == DIALOG_STATUS_CHAT;
+#else
+        const bool canAcceptSpecificLowLevelQuest = questDialogStatus == DIALOG_STATUS_LOW_LEVEL_AVAILABLE;
+#endif
+
         if (forceThisQuest)
         {
-            if (!AI_VALUE2(bool, "group or", "following party,can accept quest npc::" + std::to_string(GetEntry()))) //Noone has yellow exclamation mark.
-                if (!AI_VALUE2(bool, "group or", "following party,can accept quest low level npc::" + std::to_string(GetEntry()))) //Noone can do this quest.
-                    return false;
+            if (!canAcceptSpecificQuest && !canAcceptSpecificLowLevelQuest)
+                return false;
         }
         else
         {
             if (info.GetBoolValue("can fight equal"))
             {
-                if (!AI_VALUE2(bool, "group or", "following party,can accept quest npc::" + std::to_string(GetEntry()))) //Noone has yellow exclamation mark.
-                    if (!AI_VALUE2(bool, "group or", "following party,can accept quest low level npc::" + std::to_string(GetEntry()) + ",need quest reward::" + std::to_string(GetQuestId()))) //Noone can do this quest for a usefull reward.
+                if (!canAcceptSpecificQuest)
+                {
+                    if (!canAcceptSpecificLowLevelQuest || !AI_VALUE2(bool, "need quest reward", std::to_string(GetQuestId())))
                         return false;
+                }
             }
             else
             {
-                if (!AI_VALUE2(bool, "group or", "following party,can accept quest low level npc::" + std::to_string(GetEntry()))) //Noone can pick up this quest for money.
+                if (!canAcceptSpecificLowLevelQuest) //Noone can pick up this specific quest for money.
                     return false;
             }
         }
     }
     else
     {
-        bool canTurnInNpc = AI_VALUE2(bool, "group or", "following party,can turn in quest npc::" + std::to_string(GetEntry()));
-        if (!canTurnInNpc)
+        const bool canTurnInSpecificQuest =
+#ifdef MANGOSBOT_ZERO
+            questDialogStatus == DIALOG_STATUS_REWARD2 ||
+#else
+            questDialogStatus == DIALOG_STATUS_REWARD2 || questDialogStatus == DIALOG_STATUS_REWARD ||
+#endif
+            questDialogStatus == DIALOG_STATUS_REWARD_REP;
+
+        if (!canTurnInSpecificQuest)
         {
             Quest const* quest = sObjectMgr.GetQuestTemplate(GetQuestId());
             bool canRewardSpecificQuest = quest && bot->CanRewardQuest(quest, false);
@@ -255,11 +286,27 @@ bool QuestObjectiveTravelDestination::IsPossible(const PlayerTravelInfo& info) c
 
     if (!forceThisQuest)
     {
-        if ((int32)GetQuestTemplate()->GetQuestLevel() > (int32)info.GetLevel() + (int32)1)
+        const Quest* questTemplate = GetQuestTemplate();
+        const int32 questLevel = (int32)questTemplate->GetQuestLevel();
+        const int32 botLevel = (int32)info.GetLevel();
+        const bool lowLevelOverworldQuest =
+            botLevel <= 12 &&
+            questTemplate->GetType() != QUEST_TYPE_ELITE &&
+            questTemplate->GetType() != QUEST_TYPE_DUNGEON &&
+            questTemplate->GetType() != QUEST_TYPE_RAID;
+
+        if (questLevel > botLevel + 1)
             return false;
 
-        if (!skipShouldGrindCheck && GetQuestTemplate()->GetQuestLevel() + 5 > (int)info.GetLevel() && !info.GetBoolValue("can fight equal"))
-            return false;
+        if (!skipShouldGrindCheck && questLevel + 5 > botLevel && !info.GetBoolValue("can fight equal"))
+        {
+            // Starter-zone bots frequently dip into a pessimistic "can't fight equal"
+            // state even while actively progressing normal quest chains. Keep those
+            // accepted low-level overworld objectives available so they can finish the
+            // chain and move to the next hub instead of stalling in place.
+            if (!lowLevelOverworldQuest || questLevel > botLevel + 1)
+                return false;
+        }
     }
 
     if (info.IsInRaid() != (GetQuestTemplate()->GetType() == QUEST_TYPE_RAID))
@@ -336,6 +383,7 @@ bool QuestObjectiveTravelDestination::IsPossible(const PlayerTravelInfo& info) c
 bool QuestObjectiveTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& info) const {
     PlayerbotAI* ai = bot->GetPlayerbotAI();
     AiObjectContext* context = ai->GetAiObjectContext();
+    const bool autonomousRandomBot = ai && !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
 
     if (!IsPossible(info))
         return false;
@@ -414,15 +462,24 @@ bool QuestObjectiveTravelDestination::IsActive(Player* bot, const PlayerTravelIn
     if (!skipKillableCheck && GetEntry() > 0 && !IsOut(botPos))
     {
         TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+        const bool shouldVerifyNearbyObjectivePresence =
+            autonomousRandomBot ||
+            IsUnique() ||
+            (target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK && target->GetEntry() == GetEntry());
 
-        //Only look for the target if it is unique or if we are currently working on it.
-        if (IsUnique() || (target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK && target->GetEntry() == GetEntry()))
+        // Near-objective autonomous bots should only keep ordinary mob destinations
+        // active if a matching creature is present. Unique quest mobs are different:
+        // the useful behavior is to hold the spawn and compete for the next tag.
+        if (shouldVerifyNearbyObjectivePresence)
         {
             std::list<ObjectGuid> targets = AI_VALUE(std::list<ObjectGuid>, "possible targets");
 
             for (auto& target : targets)
                 if (target.GetEntry() == GetEntry() && target.IsCreature() && ai->GetCreature(target) && ai->GetCreature(target)->IsAlive())
                     return true;
+
+            if (IsUnique())
+                return true;
 
             return false;
         }
@@ -1033,6 +1090,25 @@ void TravelTarget::CheckStatus()
     {
         bool destinationInactive = !IsDestinationActive() && !IsForced();
         bool conditionsInactive = !destinationInactive && !IsConditionsActive(); // Only check conditions if destination is still active
+        QuestRelationTravelDestination* questRelationDest = dynamic_cast<QuestRelationTravelDestination*>(tDestination);
+        QuestObjectiveTravelDestination* questObjectiveDest = dynamic_cast<QuestObjectiveTravelDestination*>(tDestination);
+        const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
+        const bool lowLevelQuestgiverRetry =
+            destinationInactive &&
+            questRelationDest &&
+            questRelationDest->GetPurpose() == TravelDestinationPurpose::QuestGiver &&
+            autonomousRandomBot &&
+            bot->GetLevel() <= 12;
+        const bool lowLevelQuestTurnInRetry =
+            destinationInactive &&
+            questRelationDest &&
+            questRelationDest->GetPurpose() == TravelDestinationPurpose::QuestTaker &&
+            autonomousRandomBot &&
+            bot->GetLevel() <= 12;
+        const bool questObjectiveRetry =
+            destinationInactive &&
+            questObjectiveDest &&
+            autonomousRandomBot;
 
         if (destinationInactive || conditionsInactive)
         {
@@ -1044,6 +1120,9 @@ void TravelTarget::CheckStatus()
                     << " status=" << static_cast<uint32>(GetStatus())
                     << " destinationActive=" << (destinationInactive ? 0 : 1)
                     << " conditionsActive=" << (conditionsInactive ? 0 : 1)
+                    << " lowLevelQuestgiverRetry=" << (lowLevelQuestgiverRetry ? 1 : 0)
+                    << " lowLevelQuestTurnInRetry=" << (lowLevelQuestTurnInRetry ? 1 : 0)
+                    << " questObjectiveRetry=" << (questObjectiveRetry ? 1 : 0)
                     << " forced=" << (IsForced() ? 1 : 0)
                     << " entry=" << (tDestination ? tDestination->GetEntry() : 0)
                     << " title=" << (tDestination ? tDestination->GetTitle() : "none");
@@ -1051,6 +1130,44 @@ void TravelTarget::CheckStatus()
             }
             forced = false;
             SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+            if (questObjectiveRetry)
+            {
+                // Quest-objective destinations go inactive frequently because nearby mobs
+                // or lootable corpses blink out between scans. Replan quickly instead of
+                // parking the bot for a full cooldown window.
+                IncRetry(false);
+                const uint32 retryCount = GetRetryCount(false);
+                const uint32 retryCooldownMs = std::min<uint32>(15000, 5000 + retryCount * 2500);
+                SetExpireIn(retryCooldownMs);
+                ai->GetAiObjectContext()->ClearValues("no active travel destinations");
+                RESET_AI_VALUE(LootObject, "loot target");
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "entry=" << questObjectiveDest->GetEntry()
+                        << " questId=" << questObjectiveDest->GetQuestId()
+                        << " objective=" << (uint32)questObjectiveDest->GetObjective()
+                        << " level=" << (uint32)bot->GetLevel()
+                        << " retryCount=" << retryCount
+                        << " cooldownMs=" << GetTimeLeft();
+                    sPlayerbotAIConfig.logEvent(ai, "QuestObjectiveRetryWindow", tDestination ? tDestination->GetTitle() : "travel", out.str());
+                }
+            }
+            else if (lowLevelQuestgiverRetry || lowLevelQuestTurnInRetry)
+            {
+                SetExpireIn(15000);
+                ai->GetAiObjectContext()->ClearValues("no active travel destinations");
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "entry=" << questRelationDest->GetEntry()
+                        << " purpose=" << (questRelationDest->GetPurpose() == TravelDestinationPurpose::QuestGiver ? "giver" : "taker")
+                        << " level=" << (uint32)bot->GetLevel()
+                        << " cooldownMs=" << GetTimeLeft();
+                    sPlayerbotAIConfig.logEvent(ai, "QuestTravelRetryWindow", tDestination ? tDestination->GetTitle() : "travel", out.str());
+                }
+            }
             return;
         }
     }
@@ -1298,43 +1415,12 @@ void TravelMgr::SetMobAvoidArea()
     sLog.outString(">> Modified navmap areas for %d maps.", sMapStore.GetNumRows());
 }
 
-void TravelMgr::SetMobAvoidAreaMap(uint32 mapId) 
+void TravelMgr::SetMobAvoidAreaMap(uint32 /*mapId*/)
 {
-    PathFinder path(mapId, 0);
-    FactionTemplateEntry const* humanFaction = sFactionTemplateStore.LookupEntry(1);
-    FactionTemplateEntry const* orcFaction = sFactionTemplateStore.LookupEntry(2);
-
-    std::vector<CreatureDataPair const*> creatures = WorldPosition(mapId, 1,1).getCreaturesNear();
-
-    for (auto& creaturePair : creatures)
-    {
-        CreatureData const cData = creaturePair->second;
-        CreatureInfo const* cInfo = sObjectMgr.GetCreatureTemplate(cData.creature_id[0]);
-
-        if (!cInfo)
-            continue;
-
-        WorldPosition point = WorldPosition(cData.position.mapid, cData.position.coord_x, cData.position.coord_y, cData.position.coord_z, cData.position.orientation);
-
-        if (cInfo->NpcFlags > 0)
-            continue;
-
-        FactionTemplateEntry const* factionEntry = sFactionTemplateStore.LookupEntry(cInfo->Faction);
-        ReputationRank reactionHum = PlayerbotAI::GetFactionReaction(humanFaction, factionEntry);
-        ReputationRank reactionOrc = PlayerbotAI::GetFactionReaction(orcFaction, factionEntry);
-
-        if (reactionHum >= REP_NEUTRAL || reactionOrc >= REP_NEUTRAL)
-            continue;
-
-        if (!point.getTerrain())
-            continue;
-
-        if (!point.loadMapAndVMap(0))
-            continue;
-
-        path.setArea(point.getMapId(), point.getX(), point.getY(), point.getZ(), 12, 50.0f);
-        path.setArea(point.getMapId(), point.getX(), point.getY(), point.getZ(), 13, 20.0f);
-    }
+    // This branch aliases PathFinder to PathInfo, whose map/id constructor has
+    // no source unit and whose setArea overloads are compatibility no-ops.
+    // Avoid constructing PathFinder(mapId, instanceId), because PathInfo needs
+    // an owner to build its movement filter.
 }
 
 void TravelMgr::LoadQuestTravelTable()
@@ -2721,10 +2807,24 @@ namespace
             return false;
         }
     }
+
+    bool IsQuestTravelPurpose(uint32 purposeFlag)
+    {
+        constexpr uint32 questPurposeMask =
+            (uint32)TravelDestinationPurpose::QuestGiver |
+            (uint32)TravelDestinationPurpose::QuestTaker |
+            (uint32)TravelDestinationPurpose::QuestObjective1 |
+            (uint32)TravelDestinationPurpose::QuestObjective2 |
+            (uint32)TravelDestinationPurpose::QuestObjective3 |
+            (uint32)TravelDestinationPurpose::QuestObjective4;
+
+        return (purposeFlag & questPurposeMask) != 0;
+    }
 }
 
 PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, const std::vector<uint32>& distancePartitions, const PlayerTravelInfo& info, uint32 purposeFlag, const std::vector<int32>& entries, bool onlyPossible, float maxDistance) const
 {
+    const uint32 startMs = WorldTimer::getMSTime();
     sTravelMgr.GetPartitionsLock();
 
     PartitionedTravelList pointMap;
@@ -2767,6 +2867,17 @@ PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, cons
     }
 
     sTravelMgr.GetPartitionsLock(false);
+
+    uint32 resultPoints = 0;
+    for (auto const& [partition, points] : pointMap)
+        resultPoints += points.size();
+
+    PerfStats::RecordTravelPartitions(
+        WorldTimer::getMSTimeDiffToNow(startMs),
+        destinations.size(),
+        resultPoints,
+        resultPoints == 0,
+        IsQuestTravelPurpose(purposeFlag));
 
     return pointMap;
 }

@@ -52,6 +52,10 @@ class GridInfo
             return i_unloadActiveLockCount || i_unloadExplicitLock;
         }
 
+        bool hasUnloadActiveLock() const { return i_unloadActiveLockCount > 0; }
+        uint16 getUnloadActiveLockCount() const { return i_unloadActiveLockCount; }
+        bool hasUnloadExplicitLock() const { return i_unloadExplicitLock; }
+
         void setUnloadExplicitLock( bool on ) { i_unloadExplicitLock = on; }
         void incUnloadActiveLock() { ++i_unloadActiveLockCount; }
         void decUnloadActiveLock() { if (i_unloadActiveLockCount) --i_unloadActiveLockCount; }
@@ -127,6 +131,9 @@ class NGrid
         GridInfo* getGridInfoRef() { return &i_GridInfo; }
         const TimeTracker& getTimeTracker() const { return i_GridInfo.getTimeTracker(); }
         bool getUnloadLock() const { return i_GridInfo.getUnloadLock(); }
+        bool hasUnloadActiveLock() const { return i_GridInfo.hasUnloadActiveLock(); }
+        uint16 getUnloadActiveLockCount() const { return i_GridInfo.getUnloadActiveLockCount(); }
+        bool hasUnloadExplicitLock() const { return i_GridInfo.hasUnloadExplicitLock(); }
         void setUnloadExplicitLock(bool on) { i_GridInfo.setUnloadExplicitLock(on); }
         void incUnloadActiveLock() { i_GridInfo.incUnloadActiveLock(); }
         void decUnloadActiveLock() { i_GridInfo.decUnloadActiveLock(); }

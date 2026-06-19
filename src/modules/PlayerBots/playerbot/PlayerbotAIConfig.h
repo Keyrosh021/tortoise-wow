@@ -360,8 +360,13 @@ public:
     uint32 tweakValue; //Debugging config
     float respawnModNeutral, respawnModHostile;
     uint32 respawnModThreshold, respawnModMax;
-    uint32 respawnCorpseCloneMax;
     bool respawnModForPlayerBots, respawnModForInstances;
+    bool learningTelemetryEnabled;
+    uint32 learningTaskSampleIntervalMs;
+    uint32 learningFlushIntervalMs;
+    uint32 learningFlushMaxRows;
+    uint32 learningMaxQueue;
+    float learningCombatSampleRate;
 
     bool randomBotLoginWithPlayer;
     bool asyncBotLogin, preloadHolders;
@@ -387,9 +392,11 @@ public:
     std::mutex m_logMtx;
 
     std::list<std::string> allowedLogFiles;
+    std::list<std::string> excludedBotEvents;
     std::list<std::string> debugFilter;
 
     std::unordered_map <std::string, std::pair<FILE*, bool>> logFiles;
+    std::unordered_map <std::string, uint32> logFlushCounters;
 
     uint32 botCheatMask = 0;
     uint32 rndBotCheatMask = 0;
@@ -431,6 +438,7 @@ public:
     std::string GetTimestampStr();
 
     bool hasLog(std::string fileName) { return std::find(allowedLogFiles.begin(), allowedLogFiles.end(), fileName) != allowedLogFiles.end(); };
+    bool shouldLogBotEvent(const std::string& eventName) const;
     bool openLog(std::string fileName, char const* mode = "a", bool haslog = false);
     bool isLogOpen(std::string fileName) { auto it = logFiles.find(fileName); return it != logFiles.end() && it->second.second;}
     void log(std::string fileName, const char* str, ...);

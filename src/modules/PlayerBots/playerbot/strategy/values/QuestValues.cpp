@@ -6,8 +6,80 @@
 #include "playerbot/TravelMgr.h"
 #include "playerbot/strategy/deathknight/DKActions.h"
 
+#include <algorithm>
+#include <cctype>
+#include <vector>
+
 using namespace ai;
 
+namespace
+{
+    std::string LowerCopy(std::string text)
+    {
+        std::transform(text.begin(), text.end(), text.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return text;
+    }
+
+    std::vector<std::string> SignificantWords(std::string const& text)
+    {
+        std::vector<std::string> words;
+        std::string current;
+
+        for (unsigned char ch : text)
+        {
+            if (std::isalnum(ch))
+            {
+                current.push_back(static_cast<char>(std::tolower(ch)));
+                continue;
+            }
+
+            if (current.size() >= 4)
+                words.push_back(current);
+
+            current.clear();
+        }
+
+        if (current.size() >= 4)
+            words.push_back(current);
+
+        return words;
+    }
+
+    bool ItemNameSuggestsCreature(ItemPrototype const* proto, CreatureInfo const* cInfo)
+    {
+        if (!proto || !cInfo || proto->Name1.empty() || cInfo->name.empty())
+            return false;
+
+        std::string itemName = LowerCopy(proto->Name1);
+        std::string creatureName = LowerCopy(cInfo->name);
+
+        if (itemName.find(creatureName) != std::string::npos)
+            return true;
+
+        for (std::string const& word : SignificantWords(creatureName))
+        {
+            if (itemName.find(word) != std::string::npos)
+                return true;
+        }
+
+        return false;
+    }
+
+    bool HasSuggestedCreatureDropSource(ItemPrototype const* proto, std::list<int32> const& dropEntries)
+    {
+        for (int32 entry : dropEntries)
+        {
+            if (entry <= 0)
+                continue;
+
+            if (ItemNameSuggestsCreature(proto, sObjectMgr.GetCreatureTemplate(uint32(entry))))
+                return true;
+        }
+
+        return false;
+    }
+}
 
 //What kind of a relation does this entry have with this quest.
 EntryQuestRelationMap EntryQuestRelationMapValue::Calculate()
@@ -67,8 +139,15 @@ EntryQuestRelationMap EntryQuestRelationMapValue::Calculate()
 
 					if (proto)
 					{
-						for (auto& entry : GAI_VALUE2(std::list<int32>, "item drop list", itemId))
+						std::list<int32> dropList = GAI_VALUE2(std::list<int32>, "item drop list", itemId);
+						bool hasSuggestedCreatureDropSource = HasSuggestedCreatureDropSource(proto, dropList);
+
+						for (auto& entry : dropList)
 						{
+							if (hasSuggestedCreatureDropSource && entry > 0 &&
+							    !ItemNameSuggestsCreature(proto, sObjectMgr.GetCreatureTemplate(uint32(entry))))
+								continue;
+
 							std::string chanceQualifier = std::to_string(entry) + " " + std::to_string(itemId);
 							if (proto->Class == ITEM_CLASS_QUEST || GAI_VALUE2(float, "loot chance", chanceQualifier) > 5.0f)
 								rMap[entry][questId] |= relationFlag;
@@ -740,7 +819,8 @@ bool CanUseItemOn::Calculate()
 	if (!proto)
 		return false;
 
-	bool tryRandomCast = !urand(0, 20);
+	bool forceQuestObjectiveUse = getMultiQualifierStr(getQualifier(), 2, ",") == "force";
+	bool tryRandomCast = forceQuestObjectiveUse || !urand(0, 20);
 
 	uint32 spellId = proto->Spells[0].SpellId;
 	if (spellId)

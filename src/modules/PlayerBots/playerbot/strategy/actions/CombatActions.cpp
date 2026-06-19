@@ -9,7 +9,8 @@ using namespace ai;
 
 bool SwitchToMeleeAction::isUseful()
 {
-    return ai->HasStrategy("ranged", BotState::BOT_STATE_COMBAT);
+    return ai->HasStrategy("ranged", BotState::BOT_STATE_COMBAT) &&
+        !ai->HasStrategy("close", BotState::BOT_STATE_COMBAT);
 }
 
 bool SwitchToMeleeAction::Execute(Event &event)
@@ -25,7 +26,8 @@ bool SwitchToMeleeAction::Execute(Event &event)
 bool SwitchToRangedAction::isUseful()
 {
 
-    return ai->HasStrategy("close", BotState::BOT_STATE_COMBAT);
+    return ai->HasStrategy("close", BotState::BOT_STATE_COMBAT) &&
+        !ai->HasStrategy("ranged", BotState::BOT_STATE_COMBAT);
 }
 
 bool SwitchToRangedAction::Execute(Event &event)

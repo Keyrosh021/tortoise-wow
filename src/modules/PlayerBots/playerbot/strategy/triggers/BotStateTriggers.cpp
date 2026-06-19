@@ -35,5 +35,5 @@ bool DeathTrigger::IsActive()
 
 bool ResurrectTrigger::IsActive()
 {
-    return ai->IsStateActive(BotState::BOT_STATE_DEAD) && sServerFacade.IsAlive(bot);
+    return bot && ai->IsStateActive(BotState::BOT_STATE_DEAD) && bot->IsAlive();
 }

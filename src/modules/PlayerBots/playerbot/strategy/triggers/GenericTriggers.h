@@ -345,6 +345,7 @@ namespace ai
     public:
 		virtual Value<Unit*>* GetTargetValue() override;
 		virtual std::string getName() override { return spell + " on party"; }
+        virtual bool IsActive() override;
 
     protected:
         bool ignoreTanks;
@@ -411,7 +412,7 @@ namespace ai
     private:
         bool IsActive() override;
 
-    private:
+    protected:
         std::string targetsValue;
         bool aliveCheck;
         bool auraCheck;
@@ -424,6 +425,9 @@ namespace ai
         virtual bool IsTargetValid(Unit* target) override;
         virtual bool IsSpellReady() override;
         virtual uint32 GetItemId() = 0;
+
+    protected:
+        bool IsActive() override;
 
     private:
         bool itemAuraCheck;
@@ -894,6 +898,9 @@ namespace ai
 
         virtual bool IsActive() override
         {
+            if (!ai->HasRealPlayerMaster())
+                return false;
+
             return AI_VALUE2(Unit*, "party member without item", item) && AI_VALUE2(uint32, "item count", item);
         }
 
@@ -908,6 +915,9 @@ namespace ai
 
         virtual bool IsActive() override
         {
+            if (!ai->HasRealPlayerMaster())
+                return false;
+
             return AI_VALUE(Unit*, "party member without food") && AI_VALUE2(uint32, "item count", item);
         }
     };
@@ -919,6 +929,9 @@ namespace ai
 
         virtual bool IsActive() override
         {
+            if (!ai->HasRealPlayerMaster())
+                return false;
+
             return AI_VALUE(Unit*, "party member without water") && AI_VALUE2(uint32, "item count", item);
         }
     };

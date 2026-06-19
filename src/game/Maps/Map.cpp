@@ -813,6 +813,19 @@ void Map::UpdateSessionsMovementAndSpellsIfNeeded()
     m_lastMvtSpellsUpdate = WorldTimer::getMSTime();
 }
 
+bool Map::HasRealPlayersForContinentWait() const
+{
+    Map* map = const_cast<Map*>(this);
+    for (MapRefManager::iterator itr = map->m_mapRefManager.begin(); itr != map->m_mapRefManager.end(); ++itr)
+    {
+        Player* plr = itr->getSource();
+        if (plr && plr->IsInWorld() && plr->isRealPlayer())
+            return true;
+    }
+
+    return false;
+}
+
 void Map::UpdatePlayers()
 {
     uint32 now = WorldTimer::getMSTime();
@@ -821,6 +834,13 @@ void Map::UpdatePlayers()
     if (diff < sWorld.getConfig(CONFIG_UINT32_MAPUPDATE_UPDATE_PLAYERS_DIFF))
         return;
 
+    uint32 const updateStart = WorldTimer::getMSTime();
+    uint32 processedPlayers = 0;
+    uint32 skippedPlayers = 0;
+    uint32 processedBots = 0;
+    uint32 skippedBots = 0;
+    const uint32 pressure = PerfStats::GetBotPressureLevel();
+    const uint32 continentBotBudgetMs = pressure >= PerfStats::BOT_PRESSURE_CRITICAL ? 20u : (pressure >= PerfStats::BOT_PRESSURE_PRESSURE ? 30u : 45u);
     ++_inactivePlayersSkippedUpdates;
     bool updateInactivePlayers = _inactivePlayersSkippedUpdates > sWorld.getConfig(CONFIG_UINT32_INACTIVE_PLAYERS_SKIP_UPDATES);
     if (!IsContinent())
@@ -830,18 +850,35 @@ void Map::UpdatePlayers()
         Player* plr = m_mapRefIter->getSource();
         if (!plr || !plr->IsInWorld())
             continue;
-        if (!updateInactivePlayers && (!plr->IsInCombat() && !plr->GetSession()->HasRecentPacket(PACKET_PROCESS_SPELLS) && !plr->HasScheduledEvent()))
+        const bool isBot = plr->GetPlayerbotAI() || plr->GetPlayerbotMgr();
+        const bool lowUrgencyBot = isBot && !plr->isRealPlayer() && !plr->IsInCombat() &&
+            !plr->GetSession()->HasRecentPacket(PACKET_PROCESS_SPELLS) && !plr->HasScheduledEvent() &&
+            !plr->GetLootGuid() && !plr->IsTaxiFlying() && !plr->IsBeingTeleported() &&
+            !plr->IsNonMeleeSpellCasted(true) && !plr->isMovingOrTurning();
+        const bool overContinentBotBudget = IsContinent() && lowUrgencyBot &&
+            WorldTimer::getMSTimeDiffToNow(updateStart) >= continentBotBudgetMs;
+        if ((!updateInactivePlayers && (!plr->IsInCombat() && !plr->GetSession()->HasRecentPacket(PACKET_PROCESS_SPELLS) && !plr->HasScheduledEvent())) ||
+            overContinentBotBudget)
         {
             plr->AddSkippedUpdateTime(diff);
+            ++skippedPlayers;
+            if (isBot)
+                ++skippedBots;
             continue;
         }
+        ++processedPlayers;
+        if (isBot)
+            ++processedBots;
+        MapManager::SetContinentUpdatePhase("players", plr->GetGUIDLow());
         WorldObject::UpdateHelper helper(plr);
         helper.UpdateRealTime(now, diff + plr->GetSkippedUpdateTime());
         plr->ResetSkippedUpdateTime();
+        MapManager::SetContinentUpdatePhase("players");
     }
     if (updateInactivePlayers)
         _inactivePlayersSkippedUpdates = 0;
     _lastPlayersUpdate = now;
+    PerfStats::RecordUpdatePlayers(WorldTimer::getMSTimeDiffToNow(updateStart), processedPlayers, skippedPlayers, processedBots, skippedBots);
 }
 
 void Map::DoUpdate(uint32 maxDiff)
@@ -860,117 +897,201 @@ void Map::DoUpdate(uint32 maxDiff)
     if (diff2 > PerfStats::g_slowestMapUpdateTime)
     {
         PerfStats::g_slowestMapId = GetId();
+        PerfStats::g_slowestMapInstanceId = GetInstanceId();
         PerfStats::g_slowestMapUpdateTime = diff2;
+        PerfStats::g_slowestMapPlayers = m_lastUpdateTrace.playerCount;
+        PerfStats::g_slowestMapActiveNonPlayers = m_lastUpdateTrace.activeNonPlayers;
+        PerfStats::g_slowestMapPendingObjectUpdates = m_lastUpdateTrace.pendingObjectUpdates;
+        PerfStats::g_slowestMapPendingRelocations = m_lastUpdateTrace.pendingRelocations;
+        PerfStats::g_slowestMapWaitIterations = m_lastUpdateTrace.waitIterations;
+        PerfStats::g_slowestMapSessionsMs = m_lastUpdateTrace.sessionsMs;
+        PerfStats::g_slowestMapPlayersMs = m_lastUpdateTrace.playersMs;
+        PerfStats::g_slowestMapCellsMs = m_lastUpdateTrace.cellsMs;
+        PerfStats::g_slowestMapObjectsMs = m_lastUpdateTrace.objectUpdatesMs;
+        PerfStats::g_slowestMapRelocationMs = m_lastUpdateTrace.relocationMs;
+        PerfStats::g_slowestMapPlayers2Ms = m_lastUpdateTrace.playersPostVisibilityMs;
+        PerfStats::g_slowestMapWaitMs = m_lastUpdateTrace.waitMs;
+    }
+
+    uint32 const workDiff = diff2 > m_lastUpdateTrace.waitMs ? diff2 - m_lastUpdateTrace.waitMs : 0;
+    if (workDiff > static_cast<uint32>(PerfStats::g_slowestMapWorkTime))
+    {
+        PerfStats::g_slowestMapWorkId = GetId();
+        PerfStats::g_slowestMapWorkInstanceId = GetInstanceId();
+        PerfStats::g_slowestMapWorkTime = workDiff;
+        PerfStats::g_slowestMapWorkPlayers = m_lastUpdateTrace.playerCount;
+        PerfStats::g_slowestMapWorkActiveNonPlayers = m_lastUpdateTrace.activeNonPlayers;
+        PerfStats::g_slowestMapWorkPendingObjectUpdates = m_lastUpdateTrace.pendingObjectUpdates;
+        PerfStats::g_slowestMapWorkPendingRelocations = m_lastUpdateTrace.pendingRelocations;
+        PerfStats::g_slowestMapWorkWaitIterations = m_lastUpdateTrace.waitIterations;
+        PerfStats::g_slowestMapWorkSessionsMs = m_lastUpdateTrace.sessionsMs;
+        PerfStats::g_slowestMapWorkPlayersMs = m_lastUpdateTrace.playersMs;
+        PerfStats::g_slowestMapWorkCellsMs = m_lastUpdateTrace.cellsMs;
+        PerfStats::g_slowestMapWorkObjectsMs = m_lastUpdateTrace.objectUpdatesMs;
+        PerfStats::g_slowestMapWorkRelocationMs = m_lastUpdateTrace.relocationMs;
+        PerfStats::g_slowestMapWorkPlayers2Ms = m_lastUpdateTrace.playersPostVisibilityMs;
+        PerfStats::g_slowestMapWorkWaitMs = m_lastUpdateTrace.waitMs;
     }
 }
 
 void Map::Update(uint32 t_diff)
 {
     XScopeStatTimer ScopeStatTimer{ UpdateTimer };
+    MapManager::SetContinentUpdatePhase("begin");
     uint32 updateMapTime = WorldTimer::getMSTime();
     const uint32 playerCount = m_mapRefManager.getSize();
-    _dynamicTree.update(t_diff);
+    {
+        MapManager::SetContinentUpdatePhase("dyn-tree");
+        XScopeStatTimer phaseTimer{ DynamicTreePerfTimer };
+        _dynamicTree.update(t_diff);
+    }
 
+    MapManager::SetContinentUpdatePhase("packets-pre");
     UpdateSessionsMovementAndSpellsIfNeeded();
     /// update worldsessions for existing players
-    for (m_mapRefIter = m_mapRefManager.begin(); m_mapRefIter != m_mapRefManager.end(); ++m_mapRefIter)
     {
-        Player* plr = m_mapRefIter->getSource();
-        if (plr && plr->IsInWorld())
+        MapManager::SetContinentUpdatePhase("sessions");
+        XScopeStatTimer phaseTimer{ SessionPerfTimer };
+        for (m_mapRefIter = m_mapRefManager.begin(); m_mapRefIter != m_mapRefManager.end(); ++m_mapRefIter)
         {
-            WorldSession * pSession = plr->GetSession();
-            MapSessionFilter updater(pSession);
+            Player* plr = m_mapRefIter->getSource();
+            if (plr && plr->IsInWorld())
+            {
+                WorldSession* pSession = plr->GetSession();
+                MapSessionFilter updater(pSession);
 
-            pSession->Update(updater);
+                pSession->Update(updater);
+            }
         }
     }
     uint32 sessionsUpdateTime = WorldTimer::getMSTimeDiffToNow(updateMapTime);
 
     /// update players at tick
-    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    MapManager::SetContinentUpdatePhase("packets-players");
     UpdateSessionsMovementAndSpellsIfNeeded();
-    UpdatePlayers();
+    {
+        MapManager::SetContinentUpdatePhase("players");
+        XScopeStatTimer phaseTimer{ PlayersPerfTimer };
+        UpdatePlayers();
+    }
     uint32 playersUpdateTime = WorldTimer::getMSTimeDiffToNow(updateMapTime) - sessionsUpdateTime;
 
-    UpdateCells(t_diff);
+    {
+        MapManager::SetContinentUpdatePhase("cells");
+        XScopeStatTimer phaseTimer{ CellsPerfTimer };
+        UpdateCells(t_diff);
+    }
     uint32 activeCellsUpdateTime = WorldTimer::getMSTimeDiffToNow(updateMapTime) - playersUpdateTime - sessionsUpdateTime;
 
     // Send world objects and item update field changes
-    SendObjectUpdates();
+    {
+        MapManager::SetContinentUpdatePhase("object-updates");
+        XScopeStatTimer phaseTimer{ ObjectUpdatesPerfTimer };
+        SendObjectUpdates();
+    }
     uint32 objectsUpdateTime = WorldTimer::getMSTimeDiffToNow(updateMapTime) - activeCellsUpdateTime - playersUpdateTime - sessionsUpdateTime;
 
-    UpdateVisibilityForRelocations();
+    {
+        MapManager::SetContinentUpdatePhase("relocations");
+        XScopeStatTimer phaseTimer{ RelocationPerfTimer };
+        UpdateVisibilityForRelocations();
+    }
     uint32 visibilityUpdateTime = WorldTimer::getMSTimeDiffToNow(updateMapTime) - objectsUpdateTime - activeCellsUpdateTime - playersUpdateTime - sessionsUpdateTime;
 
+    MapManager::SetContinentUpdatePhase("packets-post");
     UpdateSessionsMovementAndSpellsIfNeeded();
-    UpdatePlayers();
+    {
+        MapManager::SetContinentUpdatePhase("players-post");
+        XScopeStatTimer phaseTimer{ PlayersPostVisibilityPerfTimer };
+        UpdatePlayers();
+    }
     uint32 playersUpdateTime2 = WorldTimer::getMSTimeDiffToNow(updateMapTime) - objectsUpdateTime - activeCellsUpdateTime - playersUpdateTime - sessionsUpdateTime - visibilityUpdateTime;
 
-    RemoveCorpses();
-    RemoveOldBones(t_diff);
+    {
+        MapManager::SetContinentUpdatePhase("corpses");
+        XScopeStatTimer phaseTimer{ CorpsePerfTimer };
+        RemoveCorpses();
+        RemoveOldBones(t_diff);
+    }
 
     updateMapTime = WorldTimer::getMSTimeDiffToNow(updateMapTime);
 
     uint32 additionnalWaitTime = 0;
     uint32 additionnalUpdateCounts = 0;
-    if (!Instanceable())
-    {
-        additionnalWaitTime = WorldTimer::getMSTime();
-        sMapMgr.MarkContinentUpdateFinished();
-        while (!sMapMgr.waitContinentUpdateFinishedUntil(start + std::chrono::milliseconds(sWorld.getConfig(CONFIG_UINT32_INTERVAL_MAPUPDATE))))
-        {
-            start = std::chrono::high_resolution_clock::now();
-            UpdateSessionsMovementAndSpellsIfNeeded();
-            UpdatePlayers();
-            ++additionnalUpdateCounts;
-        }
-        additionnalWaitTime = WorldTimer::getMSTimeDiffToNow(additionnalWaitTime);
-    }
     // Don't unload grids if it's battleground, since we may have manually added GOs,creatures, those doesn't load from DB at grid re-load !
     // This isn't really bother us, since as soon as we have instanced BG-s, the whole map unloads as the BG gets ended
     if (!IsBattleGround())
     {
-        for (GridRefManager<NGridType>::iterator i = GridRefManager<NGridType>::begin(); i != GridRefManager<NGridType>::end();)
         {
-            NGridType *grid = i->getSource();
-            GridInfo *info = i->getSource()->getGridInfoRef();
-            ++i;                                                // The update might delete the map and we need the next map before the iterator gets invalid
-            MANGOS_ASSERT(grid->GetGridState() >= 0 && grid->GetGridState() < MAX_GRID_STATE);
-            sMapMgr.UpdateGridState(grid->GetGridState(), *this, *grid, *info, grid->getX(), grid->getY(), t_diff);
+            MapManager::SetContinentUpdatePhase("grid-state");
+            XScopeStatTimer phaseTimer{ GridStatePerfTimer };
+            for (GridRefManager<NGridType>::iterator i = GridRefManager<NGridType>::begin(); i != GridRefManager<NGridType>::end();)
+            {
+                NGridType* grid = i->getSource();
+                GridInfo* info = i->getSource()->getGridInfoRef();
+                ++i;                                                // The update might delete the map and we need the next map before the iterator gets invalid
+                MANGOS_ASSERT(grid->GetGridState() >= 0 && grid->GetGridState() < MAX_GRID_STATE);
+                sMapMgr.UpdateGridState(grid->GetGridState(), *this, *grid, *info, grid->getX(), grid->getY(), t_diff);
+            }
         }
     }
 
     ///- Process necessary scripts
-    if (m_uiScriptedEventsTimer <= t_diff)
     {
-        UpdateScriptedEvents();
-        m_uiScriptedEventsTimer = 1000u;
-    }
-    else
-        m_uiScriptedEventsTimer -= t_diff;
+        MapManager::SetContinentUpdatePhase("scripts");
+        XScopeStatTimer phaseTimer{ ScriptsPerfTimer };
+        if (m_uiScriptedEventsTimer <= t_diff)
+        {
+            UpdateScriptedEvents();
+            m_uiScriptedEventsTimer = 1000u;
+        }
+        else
+            m_uiScriptedEventsTimer -= t_diff;
 
-    ScriptsProcess();
+        ScriptsProcess();
+    }
 
     if (i_data)
+    {
+        MapManager::SetContinentUpdatePhase("instance-data");
+        XScopeStatTimer phaseTimer{ InstanceDataPerfTimer };
         i_data->Update(t_diff);
+    }
 
-    m_weatherSystem->UpdateWeathers(t_diff);
+    {
+        MapManager::SetContinentUpdatePhase("weather");
+        XScopeStatTimer phaseTimer{ WeatherPerfTimer };
+        m_weatherSystem->UpdateWeathers(t_diff);
+    }
+
+    uint32 pendingObjectUpdates = 0;
+    {
+        std::lock_guard<std::mutex> lock(i_objectsToClientUpdate_lock);
+        pendingObjectUpdates = i_objectsToClientUpdate.size();
+    }
+
+    uint32 pendingRelocations = 0;
+    {
+        std::lock_guard<std::mutex> lock(i_unitsRelocated_lock);
+        pendingRelocations = i_unitsRelocated.size();
+    }
+
+    m_lastUpdateTrace.playerCount = playerCount;
+    m_lastUpdateTrace.activeNonPlayers = static_cast<uint32>(m_activeNonPlayers.size());
+    m_lastUpdateTrace.pendingObjectUpdates = pendingObjectUpdates;
+    m_lastUpdateTrace.pendingRelocations = pendingRelocations;
+    m_lastUpdateTrace.waitIterations = additionnalUpdateCounts;
+    m_lastUpdateTrace.sessionsMs = sessionsUpdateTime;
+    m_lastUpdateTrace.playersMs = playersUpdateTime;
+    m_lastUpdateTrace.cellsMs = activeCellsUpdateTime;
+    m_lastUpdateTrace.objectUpdatesMs = objectsUpdateTime;
+    m_lastUpdateTrace.relocationMs = visibilityUpdateTime;
+    m_lastUpdateTrace.playersPostVisibilityMs = playersUpdateTime2;
+    m_lastUpdateTrace.waitMs = additionnalWaitTime;
 
     bool packetBroadcastSlow = sWorld.GetBroadcaster()->IsMapSlow(GetInstanceId());
     if (sWorld.getConfig(CONFIG_UINT32_PERFLOG_SLOW_MAP_UPDATE) && updateMapTime > sWorld.getConfig(CONFIG_UINT32_PERFLOG_SLOW_MAP_UPDATE))
     {
-        uint32 pendingObjectUpdates = 0;
-        {
-            std::lock_guard<std::mutex> lock(i_objectsToClientUpdate_lock);
-            pendingObjectUpdates = i_objectsToClientUpdate.size();
-        }
-
-        uint32 pendingRelocations = 0;
-        {
-            std::lock_guard<std::mutex> lock(i_unitsRelocated_lock);
-            pendingRelocations = i_unitsRelocated.size();
-        }
-
         sLog.out(LOG_PERFORMANCE, "Update single map %3u inst %2u: %3ums "
             "[sess %3ums|players %3ums|cells %3ums|sendObjUpdates %3ums"
             "|relocations %3ums|players2 %3ums|wait%2u %3ums] "
@@ -1013,6 +1134,7 @@ void Map::Update(uint32 t_diff)
         }
     }
     m_updateFinished = true;
+    MapManager::SetContinentUpdatePhase("done");
 }
 
 void Map::UpdateScriptedEvents()
@@ -1804,7 +1926,7 @@ void Map::SendDefenseMessage(int32 textId, uint32 zoneId) const
     }
 }
 
-bool Map::ActiveObjectsNearGrid(uint32 x, uint32 y) const
+bool Map::HasPlayersNearGrid(uint32 x, uint32 y) const
 {
     MANGOS_ASSERT(x < MAX_NUMBER_OF_GRIDS);
     MANGOS_ASSERT(y < MAX_NUMBER_OF_GRIDS);
@@ -1831,6 +1953,25 @@ bool Map::ActiveObjectsNearGrid(uint32 x, uint32 y) const
             return true;
     }
 
+    return false;
+}
+
+bool Map::HasActiveNonPlayersNearGrid(uint32 x, uint32 y) const
+{
+    MANGOS_ASSERT(x < MAX_NUMBER_OF_GRIDS);
+    MANGOS_ASSERT(y < MAX_NUMBER_OF_GRIDS);
+
+    CellPair cell_min(x * MAX_NUMBER_OF_CELLS, y * MAX_NUMBER_OF_CELLS);
+    CellPair cell_max(cell_min.x_coord + MAX_NUMBER_OF_CELLS, cell_min.y_coord + MAX_NUMBER_OF_CELLS);
+
+    float viewDist = GetVisibilityDistance();
+    int cell_range = (int)ceilf(viewDist / SIZE_OF_GRID_CELL) + 1;
+
+    cell_min << cell_range;
+    cell_min -= cell_range;
+    cell_max >> cell_range;
+    cell_max += cell_range;
+
     for (const auto obj : m_activeNonPlayers)
     {
         CellPair p = MaNGOS::ComputeCellPair(obj->GetPositionX(), obj->GetPositionY());
@@ -1840,6 +1981,79 @@ bool Map::ActiveObjectsNearGrid(uint32 x, uint32 y) const
     }
 
     return false;
+}
+
+bool Map::ActiveObjectsNearGrid(uint32 x, uint32 y) const
+{
+    return HasPlayersNearGrid(x, y) || HasActiveNonPlayersNearGrid(x, y);
+}
+
+Map::GridUnloadDiagnostics Map::CollectGridUnloadDiagnostics() const
+{
+    GridUnloadDiagnostics diagnostics;
+    Map* self = const_cast<Map*>(this);
+
+    for (auto itr = self->begin(); itr != self->end(); ++itr)
+    {
+        NGridType const* grid = itr->getSource();
+        if (!grid)
+            continue;
+
+        ++diagnostics.loadedGrids;
+
+        switch (grid->GetGridState())
+        {
+            case GRID_STATE_ACTIVE:
+                ++diagnostics.activeStateGrids;
+                break;
+            case GRID_STATE_IDLE:
+                ++diagnostics.idleStateGrids;
+                break;
+            case GRID_STATE_REMOVAL:
+                ++diagnostics.removalStateGrids;
+                break;
+            default:
+                break;
+        }
+
+        if (grid->getUnloadLock())
+            ++diagnostics.unloadLockedGrids;
+
+        if (grid->hasUnloadExplicitLock())
+            ++diagnostics.unloadExplicitLockedGrids;
+
+        if (grid->hasUnloadActiveLock())
+        {
+            ++diagnostics.unloadActiveLockedGrids;
+            diagnostics.unloadActiveLockRefs += grid->getUnloadActiveLockCount();
+        }
+
+        if (grid->ActiveObjectsInGrid() > 0)
+            ++diagnostics.activeObjectsInGrid;
+
+        const bool nearPlayers = HasPlayersNearGrid(grid->getX(), grid->getY());
+        const bool nearActiveNonPlayers = HasActiveNonPlayersNearGrid(grid->getX(), grid->getY());
+        if (nearPlayers)
+            ++diagnostics.nearPlayers;
+        if (nearActiveNonPlayers)
+            ++diagnostics.nearActiveNonPlayers;
+        if (nearPlayers || nearActiveNonPlayers)
+            ++diagnostics.nearAny;
+    }
+
+    return diagnostics;
+}
+
+uint32 Map::GetPendingObjectUpdateCount() const
+{
+    std::lock_guard<std::mutex> lock(i_objectsToClientUpdate_lock);
+    return static_cast<uint32>(i_objectsToClientUpdate.size());
+}
+
+uint32 Map::GetPendingRelocationCount() const
+{
+    std::lock_guard<std::mutex> lock(i_unitsRelocated_lock);
+    return static_cast<uint32>(i_unitsRelocated.size());
 }
 
 void Map::AddToActive(WorldObject* obj)

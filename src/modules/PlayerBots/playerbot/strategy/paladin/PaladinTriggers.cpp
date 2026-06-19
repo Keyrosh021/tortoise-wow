@@ -149,6 +149,9 @@ bool GreaterBlessingTrigger::IsActive()
 
 bool BlessingOnPartyTrigger::IsActive()
 {
+    if (!bot->GetGroup())
+        return false;
+
     std::vector<std::string> altBlessings;
     std::vector<std::string> haveBlessings;
     altBlessings.push_back("blessing of might");
@@ -193,6 +196,9 @@ bool BlessingOnPartyTrigger::IsActive()
 
 bool GreaterBlessingOnPartyTrigger::IsActive()
 {
+    if (!bot->GetGroup())
+        return false;
+
     if (!bot->GetMap()->IsDungeon() && !bot->GetMap()->IsBattleGround())
         return false;
 

@@ -3,6 +3,8 @@
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/SharedValueContext.h"
+#include <mutex>
+#include <unordered_map>
 
 using namespace ai;
 
@@ -10,6 +12,27 @@ using namespace ai;
 
 namespace
 {
+    static constexpr time_t PLAYERBOT_EMPTY_LOOT_RETRY_DELAY = 30;
+    static constexpr time_t PLAYERBOT_FOREIGN_LOOT_RETRY_DELAY = 30;
+    static std::mutex s_suppressedLootGuidsMutex;
+    static std::unordered_map<uint64, time_t> s_suppressedLootGuids;
+
+    std::string GetLootSkipQualifier(ObjectGuid guid)
+    {
+        return "loot skip::" + std::to_string(guid.GetRawValue());
+    }
+
+    void PruneSuppressedLootGuidsLocked(time_t now)
+    {
+        for (auto itr = s_suppressedLootGuids.begin(); itr != s_suppressedLootGuids.end();)
+        {
+            if (itr->second <= now)
+                itr = s_suppressedLootGuids.erase(itr);
+            else
+                ++itr;
+        }
+    }
+
     bool IsSurvivalWoodLock(uint32 lockId)
     {
         switch (lockId)
@@ -36,6 +59,74 @@ namespace
             go->GetName() == "Star Wood Tree" ||
             go->GetName() == "Dead Wood Tree");
     }
+
+    void LogLootRejection(Player* bot, ObjectGuid guid, const std::string& reason)
+    {
+        if (!bot || !sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            return;
+
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai)
+            return;
+
+        sPlayerbotAIConfig.logEvent(ai, "LootRejected", std::to_string(guid.GetCounter()), reason);
+    }
+
+}
+
+bool ai::IsLootGuidSuppressed(ObjectGuid guid)
+{
+    if (!guid)
+        return false;
+
+    const time_t now = time(0);
+    std::lock_guard<std::mutex> guard(s_suppressedLootGuidsMutex);
+    PruneSuppressedLootGuidsLocked(now);
+
+    auto itr = s_suppressedLootGuids.find(guid.GetRawValue());
+    return itr != s_suppressedLootGuids.end() && itr->second > now;
+}
+
+void ai::SuppressLootGuid(ObjectGuid guid, time_t until)
+{
+    if (!guid)
+        return;
+
+    std::lock_guard<std::mutex> guard(s_suppressedLootGuidsMutex);
+    PruneSuppressedLootGuidsLocked(time(0));
+    s_suppressedLootGuids[guid.GetRawValue()] = until;
+}
+
+bool ai::IsLootGuidSkippedForBot(Player* bot, ObjectGuid guid)
+{
+    if (!bot || !guid)
+        return false;
+
+    if (IsLootGuidSuppressed(guid))
+        return true;
+
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai)
+        return false;
+
+    return ai->GetAiObjectContext()->GetValue<time_t>("manual time", GetLootSkipQualifier(guid))->Get() > time(0);
+}
+
+void ai::DeferLootGuidForBot(Player* bot, ObjectGuid guid, time_t delaySeconds)
+{
+    if (!bot || !guid || !delaySeconds)
+        return;
+
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai)
+        return;
+
+    ai->GetAiObjectContext()->GetValue<time_t>("manual time", GetLootSkipQualifier(guid))->Set(time(0) + delaySeconds);
+}
+
+void ai::DeferForeignLootGuidForBot(Player* bot, ObjectGuid guid)
+{
+    DeferLootGuidForBot(bot, guid, PLAYERBOT_FOREIGN_LOOT_RETRY_DELAY);
 }
 
 LootTarget::LootTarget(ObjectGuid guid) : guid(guid), asOfTime(time(0))
@@ -263,6 +354,10 @@ bool LootObject::IsLootPossible(Player* bot)
         return false;
 
     PlayerbotAI* ai = bot->GetPlayerbotAI();
+    AiObjectContext* context = ai->GetAiObjectContext();
+
+    if (IsLootGuidSkippedForBot(bot, guid))
+        return false;
 
     if (reqItem && !bot->HasItemCount(reqItem, 1))
         return false;
@@ -272,13 +367,39 @@ bool LootObject::IsLootPossible(Player* bot)
         Creature* creature = ai->GetCreature(guid);
         if (creature && sServerFacade.GetDeathState(creature) == CORPSE)
         {
+            if (skillId != SKILL_SKINNING && !bot->IsAllowedToLoot(creature))
+            {
+                DeferForeignLootGuidForBot(bot, guid);
+
+                std::ostringstream out;
+                out << "type=creature reason=not_allowed_looter"
+                    << " target=" << creature->GetName()
+                    << " tapped=" << (creature->HasLootRecipient() ? 1 : 0)
+                    << " recipient=" << creature->GetLootRecipientGuid().GetCounter()
+                    << " retry=" << uint32(PLAYERBOT_FOREIGN_LOOT_RETRY_DELAY)
+                    << " groupRecipient=" << creature->GetLootGroupRecipientId();
+                LogLootRejection(bot, guid, out.str());
+                return false;
+            }
+
             if (creature->m_loot && skillId != SKILL_SKINNING)
-                if (!creature->m_loot->CanLoot(bot))
+            {
+                if (!creature->m_loot->IsAllowedLooter(bot->GetObjectGuid()))
+                {
+                    DeferForeignLootGuidForBot(bot, guid);
+
+                    std::ostringstream out;
+                    out << "type=creature reason=loot_not_reserved_for_bot"
+                        << " target=" << creature->GetName()
+                        << " recipient=" << creature->GetLootRecipientGuid().GetCounter()
+                        << " retry=" << uint32(PLAYERBOT_FOREIGN_LOOT_RETRY_DELAY)
+                        << " groupRecipient=" << creature->GetLootGroupRecipientId();
+                    LogLootRejection(bot, guid, out.str());
                     return false;
+                }
+            }
         }
     }
-
-    AiObjectContext* context = ai->GetAiObjectContext();
 
     if (!AI_VALUE2_LAZY(bool, "should loot object", std::to_string(guid.GetRawValue())))
         return false;
@@ -357,6 +478,9 @@ bool LootObject::IsLootPossible(Player* bot)
 
 bool LootObjectStack::Add(ObjectGuid guid)
 {
+    if (IsLootGuidSkippedForBot(bot, guid))
+        return false;
+
     if (!availableLoot.insert(guid).second)
         return false;
 

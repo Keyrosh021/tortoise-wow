@@ -17,11 +17,35 @@ using namespace ai;
 namespace
 {
     static constexpr float PLAYERBOT_STRICT_LOOT_RANGE = 2.0f;
+    static constexpr time_t PLAYERBOT_EMPTY_LOOT_RETRY_DELAY = 30;
+    static constexpr time_t PLAYERBOT_GO_OPEN_RETRY_DELAY = 10;
 
-    void ClearActiveLootState(Player* bot)
+    std::string GetLootSkipQualifier(ObjectGuid guid)
+    {
+        return "loot skip::" + std::to_string(guid.GetRawValue());
+    }
+
+    void LogLootTrace(PlayerbotAI* ai, Player* bot, const char* eventName, ObjectGuid guid, const std::string& details)
+    {
+        if (!ai || !bot || !sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            return;
+
+        std::ostringstream out;
+        out << "lootGuid=" << guid.GetCounter()
+            << " botLootGuid=" << bot->GetLootGuid().GetCounter()
+            << " lootingFlag=" << (bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING) ? 1 : 0)
+            << " standState=" << uint32(bot->getStandState())
+            << " " << details;
+        sPlayerbotAIConfig.logEvent(ai, eventName, std::to_string(guid.GetCounter()), out.str());
+    }
+
+    void ClearActiveLootState(PlayerbotAI* ai, Player* bot, ObjectGuid contextGuid = ObjectGuid())
     {
         if (!bot)
             return;
+
+        const ObjectGuid previousLootGuid = bot->GetLootGuid();
+        const bool hadLootingFlag = bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING);
 
         if (WorldSession* session = bot->GetSession())
         {
@@ -34,6 +58,14 @@ namespace
 
         if (!bot->IsStandState())
             bot->SetStandState(UNIT_STAND_STATE_STAND);
+
+        if (previousLootGuid || hadLootingFlag)
+        {
+            const ObjectGuid traceGuid = contextGuid ? contextGuid : previousLootGuid;
+            LogLootTrace(ai, bot, "LootClearState", traceGuid,
+                "releasedPrevious=" + std::to_string(previousLootGuid.GetCounter()) +
+                " hadLootingFlag=" + std::to_string(hadLootingFlag ? 1 : 0));
+        }
     }
 
     bool HasAttachedLiveTarget(PlayerbotAI* ai, Player* bot, Unit* currentTarget)
@@ -43,6 +75,14 @@ namespace
 
         const ObjectGuid targetGuid = currentTarget->GetObjectGuid();
         return bot->GetVictim() == currentTarget || bot->GetSelectionGuid() == targetGuid;
+    }
+
+    bool HasLiveHostileTarget(Player* bot, Unit* currentTarget)
+    {
+        if (!bot || !currentTarget || !currentTarget->IsInWorld() || sServerFacade.UnitIsDead(currentTarget))
+            return false;
+
+        return bot->IsValidAttackTarget(currentTarget) && sServerFacade.IsHostileTo(bot, currentTarget);
     }
 
     bool HasActiveCombatPressure(PlayerbotAI* ai, Player* bot, Unit* currentTarget)
@@ -63,7 +103,110 @@ namespace
         if (aiContext->GetValue<bool>("has attackers")->Get())
             return true;
 
+        // Bots can keep a living hostile "current target" while the generic combat flag
+        // has already dropped. Treat that as combat pressure too so they do not kneel,
+        // loot, or stay visually stuck in a loot animation mid-fight.
+        if (HasLiveHostileTarget(bot, currentTarget))
+            return true;
+
         return false;
+    }
+
+    bool ShouldUseQuestGameObjectDirectly(Player* bot, GameObject* go)
+    {
+        if (!bot || !go || !go->IsInWorld() || go->GetMapId() != bot->GetMapId())
+            return false;
+
+        if (!sObjectMgr.IsGameObjectForQuests(go->GetEntry()) || !go->ActivateToQuest(bot))
+            return false;
+
+        switch (go->GetGoType())
+        {
+            case GAMEOBJECT_TYPE_GOOBER:
+            case GAMEOBJECT_TYPE_GENERIC:
+            case GAMEOBJECT_TYPE_SPELL_FOCUS:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool IsDisposableForQuestLoot(Player* bot, Item* item)
+    {
+        if (!bot || !item)
+            return false;
+
+        ItemPrototype const* proto = item->GetProto();
+        if (!proto)
+            return false;
+
+        if (proto->Quality > ITEM_QUALITY_POOR)
+            return false;
+
+        if (proto->Class == ITEM_CLASS_QUEST || proto->Bonding == BIND_QUEST_ITEM || proto->Bonding == BIND_QUEST_ITEM1)
+            return false;
+
+        if (ItemUsageValue::IsNeededForQuest(bot, item->GetEntry()))
+            return false;
+
+        return true;
+    }
+
+    bool FreeJunkSlotForQuestLoot(PlayerbotAI* ai, Player* bot, uint32 questItemId, ObjectGuid lootGuid)
+    {
+        if (!bot)
+            return false;
+
+        auto destroyIfDisposable = [&](uint8 bag, uint8 slot) -> bool
+        {
+            Item* item = bot->GetItemByPos(bag, slot);
+            if (!IsDisposableForQuestLoot(bot, item))
+                return false;
+
+            ItemPrototype const* proto = item->GetProto();
+            uint32 entry = item->GetEntry();
+            uint32 count = item->GetCount();
+            std::string name = proto ? proto->Name1 : std::to_string(entry);
+
+            bot->DestroyItem(bag, slot, true);
+
+            LogLootTrace(ai, bot, "QuestLootFreedJunkSlot", lootGuid,
+                "questItem=" + std::to_string(questItemId) +
+                " destroyedItem=" + std::to_string(entry) +
+                " destroyedName=" + name +
+                " count=" + std::to_string(count));
+            return true;
+        };
+
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        {
+            if (destroyIfDisposable(INVENTORY_SLOT_BAG_0, slot))
+                return true;
+        }
+
+        for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+        {
+            Bag* bag = dynamic_cast<Bag*>(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot));
+            if (!bag)
+                continue;
+
+            for (uint8 slot = 0; slot < bag->GetBagSize(); ++slot)
+            {
+                if (destroyIfDisposable(bagSlot, slot))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool CanStoreLootItem(Player* bot, uint32 itemId, uint32 itemCount)
+    {
+        if (!bot)
+            return false;
+
+        ItemPosCountVec dest;
+        return bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, itemId, itemCount) == EQUIP_ERR_OK;
     }
 
     bool IsSurvivalWoodLock(uint32 lockId)
@@ -88,7 +231,7 @@ bool LootAction::Execute(Event& event)
     Unit* currentTarget = AI_VALUE(Unit*, "current target");
     if (HasActiveCombatPressure(ai, bot, currentTarget))
     {
-        ClearActiveLootState(bot);
+        ClearActiveLootState(ai, bot);
         context->GetValue<LootObject>("loot target")->Set(LootObject());
 
         if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
@@ -142,7 +285,7 @@ bool OpenLootAction::Execute(Event& event)
     Unit* currentTarget = AI_VALUE(Unit*, "current target");
     if (HasActiveCombatPressure(ai, bot, currentTarget))
     {
-        ClearActiveLootState(bot);
+        ClearActiveLootState(ai, bot);
         context->GetValue<LootObject>("loot target")->Set(LootObject());
 
         if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
@@ -158,10 +301,31 @@ bool OpenLootAction::Execute(Event& event)
     }
 
     LootObject lootObject = AI_VALUE(LootObject, "loot target");
+    if (lootObject.IsEmpty())
+    {
+        ClearActiveLootState(ai, bot);
+        context->GetValue<LootObject>("loot target")->Set(LootObject());
+        return false;
+    }
+
     bool result = DoLoot(lootObject);
     if (result)
     {
-        AI_VALUE(LootObjectStack*, "available loot")->Remove(lootObject.guid);
+        // If opening a GO synchronously put the bot into a loot session, keep the
+        // target around until StoreLootAction drains and releases it. Forgetting it
+        // here can leave chests/quest objects stuck in GO_ACTIVATED/"in use" state
+        // if the packet action is delayed or interrupted.
+        if (bot->GetLootGuid() == lootObject.guid || bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING))
+            SetDuration(sPlayerbotAIConfig.lootDelay);
+        else
+        {
+            AI_VALUE(LootObjectStack*, "available loot")->Remove(lootObject.guid);
+            context->GetValue<LootObject>("loot target")->Set(LootObject());
+        }
+    }
+    else if (!lootObject.IsLootPossible(bot))
+    {
+        ClearActiveLootState(ai, bot, lootObject.guid);
         context->GetValue<LootObject>("loot target")->Set(LootObject());
     }
     return result;
@@ -170,7 +334,10 @@ bool OpenLootAction::Execute(Event& event)
 bool OpenLootAction::DoLoot(LootObject& lootObject)
 {
     if (lootObject.IsEmpty())
+    {
+        ClearActiveLootState(ai, bot);
         return false;
+    }
 
     Creature* creature = ai->GetCreature(lootObject.guid);
     if (creature && sServerFacade.GetDistance2d(bot, creature) > PLAYERBOT_STRICT_LOOT_RANGE)
@@ -208,6 +375,9 @@ bool OpenLootAction::DoLoot(LootObject& lootObject)
         packet << lootObject.guid;
         bot->GetSession()->HandleLootOpcode(packet);
         SetDuration(sPlayerbotAIConfig.lootDelay);
+
+        LogLootTrace(ai, bot, "LootOpenDispatch", lootObject.guid,
+            "type=creature dist=" + std::to_string(sServerFacade.GetDistance2d(bot, creature)));
 
         if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
         {
@@ -267,6 +437,36 @@ bool OpenLootAction::DoLoot(LootObject& lootObject)
     if (go && (go->IsInUse() || go->GetGoState() == GO_STATE_ACTIVE))
         return false;
 
+    if (ShouldUseQuestGameObjectDirectly(bot, go))
+    {
+        if (!go->IsAtInteractDistance(bot) || !go->PlayerCanUse(bot))
+        {
+            LogLootTrace(ai, bot, "QuestGoUseRejected", lootObject.guid,
+                std::string("target=") + go->GetName() +
+                " type=" + std::to_string(uint32(go->GetGoType())) +
+                " state=" + std::to_string(uint32(go->GetGoState())) +
+                " lootState=" + std::to_string(uint32(go->getLootState())) +
+                " dist=" + std::to_string(sServerFacade.GetDistance2d(bot, go)) +
+                " interact=" + std::to_string(go->IsAtInteractDistance(bot) ? 1 : 0) +
+                " playerCanUse=" + std::to_string(go->PlayerCanUse(bot) ? 1 : 0));
+            return false;
+        }
+
+        WorldPacket packet(CMSG_GAMEOBJ_USE, 8);
+        packet << lootObject.guid;
+        bot->GetSession()->HandleGameObjectUseOpcode(packet);
+        SetDuration(sPlayerbotAIConfig.lootDelay);
+
+        LogLootTrace(ai, bot, "QuestGoUseDispatch", lootObject.guid,
+            std::string("target=") + go->GetName() +
+            " type=" + std::to_string(uint32(go->GetGoType())) +
+            " state=" + std::to_string(uint32(go->GetGoState())) +
+            " lootState=" + std::to_string(uint32(go->getLootState())) +
+            " dist=" + std::to_string(sServerFacade.GetDistance2d(bot, go)));
+
+        return true;
+    }
+
     if (lootObject.skillId == SKILL_MINING)
         return ai->HasSkill(SKILL_MINING) ? ai->CastSpell(MINING, bot) : false;
 
@@ -323,7 +523,25 @@ bool OpenLootAction::DoLoot(LootObject& lootObject)
         sPlayerbotAIConfig.logEvent(ai, "LootOpenTrace", std::to_string(lootObject.guid.GetCounter()), out.str());
     }
 
-    return ai->CastSpell(spellId, bot);
+    LogLootTrace(ai, bot, "LootOpenDispatch", lootObject.guid,
+        "type=gameobject spellId=" + std::to_string(spellId));
+
+    const bool castStarted = ai->CastSpell(spellId, go);
+    if (!castStarted)
+        return false;
+
+    if (!bot->GetLootGuid() && !bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING))
+    {
+        DeferLootGuidForBot(bot, lootObject.guid, PLAYERBOT_GO_OPEN_RETRY_DELAY);
+        AI_VALUE(LootObjectStack*, "available loot")->Remove(lootObject.guid);
+        RESET_AI_VALUE2(bool, "should loot object", std::to_string(lootObject.guid.GetRawValue()));
+
+        LogLootTrace(ai, bot, "LootOpenNoImmediateResponse", lootObject.guid,
+            "type=gameobject spellId=" + std::to_string(spellId) +
+            " suppressFor=" + std::to_string(uint32(PLAYERBOT_GO_OPEN_RETRY_DELAY)));
+    }
+
+    return true;
 }
 
 uint32 OpenLootAction::GetOpeningSpell(LootObject& lootObject)
@@ -332,6 +550,7 @@ uint32 OpenLootAction::GetOpeningSpell(LootObject& lootObject)
     if (go && sServerFacade.isSpawned(go))
         return GetOpeningSpell(lootObject, go);
 
+    ClearActiveLootState(ai, bot, lootObject.guid);
     return 0;
 }
 
@@ -488,7 +707,39 @@ bool StoreLootAction::Execute(Event& event)
     Loot* loot = sLootMgr.GetLoot(bot);
 
     if (!loot)
+    {
+        const time_t suppressUntil = time(0) + PLAYERBOT_EMPTY_LOOT_RETRY_DELAY;
+        SET_AI_VALUE2(time_t, "manual time", GetLootSkipQualifier(guid), suppressUntil);
+        SuppressLootGuid(guid, suppressUntil);
+
+        LogLootTrace(ai, bot, "StoreLootMissingLoot", guid,
+            "lootType=" + std::to_string(uint32(loot_type)) +
+            " gold=" + std::to_string(gold) +
+            " items=" + std::to_string(uint32(items)) +
+            " suppressFor=" + std::to_string(uint32(PLAYERBOT_EMPTY_LOOT_RETRY_DELAY)));
+
+        AI_VALUE(LootObjectStack*, "available loot")->Remove(guid);
+        RESET_AI_VALUE(LootObject, "loot target");
+        RESET_AI_VALUE2(bool, "should loot object", std::to_string(guid.GetRawValue()));
+        bot->SetLootGuid(ObjectGuid());
+        ClearActiveLootState(ai, bot, guid);
+
+        WorldPacket packet(CMSG_LOOT_RELEASE, 8);
+        packet << guid;
+        bot->GetSession()->HandleLootReleaseOpcode(packet);
+
+        LogLootTrace(ai, bot, "StoreLootReleased", guid,
+            "accelerateRespawn=0 reason=missing-loot suppressUntil=" + std::to_string(uint32(suppressUntil)));
         return false;
+    }
+
+    uint32 lootedItems = 0;
+    uint32 skippedSlotType = 0;
+    uint32 skippedStrategy = 0;
+    uint32 skippedSpace = 0;
+    uint32 skippedProto = 0;
+    uint32 skippedMissingSlot = 0;
+    uint32 skippedBlocked = 0;
 
     if (gold > 0)
     {
@@ -515,31 +766,71 @@ bool StoreLootAction::Execute(Event& event)
 
         ItemQualifier itemQualifier(itemid, ((int32)randomPropertyId));
 
-		if (lootslot_type != LOOT_SLOT_NORMAL
+        if (lootslot_type != LOOT_SLOT_NORMAL
 #ifndef MANGOSBOT_ZERO
 		        && lootslot_type != LOOT_SLOT_OWNER
 #endif
             )
+        {
+            ++skippedSlotType;
 			continue;
+        }
 
-        if (loot_type != LOOT_SKINNING && !IsLootAllowed(itemQualifier, ai))
-            continue;
+        bool isGameObjectLoot = guid.IsGameObject();
+        bool isQuestRequired = ItemUsageValue::IsNeededForQuest(bot, itemid);
 
-        if (AI_VALUE2(uint32, "stack space for item", itemid) < itemcount)
+        // Bots must drain gameobject loot they open. Leaving a skipped item in a
+        // chest/quest object makes core keep the GO activated and future users see
+        // "That is already being used." Corpse loot can still follow bot strategy.
+        if (!isGameObjectLoot && loot_type != LOOT_SKINNING && !IsLootAllowed(itemQualifier, ai))
+        {
+            ++skippedStrategy;
             continue;
+        }
 
         ItemPrototype const *proto = sItemStorage.LookupEntry<ItemPrototype>(itemid);
         if (!proto)
+        {
+            ++skippedProto;
             continue;
+        }
 
-        LootItem* lootItem = loot->GetLootItemInSlot(itemindex);
+        if (!CanStoreLootItem(bot, itemid, itemcount))
+        {
+            bool freedSlot = (isQuestRequired || isGameObjectLoot) && FreeJunkSlotForQuestLoot(ai, bot, itemid, guid);
+
+            if (!CanStoreLootItem(bot, itemid, itemcount))
+            {
+                ++skippedSpace;
+                LogLootTrace(ai, bot, "StoreLootSkippedSpace", guid,
+                    "item=" + std::to_string(itemid) +
+                    " name=" + proto->Name1 +
+                    " count=" + std::to_string(itemcount) +
+                    " questRequired=" + std::to_string(isQuestRequired ? 1 : 0) +
+                    " gameObjectLoot=" + std::to_string(isGameObjectLoot ? 1 : 0) +
+                    " freedSlot=" + std::to_string(freedSlot ? 1 : 0));
+                continue;
+            }
+        }
+
+        QuestItem* qitem = nullptr;
+        QuestItem* ffaitem = nullptr;
+        QuestItem* conditem = nullptr;
+        LootItem* lootItem = loot->LootItemInSlot(itemindex, bot->GetGUIDLow(), &qitem, &ffaitem, &conditem);
 
         if (!lootItem)
+        {
+            ++skippedMissingSlot;
             continue;
+        }
 
-        //have no right to loot
-        if (lootItem->is_blocked || lootItem->GetSlotTypeForSharedLoot(ALL_PERMISSION, bot, loot ? loot->GetLootTarget() : nullptr) == MAX_LOOT_SLOT_TYPE)
+        // Match WorldSession::HandleAutostoreLootItemOpcode so virtual quest/FFA
+        // slots are not mistaken for missing raw item slots.
+        if (!lootItem->AllowedForPlayer(bot, loot->GetLootTarget()) || (!qitem && lootItem->is_blocked))
+        {
+            ++skippedBlocked;
             continue;
+        }
 
         Player* master = ai->GetMaster();
         if (sRandomPlayerbotMgr.IsRandomBot(bot) && master)
@@ -566,16 +857,33 @@ bool StoreLootAction::Execute(Event& event)
         sPlayerbotAIConfig.logEvent(ai, "StoreLootAction", proto->Name1, std::to_string(proto->ItemId));
 
         BroadcastHelper::BroadcastLootingItem(ai, bot, proto, itemQualifier);
+        ++lootedItems;
     }
+
+    LogLootTrace(ai, bot, "StoreLootSummary", guid,
+        "lootType=" + std::to_string(uint32(loot_type)) +
+        " gold=" + std::to_string(gold) +
+        " items=" + std::to_string(uint32(items)) +
+        " looted=" + std::to_string(lootedItems) +
+        " skippedSlotType=" + std::to_string(skippedSlotType) +
+        " skippedStrategy=" + std::to_string(skippedStrategy) +
+        " skippedSpace=" + std::to_string(skippedSpace) +
+        " skippedProto=" + std::to_string(skippedProto) +
+        " skippedMissingSlot=" + std::to_string(skippedMissingSlot) +
+        " skippedBlocked=" + std::to_string(skippedBlocked));
 
     AI_VALUE(LootObjectStack*, "available loot")->Remove(guid);
     RESET_AI_VALUE(LootObject, "loot target");
     RESET_AI_VALUE2(bool, "should loot object", std::to_string(guid.GetRawValue()));
+    bot->SetLootGuid(ObjectGuid());
+    ClearActiveLootState(ai, bot, guid);
 
     // release loot
     WorldPacket packet(CMSG_LOOT_RELEASE, 8);
     packet << guid;
     bot->GetSession()->HandleLootReleaseOpcode(packet);
+
+    LogLootTrace(ai, bot, "StoreLootReleased", guid, "accelerateRespawn=1");
 
     ai->AccelerateRespawn(guid);
 
@@ -645,6 +953,7 @@ bool StoreLootAction::IsLootAllowed(ItemQualifier& itemQualifier, PlayerbotAI *a
 
 bool ReleaseLootAction::Execute(Event& event)
 {
+    ObjectGuid previousLootGuid = bot->GetLootGuid();
     std::list<ObjectGuid> gos = context->GetValue<std::list<ObjectGuid> >("nearest game objects no los")->Get();
     for (std::list<ObjectGuid>::iterator i = gos.begin(); i != gos.end(); i++)
     {
@@ -662,5 +971,8 @@ bool ReleaseLootAction::Execute(Event& event)
     }
 
     bot->SetLootGuid(ObjectGuid());
+    LogLootTrace(ai, bot, "ReleaseLootSweep", previousLootGuid,
+        "gameobjects=" + std::to_string(gos.size()) +
+        " corpses=" + std::to_string(corpses.size()));
     return true;
 }

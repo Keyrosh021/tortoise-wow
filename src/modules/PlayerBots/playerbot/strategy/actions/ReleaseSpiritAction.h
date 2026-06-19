@@ -6,9 +6,43 @@
 #include "playerbot/strategy/values/LastMovementValue.h"
 #include "ReviveFromCorpseAction.h"
 #include "playerbot/TravelMgr.h"
+#include <sstream>
+#include <unordered_map>
 
 namespace ai
 {
+    namespace
+    {
+        struct AutoReleaseProgress
+        {
+            time_t startTime = 0;
+            time_t lastAttemptTime = 0;
+        };
+
+        static std::unordered_map<uint32, AutoReleaseProgress> sAutoReleaseProgress;
+
+        bool ForceBotSpiritRelease(PlayerbotAI* ai, Player* bot, const char* eventName)
+        {
+            if (!ai || !bot || sServerFacade.IsAlive(bot))
+                return false;
+
+            if (bot->GetDeathState() == JUST_DIED)
+                bot->KillPlayer();
+
+            if (!bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+                bot->BuildPlayerRepop();
+
+            if (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+            {
+                bot->RepopAtGraveyard();
+                sPlayerbotAIConfig.logEvent(ai, eventName);
+                return true;
+            }
+
+            return false;
+        }
+    }
+
     class ReleaseSpiritAction : public ChatCommandAction
     {
     public:
@@ -38,6 +72,15 @@ namespace ai
             WorldPacket packet(CMSG_REPOP_REQUEST);
             packet << uint8(0);
             bot->GetSession()->HandleRepopRequestOpcode(packet);
+            if (!sServerFacade.IsAlive(bot) && bot->GetCorpse() && bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+            {
+                bot->RepopAtGraveyard();
+                sPlayerbotAIConfig.logEvent(ai, "ReleaseSpiritGraveyardHop");
+            }
+            else if (!sServerFacade.IsAlive(bot) && !bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) && !ai->HasActivePlayerMaster())
+            {
+                ForceBotSpiritRelease(ai, bot, "ReleaseSpiritDirectFallback");
+            }
 
             // add waiting for ress aura
             if (bot->InBattleGround() && !ai->HasAura(2584, bot))
@@ -57,11 +100,58 @@ namespace ai
 
         virtual bool Execute(Event& event) override
         {
+            const uint32 botGuid = bot->GetGUIDLow();
+            if (sServerFacade.IsAlive(bot))
+            {
+                sAutoReleaseProgress.erase(botGuid);
+                return false;
+            }
+
+            if (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+            {
+                sAutoReleaseProgress.erase(botGuid);
+                return false;
+            }
+
+            const time_t now = time(nullptr);
+            AutoReleaseProgress& progress = sAutoReleaseProgress[botGuid];
+            if (!progress.startTime)
+                progress.startTime = now;
+            progress.lastAttemptTime = now;
+
+            if (!ai->HasActivePlayerMaster() && now - progress.startTime >= 15)
+            {
+                std::ostringstream out;
+                out << "stallSec=" << (now - progress.startTime)
+                    << " map=" << bot->GetMapId()
+                    << " level=" << (uint32)bot->GetLevel()
+                    << " deathState=" << static_cast<uint32>(bot->GetDeathState())
+                    << " hasCorpse=" << (bot->GetCorpse() ? 1 : 0)
+                    << " ghost=" << (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(ai, "AutoReleaseSpiritStall", "", out.str());
+                sAutoReleaseProgress.erase(botGuid);
+                if (ForceBotSpiritRelease(ai, bot, "AutoReleaseSpiritDirectFallback"))
+                    return true;
+
+                return ai->DoSpecificAction("repop", event, true);
+            }
+
             sLog.outDetail("Bot #%d %s:%d <%s> auto released", bot->GetGUIDLow(), bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName());
 
             WorldPacket packet(CMSG_REPOP_REQUEST);
             packet << uint8(0);
             bot->GetSession()->HandleRepopRequestOpcode(packet);
+            if (!sServerFacade.IsAlive(bot) && bot->GetCorpse() && bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+            {
+                bot->RepopAtGraveyard();
+                sPlayerbotAIConfig.logEvent(ai, "AutoReleaseSpiritGraveyardHop");
+                sAutoReleaseProgress.erase(botGuid);
+            }
+            else if (!sServerFacade.IsAlive(bot) && !bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) && !ai->HasActivePlayerMaster())
+            {
+                if (ForceBotSpiritRelease(ai, bot, "AutoReleaseSpiritDirectFallback"))
+                    sAutoReleaseProgress.erase(botGuid);
+            }
 
             // add waiting for ress aura
             if (bot->InBattleGround() && !ai->HasAura(2584, bot))
@@ -80,7 +170,7 @@ namespace ai
             if (!sServerFacade.UnitIsDead(bot))
                 return false;
 
-            if (bot->GetCorpse())
+            if (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
                 return false;
 
 #ifndef MANGOSBOT_ZERO
@@ -88,34 +178,7 @@ namespace ai
                 return false;
 #endif
 
-            if (bot->InBattleGround())
-                return !bot->GetCorpse() || !bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);
-
-            if (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
-                return false;
-
-            if (!bot->GetGroup())
-                return true;
-
-            if (!ai->GetGroupMaster())
-                return true;
-
-            if (ai->GetGroupMaster() == bot)
-                return true;
-
-            if (!ai->HasActivePlayerMaster())
-                return true;
-
-            if (ai->HasActivePlayerMaster() && ai->GetGroupMaster()->GetMapId() == bot->GetMapId() && (bot->GetMap()->IsRaid() || bot->GetMap()->IsDungeon()))
-                return false;
-
-            if(sServerFacade.UnitIsDead(ai->GetGroupMaster()))
-                return true;
-
-            if (sServerFacade.IsDistanceGreaterThan(AI_VALUE2(float, "distance", "master target"), sPlayerbotAIConfig.sightDistance))
-                return true;
-
-            return false;
+            return true;
         }
     };
 

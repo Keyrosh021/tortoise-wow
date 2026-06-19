@@ -625,6 +625,14 @@ class WorldSession
 
         void ClearIncomingPacketsByType(PacketProcessing type);
         inline bool HasRecentPacket(PacketProcessing type) const { return _receivedPacketType[type]; }
+        size_t GetQueuedPacketCount(PacketProcessing type) const { return _recvQueue[type].size(); }
+        size_t GetTotalQueuedPacketCount() const
+        {
+            size_t total = 0;
+            for (uint32 i = 0; i < PACKET_PROCESS_MAX_TYPE; ++i)
+                total += _recvQueue[i].size();
+            return total;
+        }
 
         // Movement
         Unit* GetMoverFromGuid(ObjectGuid const& guid) const;

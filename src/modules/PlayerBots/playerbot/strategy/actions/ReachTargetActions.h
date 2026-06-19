@@ -54,6 +54,14 @@ namespace ai
                 if (range > 0.0f)
                 {
                     chaseDist = inLos ? range : (isFriend ? std::min(distanceToTarget * 0.9f, range) : range);
+
+                    // When a hostile spell target is out of LOS, holding the full spell range
+                    // causes ranged bots to "decide to move" without actually closing enough to
+                    // break the obstruction. Force a much tighter chase distance so they
+                    // meaningfully reposition instead of spinning in place.
+                    if (!inLos && !isFriend && ai->IsRanged(bot))
+                        chaseDist = std::min(2.0f, std::max(sPlayerbotAIConfig.contactDistance, distanceToTarget - 1.0f));
+
                     chaseDist = (chaseDist - sPlayerbotAIConfig.contactDistance);
                 }
 
@@ -209,10 +217,16 @@ namespace ai
     class ReachMeleeAction : public ReachTargetAction
 	{
     public:
-        ReachMeleeAction(PlayerbotAI* ai) : ReachTargetAction(ai, "reach melee") {}
+        ReachMeleeAction(PlayerbotAI* ai) : ReachTargetAction(ai, "reach melee", ATTACK_DISTANCE) {}
 
         bool isUseful() override
         {
+            if (Unit* target = GetTarget())
+            {
+                if (bot->CanReachWithMeleeAutoAttack(target))
+                    return false;
+            }
+
             if (ai->IsRanged(bot) &&
                 AI_VALUE2(bool, "has mana", "self target") &&
                 AI_VALUE2(uint8, "mana", "self target") > sPlayerbotAIConfig.lowMana)

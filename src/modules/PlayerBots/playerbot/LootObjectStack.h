@@ -3,6 +3,12 @@
 
 namespace ai
 {
+    bool IsLootGuidSuppressed(ObjectGuid guid);
+    void SuppressLootGuid(ObjectGuid guid, time_t until);
+    bool IsLootGuidSkippedForBot(Player* bot, ObjectGuid guid);
+    void DeferLootGuidForBot(Player* bot, ObjectGuid guid, time_t delaySeconds);
+    void DeferForeignLootGuidForBot(Player* bot, ObjectGuid guid);
+
     class ItemQualifier;
 
     class LootObject

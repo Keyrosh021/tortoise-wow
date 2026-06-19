@@ -6,6 +6,35 @@
 
 using namespace ai;
 
+namespace
+{
+    static constexpr time_t PLAYERBOT_REPAIR_NO_NPC_RETRY_DELAY = 30;
+    const char* PLAYERBOT_REPAIR_NO_NPC_SKIP = "repair no npc skip";
+
+    Creature* FindRepairNpc(Player* bot, PlayerbotAI* ai)
+    {
+        if (!bot || !ai)
+            return nullptr;
+
+        std::list<ObjectGuid> npcs = ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid>>("nearest npcs")->Get();
+        for (ObjectGuid const& guid : npcs)
+        {
+            if (Creature* unit = bot->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_REPAIR))
+                return unit;
+        }
+
+        return nullptr;
+    }
+}
+
+bool RepairAllAction::isPossible()
+{
+    if (FindRepairNpc(bot, ai))
+        return true;
+
+    return AI_VALUE2(time_t, "manual time", PLAYERBOT_REPAIR_NO_NPC_SKIP) <= time(0);
+}
+
 bool RepairAllAction::Execute(Event& event)
 {
     Player* requester = event.getOwner() ? event.getOwner() : GetMaster();
@@ -87,6 +116,20 @@ bool RepairAllAction::Execute(Event& event)
         return durability < 100 && AI_VALUE(uint8, "durability inventory") > durability;
     }
 
-    ai->TellPlayerNoFacing(requester, "Cannot find any npc to repair at");
+    SET_AI_VALUE2(time_t, "manual time", PLAYERBOT_REPAIR_NO_NPC_SKIP, time(0) + PLAYERBOT_REPAIR_NO_NPC_RETRY_DELAY);
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "durability=" << uint32(AI_VALUE(uint8, "durability"))
+            << " lowest=" << uint32(AI_VALUE(uint8, "lowest durability"))
+            << " inventory=" << uint32(AI_VALUE(uint8, "durability inventory"))
+            << " suppressFor=" << uint32(PLAYERBOT_REPAIR_NO_NPC_RETRY_DELAY);
+        sPlayerbotAIConfig.logEvent(ai, "RepairDeferredNoNpc", "", out.str());
+    }
+
+    if (requester && ai->HasRealPlayerMaster())
+        ai->TellPlayerNoFacing(requester, "Cannot find any npc to repair at");
+
     return false;
 }

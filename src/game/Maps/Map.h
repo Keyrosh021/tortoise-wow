@@ -344,6 +344,7 @@ class Map : public GridRefManager<NGridType>
         virtual ~Map() override;
         void PrintInfos(ChatHandler& handler);
         void SpawnActiveObjects();
+        uint32 GetActiveNonPlayersCount() const { return static_cast<uint32>(m_activeNonPlayers.size()); }
         // currently unused for normal maps
         bool CanUnload(uint32 diff)
         {
@@ -459,8 +460,9 @@ class Map : public GridRefManager<NGridType>
         // HasActiveZone: cmangos has it; Penqle doesn't track active zones. Stub returns true.
         bool HasActiveZone(uint32 /*zoneId*/) const { return true; }
         bool HasActiveZones() const { return true; }
-        // HasRealPlayers: cmangos checks if any non-bot players are on the map. Stub returns true.
+        // HasRealPlayers: preserved for playerbot activity priority compatibility.
         bool HasRealPlayers() const { return true; }
+        bool HasRealPlayersForContinentWait() const;
         // GetTransports: cmangos has Map::GetTransports returning a set/vector. Stub returns empty vector.
         // Note: GenericTransport is a typedef in shim; forward-decl as struct avoids "class" keyword conflict.
         std::vector<class Transport*> GetTransports() const { return {}; }
@@ -482,6 +484,8 @@ class Map : public GridRefManager<NGridType>
 
         bool HavePlayers() const { return !m_mapRefManager.isEmpty(); }
         uint32 GetPlayersCountExceptGMs() const;
+        bool HasPlayersNearGrid(uint32 x, uint32 y) const;
+        bool HasActiveNonPlayersNearGrid(uint32 x, uint32 y) const;
         bool ActiveObjectsNearGrid(uint32 x,uint32 y) const;
 
         // Send a Packet to all players on a map
@@ -645,11 +649,60 @@ class Map : public GridRefManager<NGridType>
         void RemoveBones(Corpse* corpse);
         void ScheduleCorpseRemoval();
 
+        struct GridUnloadDiagnostics
+        {
+            uint32 loadedGrids = 0;
+            uint32 activeStateGrids = 0;
+            uint32 idleStateGrids = 0;
+            uint32 removalStateGrids = 0;
+            uint32 unloadLockedGrids = 0;
+            uint32 unloadExplicitLockedGrids = 0;
+            uint32 unloadActiveLockedGrids = 0;
+            uint32 unloadActiveLockRefs = 0;
+            uint32 activeObjectsInGrid = 0;
+            uint32 nearPlayers = 0;
+            uint32 nearActiveNonPlayers = 0;
+            uint32 nearAny = 0;
+        };
+
+        GridUnloadDiagnostics CollectGridUnloadDiagnostics() const;
+        uint32 GetPendingObjectUpdateCount() const;
+        uint32 GetPendingRelocationCount() const;
+
         XStatTimer MovementPerfTimer;
         XStatTimer SpellPerfTimer;
         XStatTimer UpdateTimer;
+        XStatTimer DynamicTreePerfTimer;
+        XStatTimer SessionPerfTimer;
+        XStatTimer PlayersPerfTimer;
+        XStatTimer CellsPerfTimer;
+        XStatTimer ObjectUpdatesPerfTimer;
+        XStatTimer RelocationPerfTimer;
+        XStatTimer PlayersPostVisibilityPerfTimer;
+        XStatTimer CorpsePerfTimer;
+        XStatTimer GridStatePerfTimer;
+        XStatTimer ScriptsPerfTimer;
+        XStatTimer InstanceDataPerfTimer;
+        XStatTimer WeatherPerfTimer;
+        XStatTimer WaitPerfTimer;
 
     private:
+        struct LastUpdateTrace
+        {
+            uint32 playerCount = 0;
+            uint32 activeNonPlayers = 0;
+            uint32 pendingObjectUpdates = 0;
+            uint32 pendingRelocations = 0;
+            uint32 waitIterations = 0;
+            uint32 sessionsMs = 0;
+            uint32 playersMs = 0;
+            uint32 cellsMs = 0;
+            uint32 objectUpdatesMs = 0;
+            uint32 relocationMs = 0;
+            uint32 playersPostVisibilityMs = 0;
+            uint32 waitMs = 0;
+        };
+
         void LoadMapAndVMap(int gx, int gy);
 
         void SetTimer(uint32 t) { i_gridExpiry = t < MIN_GRID_DELAY ? MIN_GRID_DELAY : t; }
@@ -715,6 +768,7 @@ class Map : public GridRefManager<NGridType>
         std::unique_ptr<ThreadPool> m_motionThreads;
         std::unique_ptr<ThreadPool> m_visibilityThreads;
         std::unique_ptr<ThreadPool> m_cellThreads;
+        LastUpdateTrace m_lastUpdateTrace;
 
     protected:
         MapEntry const* i_mapEntry;
@@ -739,6 +793,10 @@ class Map : public GridRefManager<NGridType>
         typedef TypeUnorderedMapContainer<AllMapStoredObjectTypes, ObjectGuid> MapStoredObjectTypesContainer;
         mutable std::shared_mutex m_objectsStore_lock;
         MapStoredObjectTypesContainer m_objectsStore;
+
+    public:
+        std::shared_mutex& GetObjectLock() { return m_objectsStore_lock; }
+        MapStoredObjectTypesContainer const& GetObjectStore() const { return m_objectsStore; }
 
         // Objects that must update even in inactive grids without activating them
         typedef std::set<Transport*> TransportsContainer;
@@ -1034,9 +1092,6 @@ class DungeonMap : public Map
         void SendResetWarnings(uint32 timeLeft) const;
         void SetResetSchedule(bool on);
         uint32 GetMaxPlayers() const;
-
-        decltype(m_objectsStore_lock)& GetObjectLock() { return m_objectsStore_lock; }
-        decltype(m_objectsStore) const & GetObjectStore() const { return m_objectsStore; }
 
         // can't be nullptr for loaded map
         DungeonPersistentState* GetPersistanceState() const;

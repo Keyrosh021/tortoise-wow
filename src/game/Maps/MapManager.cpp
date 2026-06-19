@@ -35,10 +35,68 @@
 #include "MoveMap.h"
 #include "ChannelBroadcaster.h"
 #include "PerformanceMonitor.h"
+#include <array>
+#include <atomic>
+#include <cstdio>
+#include <sstream>
 
 typedef MaNGOS::ClassLevelLockable<MapManager, std::recursive_mutex> MapManagerLock;
 INSTANTIATE_SINGLETON_2(MapManager, MapManagerLock);
 INSTANTIATE_CLASS_MUTEX(MapManager, std::recursive_mutex);
+
+namespace
+{
+    constexpr size_t MAX_TRACKED_CONTINENT_JOBS = 64;
+    std::array<std::atomic<uint64>, MAX_TRACKED_CONTINENT_JOBS> s_continentUpdateActiveMaps;
+    std::array<std::atomic<uint32>, MAX_TRACKED_CONTINENT_JOBS> s_continentUpdateActiveSince;
+    std::array<std::atomic<char const*>, MAX_TRACKED_CONTINENT_JOBS> s_continentUpdateActivePhase;
+    std::array<std::atomic<uint32>, MAX_TRACKED_CONTINENT_JOBS> s_continentUpdateActiveDetail;
+    thread_local int s_currentContinentJobSlot = -1;
+    thread_local char s_currentContinentPhaseName[160];
+
+    uint64 PackMapJobKey(Map const* map)
+    {
+        if (!map)
+            return 0;
+
+        return (uint64(map->GetId()) << 32) | uint64(map->GetInstanceId());
+    }
+
+    std::string FormatActiveContinentJobs()
+    {
+        std::ostringstream out;
+        uint32 now = WorldTimer::getMSTime();
+        bool first = true;
+
+        for (size_t i = 0; i < MAX_TRACKED_CONTINENT_JOBS; ++i)
+        {
+            uint64 key = s_continentUpdateActiveMaps[i].load();
+            if (!key)
+                continue;
+
+            uint32 mapId = uint32(key >> 32);
+            uint32 instanceId = uint32(key & 0xFFFFFFFF);
+            uint32 started = s_continentUpdateActiveSince[i].load();
+            char const* phase = s_continentUpdateActivePhase[i].load();
+            uint32 detail = s_continentUpdateActiveDetail[i].load();
+            uint32 elapsed = started ? now - started : 0;
+
+            if (!first)
+                out << ',';
+
+            out << i << ':' << mapId << '/' << instanceId << '/' << (phase ? phase : "?");
+            if (detail)
+                out << ':' << detail;
+            out << '/' << elapsed << "ms";
+            first = false;
+        }
+
+        if (first)
+            out << "none";
+
+        return out.str();
+    }
+}
 
 MapManager::MapManager()
     :
@@ -364,10 +422,32 @@ void MapManager::Update(uint32 diff)
         }
         else // One threat per continent part
         {
-            continentsUpdaters.emplace_back([iter,mapsDiff](){
-                Map *m = iter->second;
+            Map* map = iter->second;
+            const size_t jobSlot = size_t(continentsIdx);
+            continentsUpdaters.emplace_back([map,mapsDiff,jobSlot](){
+                Map *m = map;
+                s_currentContinentJobSlot = int(jobSlot);
+                if (jobSlot < MAX_TRACKED_CONTINENT_JOBS)
+                {
+                    s_continentUpdateActiveSince[jobSlot].store(WorldTimer::getMSTime());
+                    s_continentUpdateActiveMaps[jobSlot].store(PackMapJobKey(m));
+                    s_continentUpdateActivePhase[jobSlot].store("queued");
+                    s_continentUpdateActiveDetail[jobSlot].store(0);
+                }
+
                 if (!m->IsUpdateFinished() || !sMapMgr.IsContinentUpdateFinished())
                     m->DoUpdate(mapsDiff);
+
+                sMapMgr.MarkContinentUpdateFinished();
+
+                if (jobSlot < MAX_TRACKED_CONTINENT_JOBS)
+                {
+                    s_continentUpdateActiveMaps[jobSlot].store(0);
+                    s_continentUpdateActiveSince[jobSlot].store(0);
+                    s_continentUpdateActivePhase[jobSlot].store(nullptr);
+                    s_continentUpdateActiveDetail[jobSlot].store(0);
+                }
+                s_currentContinentJobSlot = -1;
             });
             continentsIdx++;
         }
@@ -375,6 +455,15 @@ void MapManager::Update(uint32 diff)
 
     i_maxContinentThread = continentsIdx;
     i_continentUpdateFinished.store(0);
+    const size_t continentJobCount = continentsUpdaters.size();
+    const size_t instanceJobCount = instancesUpdaters.size();
+    for (size_t i = 0; i < MAX_TRACKED_CONTINENT_JOBS; ++i)
+    {
+        s_continentUpdateActiveMaps[i].store(0);
+        s_continentUpdateActiveSince[i].store(0);
+        s_continentUpdateActivePhase[i].store(nullptr);
+        s_continentUpdateActiveDetail[i].store(0);
+    }
 
     if (!m_continentThreads || m_continentThreads->size() < continentsUpdaters.size())
     {
@@ -391,14 +480,33 @@ void MapManager::Update(uint32 diff)
                                                          ThreadPool::Callable());
 
         if (f.valid())
-            f.wait();
+        {
+            uint32 waitedMs = 0;
+            while (f.wait_for(std::chrono::milliseconds(5000)) != std::future_status::ready)
+            {
+                waitedMs += 5000;
+                sLog.outError("[MapUpdateStall] phase=instances waitedMs=%u mapsDiff=%u instanceJobs=%u continentJobs=%u continentDone=%d/%u",
+                    waitedMs, mapsDiff, uint32(instanceJobCount), uint32(continentJobCount),
+                    int(i_continentUpdateFinished.load()), i_maxContinentThread);
+            }
+        }
         else
             break;
     } while(!sMapMgr.waitContinentUpdateFinishedUntil(start + std::chrono::milliseconds(sWorld.getConfig(CONFIG_UINT32_INTERVAL_MAPUPDATE))));
 
 
     if (continents.valid())
-        continents.wait();
+    {
+        uint32 waitedMs = 0;
+        while (continents.wait_for(std::chrono::milliseconds(5000)) != std::future_status::ready)
+        {
+            waitedMs += 5000;
+            std::string activeJobs = FormatActiveContinentJobs();
+            sLog.outError("[MapUpdateStall] phase=continents waitedMs=%u mapsDiff=%u instanceJobs=%u continentJobs=%u continentDone=%d/%u active=%s",
+                waitedMs, mapsDiff, uint32(instanceJobCount), uint32(continentJobCount),
+                int(i_continentUpdateFinished.load()), i_maxContinentThread, activeJobs.c_str());
+        }
+    }
 
     sWorld.GetChannelBroadcaster()->DisableSendingMessages();
     SwitchPlayersInstances();
@@ -1090,6 +1198,28 @@ void MapManager::MarkContinentUpdateFinished()
     i_continentUpdateFinished++;
     if (IsContinentUpdateFinished())
         m_continentCV.notify_all();
+}
+
+void MapManager::SetContinentUpdatePhase(char const* phase, uint32 detail)
+{
+    if (s_currentContinentJobSlot < 0)
+        return;
+
+    size_t slot = size_t(s_currentContinentJobSlot);
+    if (slot >= MAX_TRACKED_CONTINENT_JOBS)
+        return;
+
+    s_continentUpdateActivePhase[slot].store(phase);
+    s_continentUpdateActiveDetail[slot].store(detail);
+}
+
+void MapManager::SetContinentUpdatePhaseNamed(char const* phase, std::string const& name, uint32 detail)
+{
+    if (!phase)
+        phase = "?";
+
+    std::snprintf(s_currentContinentPhaseName, sizeof(s_currentContinentPhaseName), "%s:%s", phase, name.c_str());
+    SetContinentUpdatePhase(s_currentContinentPhaseName, detail);
 }
 
 bool MapManager::IsContinentUpdateFinished() const

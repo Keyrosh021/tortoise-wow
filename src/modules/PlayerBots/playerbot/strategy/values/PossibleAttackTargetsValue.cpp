@@ -9,6 +9,7 @@
 #include "Maps/CellImpl.h"
 #include "AttackersValue.h"
 #include "EnemyPlayerValue.h"
+#include <cmath>
 
 using namespace ai;
 using namespace MaNGOS;
@@ -299,6 +300,15 @@ bool PossibleAttackTargetsValue::IsPossibleTarget(Unit* target, Player* player, 
     {
         // If the target is in an attackable distance
         if(!player->IsWithinDistInMap(target, range))
+        {
+            return false;
+        }
+
+        if (!target->IsPlayer() &&
+            target->IsInWorld() &&
+            target->GetMapId() == player->GetMapId() &&
+            !player->IsWithinLOSInMap(target, true) &&
+            std::fabs(player->GetPositionZ() - target->GetPositionZ()) > 6.0f)
         {
             return false;
         }

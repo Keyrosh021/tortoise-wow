@@ -12,7 +12,7 @@ void DeadStrategy::InitDeadTriggers(std::list<TriggerNode*>& triggers)
 
     triggers.push_back(new TriggerNode(
         "very often",
-        NextAction::array(0, new NextAction("auto release", relevance), NULL)));
+        NextAction::array(0, new NextAction("auto release", relevance + 2.0f), NULL)));
 
     triggers.push_back(new TriggerNode(
         "val::gt32::{death count," + std::to_string(DeadValueConstants::DEATH_COUNT_BEFORE_EVAC) + "}",
@@ -28,7 +28,7 @@ void DeadStrategy::InitDeadTriggers(std::list<TriggerNode*>& triggers)
 
     triggers.push_back(new TriggerNode(
         "dead",
-       NextAction::array(0, new NextAction("find corpse", relevance), NULL)));
+       NextAction::array(0, new NextAction("find corpse", relevance + 3.0f), NULL)));
 
     triggers.push_back(new TriggerNode(
         "corpse near",

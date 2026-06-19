@@ -18,7 +18,73 @@
 #include <regex>
 #include <fstream>
 #include <sstream>
+#include <cerrno>
+#include <cstdio>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "PlayerbotLoginMgr.h"
+#include "playerbot/QuestGuideMgr.h"
+#include "playerbot/BotLearningMgr.h"
+
+namespace
+{
+bool IsWriteMode(char const* mode)
+{
+    return mode && mode[0] == 'w';
+}
+
+bool ExistingFileHasContent(std::string const& path)
+{
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && st.st_size > 0;
+}
+
+std::string ArchiveTimestamp()
+{
+    time_t t = time(nullptr);
+    tm* aTm = localtime(&t);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", aTm);
+    return std::string(buf);
+}
+
+void EnsureDirectory(std::string const& path)
+{
+    if (path.empty())
+        return;
+
+    if (mkdir(path.c_str(), 0755) != 0 && errno != EEXIST)
+        sLog.outError("PlayerbotAIConfig::openLog: failed to create archive dir %s", path.c_str());
+}
+
+void ArchiveLogBeforeTruncate(std::string const& logsDir, std::string const& fileName, std::string const& logPath)
+{
+    if (!ExistingFileHasContent(logPath))
+        return;
+
+    std::string archiveDir = logsDir + "archive";
+    EnsureDirectory(archiveDir);
+
+    std::string stem = fileName;
+    std::string extension;
+    std::string::size_type dot = fileName.find_last_of('.');
+    if (dot != std::string::npos)
+    {
+        stem = fileName.substr(0, dot);
+        extension = fileName.substr(dot);
+    }
+
+    std::string base = archiveDir + "/" + stem + "_" + ArchiveTimestamp();
+    std::string archivePath = base + extension;
+    for (uint32 index = 1; ExistingFileHasContent(archivePath); ++index)
+        archivePath = base + "_" + std::to_string(index) + extension;
+
+    if (rename(logPath.c_str(), archivePath.c_str()) == 0)
+        return;
+
+    sLog.outError("PlayerbotAIConfig::openLog: failed to archive %s to %s", logPath.c_str(), archivePath.c_str());
+}
+}
 
 std::vector<std::string> ConfigAccess::GetValues(const std::string& name) const
 {
@@ -413,6 +479,10 @@ bool PlayerbotAIConfig::Initialize()
     rndBotCheatMask = uint32(CheatAction::GetCheatMask(config.GetStringDefault("AiPlayerbot.RndBotCheats", "taxi,item,breath")));    
 
     LoadListString<std::list<std::string>>(config.GetStringDefault("AiPlayerbot.AllowedLogFiles", ""), allowedLogFiles);
+    LoadListString<std::list<std::string>>(config.GetStringDefault(
+        "AiPlayerbot.ExcludedBotEvents",
+        "AttackCommandTrace,AttackYieldReachMelee,AttackYieldReachSpell,AttackReachMeleeDispatch,AttackReachSpellDispatch,AttackAlreadyEngaged,ReachTargetTrace,ReachTargetHold,ReachMeleeSuppressed,RangedAttackYield,RangedMeleeDecision,HumanLikeMoveDispatch,GrindTargetSelect,GrindTargetSelectFailed,LootOpenTrace,StoreLootCombatTrace,StoreLootDeferredCombat"),
+        excludedBotEvents);
     LoadListString<std::list<std::string>>(config.GetStringDefault("AiPlayerbot.DebugFilter", "add gathering loot,check values,emote,check mount state,jump"), debugFilter);
 
     worldBuffs.clear();
@@ -615,9 +685,14 @@ bool PlayerbotAIConfig::Initialize()
     respawnModHostile = config.GetFloatDefault("AiPlayerbot.RespawnModHostile", 5.0f);
     respawnModThreshold = config.GetIntDefault("AiPlayerbot.RespawnModThreshold", 10);
     respawnModMax = config.GetIntDefault("AiPlayerbot.RespawnModMax", 18);
-    respawnCorpseCloneMax = config.GetIntDefault("AiPlayerbot.RespawnCorpseCloneMax", 5);
     respawnModForPlayerBots = config.GetBoolDefault("AiPlayerbot.RespawnModForPlayerBots", false);
     respawnModForInstances = config.GetBoolDefault("AiPlayerbot.RespawnModForInstances", false);
+    learningTelemetryEnabled = config.GetBoolDefault("AiPlayerbot.LearningTelemetry", true);
+    learningTaskSampleIntervalMs = std::max<uint32>(1000, config.GetIntDefault("AiPlayerbot.LearningTaskSampleIntervalMs", 60000));
+    learningFlushIntervalMs = std::max<uint32>(1000, config.GetIntDefault("AiPlayerbot.LearningFlushIntervalMs", 5000));
+    learningFlushMaxRows = std::max<uint32>(1, config.GetIntDefault("AiPlayerbot.LearningFlushMaxRows", 500));
+    learningMaxQueue = std::max<uint32>(100, config.GetIntDefault("AiPlayerbot.LearningMaxQueue", 10000));
+    learningCombatSampleRate = std::max<float>(0.0f, std::min<float>(1.0f, config.GetFloatDefault("AiPlayerbot.LearningCombatSampleRate", 1.0f)));
 
     //LLM START
     llmEnabled = config.GetIntDefault("AiPlayerbot.LLMEnabled", 1);
@@ -782,6 +857,10 @@ bool PlayerbotAIConfig::Initialize()
     {
         sLog.outString("Loading Quest Detail Data...");
         sTravelMgr.LoadQuestTravelTable();
+        sLog.outString("Loading Quest Guide Data...");
+        sQuestGuideMgr.Load();
+        sLog.outString("Loading Bot Learning Data...");
+        sBotLearningMgr.Load();
     }
 
     sLog.outString("Loading named locations...");
@@ -1025,6 +1104,9 @@ bool PlayerbotAIConfig::openLog(std::string fileName, char const* mode, bool has
 
 
     const std::string logPath = m_logsDir + fileName;
+    if (IsWriteMode(mode))
+        ArchiveLogBeforeTruncate(m_logsDir, fileName, logPath);
+
     file = fopen(logPath.c_str(), mode);
     fileOpen = (file != nullptr);
 
@@ -1059,14 +1141,29 @@ void PlayerbotAIConfig::log(std::string fileName, const char* str, ...)
     vfprintf(file, str, ap);
     fprintf(file, "\n");
     va_end(ap);
-    fflush(file);
 
-    fflush(stdout);
+    if (fileName != "bot_events.csv")
+    {
+        fflush(file);
+        return;
+    }
+
+    uint32& flushCounter = logFlushCounters[fileName];
+    if (++flushCounter >= 64)
+    {
+        fflush(file);
+        flushCounter = 0;
+    }
+}
+
+bool PlayerbotAIConfig::shouldLogBotEvent(const std::string& eventName) const
+{
+    return std::find(excludedBotEvents.begin(), excludedBotEvents.end(), eventName) == excludedBotEvents.end();
 }
 
 void PlayerbotAIConfig::logEvent(PlayerbotAI* ai, std::string eventName, std::string info1, std::string info2)
 {
-    if (hasLog("bot_events.csv"))
+    if (hasLog("bot_events.csv") && shouldLogBotEvent(eventName))
     {
         Player* bot = ai->GetBot();
 

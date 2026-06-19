@@ -636,10 +636,13 @@ class Creature : public Unit
         void SetCorpseAccelerationDelay(uint32 delay) { m_corpseDelay = delay; }
         void SetCorpseDecayTimer(uint32 delay) { m_corpseDecayTimer = delay; }
         uint32 GetCorpseDecayTimer() const { return m_corpseDecayTimer; }
+        uint32 GetCorpseDelay() const { return m_corpseDelay; }
         void SetLootCorpseSourceGuidLow(uint32 guid) { m_lootCorpseSourceGuidLow = guid; }
         uint32 GetLootCorpseSourceGuidLow() const { return m_lootCorpseSourceGuidLow; }
         bool IsLootCorpseClone() const { return m_isLootCorpseClone; }
         void SetLootCorpseClone(bool value) { m_isLootCorpseClone = value; }
+        bool IsLiveRespawnReplacementTracked() const { return m_isLiveRespawnReplacementTracked; }
+        void SetLiveRespawnReplacementTracked(bool value) { m_isLiveRespawnReplacementTracked = value; }
         time_t GetLastDeathSnapshotAt() const { return m_lastDeathSnapshotAt; }
         float GetLastDeathPositionX() const { return m_lastDeathX; }
         float GetLastDeathPositionY() const { return m_lastDeathY; }
@@ -1165,8 +1168,9 @@ class Creature : public Unit
         time_t m_diedAt;
         time_t m_corpseRemovedAt;
         time_t m_lastDeathSnapshotAt;
-        uint32 m_lootCorpseSourceGuidLow;
-        bool m_isLootCorpseClone;
+        uint32 m_lootCorpseSourceGuidLow = 0;
+        bool m_isLootCorpseClone = false;
+        bool m_isLiveRespawnReplacementTracked = false;
         float m_lastDeathX;
         float m_lastDeathY;
         float m_lastDeathZ;

@@ -355,7 +355,7 @@ AiPlayerbot.RandomBotQuestIds = 7848,3802,5505,6502,7761,9378
 # AiPlayerbot.RespawnModHostile = 5.0     # Each nearby player will decrease the respawn time by 5% for hostile mobs.
 # AiPlayerbot.RespawnModThreshold = 10    # Atleast 10 players (including the bot) needs to be near the bot before respawns are modified.
 # AiPlayerbot.RespawnModMax = 18          # After the threshold it will decrease the respawn for up to 18 nearby players max.
-# AiPlayerbot.RespawnCorpseCloneMax = 5   # Preserve up to 5 lootable corpses per DB spawn while the original spawn resumes.
+# AiPlayerbot.RespawnCorpseCloneMax moved to mangosd.conf: DynamicRespawn.CorpseCloneMax
 # AiPlayerbot.RespawnModForPlayerBots = 0 # Bots with a player master are not affected.
 # AiPlayerbot.RespawnModForInstances = 0  # Mobs inside instances are not affected.
 
@@ -1040,6 +1040,15 @@ AiPlayerbot.PerfMonEnabled = 0
 # Allowed log files. See SPP_MAP for more information
 # https://github.com/mostlikely4r/spp-map
 # AiPlayerbot.AllowedLogFiles = 
+
+# Learning telemetry. Samples are queued from bot AI and flushed in bounded
+# batches so data collection cannot stall the live bot loop.
+# AiPlayerbot.LearningTelemetry = 1
+# AiPlayerbot.LearningTaskSampleIntervalMs = 60000
+# AiPlayerbot.LearningFlushIntervalMs = 5000
+# AiPlayerbot.LearningFlushMaxRows = 500
+# AiPlayerbot.LearningMaxQueue = 10000
+# AiPlayerbot.LearningCombatSampleRate = 1.0
 
 # Filters certain actions from showing up in 'nc +debug' and 'nc +debug action'
 # AiPlayerbot.DebugFilter = add gathering loot,check values,emote,check mount state,jump

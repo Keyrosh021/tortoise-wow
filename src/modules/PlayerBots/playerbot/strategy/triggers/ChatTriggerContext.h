@@ -34,7 +34,7 @@ namespace ai
             creators["c"] = [](PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "c"); };
             creators["items"] = [](PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "c"); };
             creators["inventory"] = [](PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "c"); };
-            creators["inv"] = [](PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "c"); };
+            creators["inv"] = [](PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "invite"); };
             creators["e"] = [](PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "e"); };
             creators["equip"] = [](PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "e"); };
             creators["keep"] = [](PlayerbotAI* ai) { return new ChatCommandTrigger(ai, "keep"); };
