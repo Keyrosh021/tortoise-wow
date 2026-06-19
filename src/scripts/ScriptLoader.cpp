@@ -263,6 +263,7 @@ void AddSC_duskwood();
 void AddSC_felwood();
 void AddSC_feralas();
 void AddSC_moonglade();
+void AddSC_moonwhisper_coast();
 void AddSC_mulgore();
 void AddSC_orgrimmar();
 void AddSC_silithus();
@@ -619,6 +620,7 @@ void AddScripts()
     AddSC_felwood();
     AddSC_feralas();
     AddSC_moonglade();
+    AddSC_moonwhisper_coast();
     AddSC_mulgore();
     AddSC_orgrimmar();
     AddSC_silithus();
