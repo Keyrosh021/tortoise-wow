@@ -236,6 +236,13 @@ void SpellModMgr::LoadSpellMods()
 
     // Other modifications (no 'speed' field in spell_mod)
 
+    // Seal/Judgement of the Martyr: weapon-damage based Holy hits do not use spellpower coefficients.
+    if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(45814)))
+        spellInfo->EffectBonusCoefficient[EFFECT_INDEX_0] = 0.0f;
+
+    if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(45816)))
+        spellInfo->EffectBonusCoefficient[EFFECT_INDEX_0] = 0.0f;
+
     // Divine Strike scales from 0.3% spellpower.
     if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(51810)))
         spellInfo->EffectBonusCoefficient[EFFECT_INDEX_0] = 0.003f;
@@ -260,7 +267,7 @@ void SpellModMgr::LoadSpellMods()
 
     // Seal of Command Trigger minor delay (melee radius 5.0 / 10.0 * 1000 = 0.5sec delay)
     if (SpellEntry* spellInfo = const_cast<SpellEntry*>(sSpellMgr.GetSpellEntry(20424)))
-        spellInfo->speed = 10.0f;
+        spellInfo->speed = 0.0f;
 
     // Divine Favor EffectItemMask for Holy Light base spell
     // (HACK) need to modify EffectItemType column in spell_effect_mod to support bigint flags

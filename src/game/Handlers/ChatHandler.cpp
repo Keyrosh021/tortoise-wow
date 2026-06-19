@@ -45,6 +45,8 @@
 #include "Database/DatabaseImpl.h"
 #include "Shop/ShopMgr.h"
 #include "GMTicketMgr.h"
+#include "Barbershop/TurtleBarbershopMgr.h"
+#include "LFG/TurtleLFGMgr.h"
 
 
 #include "rapidjson/document.h"
@@ -1007,6 +1009,12 @@ bool WorldSession::HandleTurtleAddonMessages(uint32 lang, uint32 type, std::stri
     {
         return false;
     }
+
+    if (type == CHAT_MSG_GUILD && strstr(msg.c_str(), "TW_LFG"))
+        return sTurtleLFGMgr.HandleAddonMessage(_player, msg);
+
+    if (type == CHAT_MSG_GUILD && strstr(msg.c_str(), "TW_BARBERSHOP"))
+        return sTurtleBarbershopMgr.HandleAddonMessage(_player, msg);
 
     //guild bank
     // no type == CHAT_MSG_GUILD on this, to protecc fraudulent messages

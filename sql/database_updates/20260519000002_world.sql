@@ -173,3 +173,33 @@ VALUES
 
 -- Seal of Command: PPM increased from 7 to 9.
 UPDATE spell_proc_event SET ppmRate = 9 WHERE entry IN (20375, 33006, 20915, 20918, 20919, 20920);
+
+-- Seal of the Martyr: keep its tuning in overlay tables instead of rewriting spell_template.
+-- effect 3 stores the judgement spell link as "target spell id minus 1" because the core resolves
+-- it through CalculateSimpleValue() before casting the judgement.
+REPLACE INTO `spell_effect_mod` (`Id`, `EffectIndex`, `EffectBasePoints`, `Comment`)
+VALUES
+    (45802, 0, 34, 'Seal of the Martyr: 35% weapon damage tooltip value'),
+    (45802, 1, 10, 'Seal of the Martyr: backlash percent'),
+    (45802, 2, 45815, 'Seal of the Martyr: judgement spell link uses target spell id minus 1');
+
+-- Seal of the Martyr proc spell: keep the hit on the holy/magic damage path so combat log
+-- consumers can treat it as spell damage, while using the SoD-style 35% weapon damage tuning.
+REPLACE INTO `spell_effect_mod` (`Id`, `EffectIndex`, `EffectBasePoints`, `Comment`)
+VALUES
+    (45814, 0, 34, 'Seal of the Martyr proc spell: 35% weapon damage');
+
+REPLACE INTO `spell_mod` (`Id`, `DmgClass`, `Comment`)
+VALUES
+    (45814, 1, 'Seal of the Martyr proc spell: holy damage path');
+
+-- Judgement of the Martyr: convert the old flat damage spell into an 85% weapon damage Holy strike
+-- with no flat base damage, while preserving the 10% recoil.
+REPLACE INTO `spell_effect_mod` (`Id`, `EffectIndex`, `Effect`, `EffectBasePoints`, `EffectDieSides`, `EffectBaseDice`, `EffectDicePerLevel`, `EffectRealPointsPerLevel`, `Comment`)
+VALUES
+    (45816, 0, 31, 84, 1, 1, 0, 0, 'Judgement of the Martyr: 85% weapon damage'),
+    (45816, 1, -1, 10, -1, -1, -1, -1, 'Judgement of the Martyr: backlash percent');
+
+REPLACE INTO `spell_mod` (`Id`, `DmgClass`, `Comment`)
+VALUES
+    (45816, 1, 'Judgement of the Martyr: holy damage path');

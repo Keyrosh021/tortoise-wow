@@ -9635,6 +9635,16 @@ void ObjectMgr::LoadItemTransmogrifyTemplates()
         copy->SourceItemId = SourceID;
         copy->Bonding = BIND_WHEN_PICKED_UP;
 
+        if (ItemPrototype const* source = GetItemPrototype(SourceID))
+        {
+            if (base->Class == ITEM_CLASS_WEAPON && source->Class == ITEM_CLASS_WEAPON)
+            {
+                copy->SubClass = source->SubClass;
+                copy->InventoryType = source->InventoryType;
+                copy->Sheath = source->Sheath;
+            }
+        }
+
         m_itemTransmogs[ID] = copy;
     } while (result->NextRow());
 }
@@ -9658,7 +9668,12 @@ uint32 ObjectMgr::CreateItemTransmogrifyTemplate(uint32 destItemId, uint32 sourc
     copy->SourceItemId = sourceItemId;
     copy->Bonding = BIND_WHEN_PICKED_UP;
 
-    //copy->Sheath = source->Sheath; // 3 hip, 1 back
+    if (source && base->Class == ITEM_CLASS_WEAPON && source->Class == ITEM_CLASS_WEAPON)
+    {
+        copy->SubClass = source->SubClass;
+        copy->InventoryType = source->InventoryType;
+        copy->Sheath = source->Sheath;
+    }
     
     m_itemTransmogs[destId] = copy;
 
@@ -9917,12 +9932,13 @@ uint32 ObjectMgr::GetPossibleTransmogs(uint8 pClass, uint32 itemClass, uint32 it
             }
         }
 
-        // 2h axe/mace/sword
-        if (invType == INVTYPE_2HWEAPON && (itemSubClass == ITEM_SUBCLASS_WEAPON_AXE2 || itemSubClass == ITEM_SUBCLASS_WEAPON_MACE2 || itemSubClass == ITEM_SUBCLASS_WEAPON_SWORD2))
+        // 2h axe/mace/sword/polearm
+        if (invType == INVTYPE_2HWEAPON && (itemSubClass == ITEM_SUBCLASS_WEAPON_AXE2 || itemSubClass == ITEM_SUBCLASS_WEAPON_MACE2 || itemSubClass == ITEM_SUBCLASS_WEAPON_SWORD2 || itemSubClass == ITEM_SUBCLASS_WEAPON_POLEARM))
         {
             numItems += NumPossibleTransmogs[pClass][itemClass][ITEM_SUBCLASS_WEAPON_AXE2][INVTYPE_2HWEAPON].size();
             numItems += NumPossibleTransmogs[pClass][itemClass][ITEM_SUBCLASS_WEAPON_MACE2][INVTYPE_2HWEAPON].size();
             numItems += NumPossibleTransmogs[pClass][itemClass][ITEM_SUBCLASS_WEAPON_SWORD2][INVTYPE_2HWEAPON].size();
+            numItems += NumPossibleTransmogs[pClass][itemClass][ITEM_SUBCLASS_WEAPON_POLEARM][INVTYPE_2HWEAPON].size();
         }
 
         // fists
