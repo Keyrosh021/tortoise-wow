@@ -1511,14 +1511,15 @@ void Unit::CalculateMeleeDamage(Unit* pVictim, uint32 damage, CalcDamageInfo *da
     {
         int32 reductionPct = 0;
         consumedHolder = nullptr;
-        for (uint32 spellId = 51336; spellId <= 51340; ++spellId)
+        AuraList const& blockDamageAuras = victim->GetAurasByType(SPELL_AURA_MOD_BLOCKED_DAMAGE_PERCENT_TAKEN);
+        for (AuraList::const_iterator itr = blockDamageAuras.begin(); itr != blockDamageAuras.end(); ++itr)
         {
-            if (Aura* aura = victim->GetAura(spellId, EFFECT_INDEX_0))
-            {
-                reductionPct = aura->GetModifier()->m_amount;
-                consumedHolder = aura->GetHolder();
-                break;
-            }
+            if ((*itr)->GetModifier()->m_amount >= 0)
+                continue;
+
+            reductionPct = (*itr)->GetModifier()->m_amount;
+            consumedHolder = (*itr)->GetHolder();
+            break;
         }
 
         if (reductionPct >= 0 || blockedDamage == 0)
@@ -2366,14 +2367,15 @@ void Unit::CalculateAbsorbResistBlock(WorldObject* pCaster, SpellNonMeleeDamage 
     {
         int32 reductionPct = 0;
         consumedHolder = nullptr;
-        for (uint32 spellId = 51336; spellId <= 51340; ++spellId)
+        AuraList const& blockDamageAuras = GetAurasByType(SPELL_AURA_MOD_BLOCKED_DAMAGE_PERCENT_TAKEN);
+        for (AuraList::const_iterator itr = blockDamageAuras.begin(); itr != blockDamageAuras.end(); ++itr)
         {
-            if (Aura* aura = GetAura(spellId, EFFECT_INDEX_0))
-            {
-                reductionPct = aura->GetModifier()->m_amount;
-                consumedHolder = aura->GetHolder();
-                break;
-            }
+            if ((*itr)->GetModifier()->m_amount >= 0)
+                continue;
+
+            reductionPct = (*itr)->GetModifier()->m_amount;
+            consumedHolder = (*itr)->GetHolder();
+            break;
         }
 
         if (reductionPct >= 0 || damage == 0)
@@ -3865,6 +3867,47 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder *holder)
 
     SpellSpecific spellId_spec = Spells::GetSpellSpecific(spellId);
 
+    auto isSealOfCommandTwistAura = [](uint32 auraSpellId) -> bool
+    {
+        switch (auraSpellId)
+        {
+            case 20375:
+            case 20915:
+            case 20918:
+            case 20919:
+            case 20920:
+            case 33006:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    auto keepOutgoingSealOfCommand = [&](SpellEntry const* existingSpell, SpellAuraHolder* existingHolder) -> bool
+    {
+        // Preserve a short outgoing Seal of Command overlap for custom twist timing.
+        if (!existingSpell || !existingHolder)
+            return false;
+
+        if (!spellProto->IsSealSpell())
+            return false;
+
+        if (isSealOfCommandTwistAura(spellProto->Id) || !isSealOfCommandTwistAura(existingSpell->Id))
+            return false;
+
+        if (holder->GetCasterGuid() != existingHolder->GetCasterGuid())
+            return false;
+
+        int32 overlapDuration = existingHolder->GetAuraDuration();
+        if (overlapDuration <= 0 || overlapDuration > 400)
+            overlapDuration = 400;
+
+        existingHolder->SetAuraMaxDuration(overlapDuration);
+        existingHolder->SetAuraDuration(overlapDuration);
+        existingHolder->UpdateAuraDuration();
+        return true;
+    };
+
     bool isAreaAura = spellProto->HasEffect(SPELL_EFFECT_APPLY_AREA_AURA_PARTY);
     SpellAuraHolderMap::iterator i, next;
 
@@ -3982,6 +4025,9 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder *holder)
         if ((is_spellSpecPerTarget || (is_spellSpecPerTargetPerCaster && holder->GetCasterGuid() == (*i).second->GetCasterGuid())) &&
             !(spellProto->Custom & SPELL_CUSTOM_STACK_WITH_SPELL_SPECIFIC))
         {
+            if (keepOutgoingSealOfCommand(i_spellProto, (*i).second))
+                continue;
+
             // cannot remove stronger snare / haste debuff
             if (spellId_spec == SPELL_SNARE || spellId_spec == SPELL_NEGATIVE_HASTE)
                 if (!Spells::CompareSpellSpecificAuras(spellProto, i_spellProto))
@@ -4047,6 +4093,9 @@ bool Unit::RemoveNoStackAurasDueToAuraHolder(SpellAuraHolder *holder)
         // non single (per caster) per target spell specific (possible single spell per target at caster)
         if (!is_spellSpecPerTargetPerCaster && !is_spellSpecPerTarget && sSpellMgr.IsNoStackSpellDueToSpell(spellId, i_spellId))
         {
+            if (keepOutgoingSealOfCommand(i_spellProto, (*i).second))
+                continue;
+                
             // Prevent replacing higher ranks with lesser ranks
             if (sSpellMgr.IsRankSpellDueToSpell(spellProto, i_spellId) && Spells::CompareAuraRanks(spellId, i_spellId) < 0)
             {

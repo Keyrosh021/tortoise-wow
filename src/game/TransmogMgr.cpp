@@ -294,7 +294,7 @@ uint8 TransmogMgr::ApplyTransmog(uint8 slot, uint32 sourceItemID, uint32 slotId)
 					if (srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF)
 						allowed = true;
 				if (destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM)
-					if (srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM)
+					if (srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM || srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_AXE2 || srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_MACE2 || srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD2)
 						allowed = true;
 				if (destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_AXE || destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_MACE || destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD)
 					if (srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_AXE || srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_MACE || srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD)
@@ -527,7 +527,7 @@ std::vector<uint32> TransmogMgr::GetAvailableTransmogs(uint8 InventorySlotId, ui
 					}
 					if (destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM)
 					{
-						if (proto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM)
+						if (proto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM || proto->SubClass == ITEM_SUBCLASS_WEAPON_AXE2 || proto->SubClass == ITEM_SUBCLASS_WEAPON_MACE2 || proto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD2)
 						{
 							tmogs.push_back(item);
 							continue;
@@ -544,10 +544,10 @@ std::vector<uint32> TransmogMgr::GetAvailableTransmogs(uint8 InventorySlotId, ui
 					if (destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_AXE2 || destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_MACE2 || destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD2)
 					{
 
-						if (proto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF || proto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM)
+						if (proto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF)
 							continue;
 
-						if (proto->SubClass == ITEM_SUBCLASS_WEAPON_AXE2 || proto->SubClass == ITEM_SUBCLASS_WEAPON_MACE2 || proto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD2)
+						if (proto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM || proto->SubClass == ITEM_SUBCLASS_WEAPON_AXE2 || proto->SubClass == ITEM_SUBCLASS_WEAPON_MACE2 || proto->SubClass == ITEM_SUBCLASS_WEAPON_SWORD2)
 						{
 							tmogs.push_back(item);
 							continue;

@@ -156,6 +156,78 @@ uint32 GetHolyMightSpellForCaster(Unit* caster)
     return 0;
 }
 
+uint32 GetMartyrBacklashPct(Unit* caster, SpellEntry const* spellInfo)
+{
+    // Martyr: read Seal/Judgement backlash percent from the active aura or spell data instead of spell_template edits.
+    if (!spellInfo)
+        return 0;
+
+    if (spellInfo->Id == 45814)
+    {
+        if (caster)
+        {
+            if (SpellAuraHolder* martyrAura = caster->GetSpellAuraHolder(45802))
+            {
+                int32 const pct = martyrAura->GetSpellProto()->CalculateSimpleValue(EFFECT_INDEX_1);
+                if (pct > 0)
+                    return uint32(pct);
+            }
+        }
+
+        return 10;
+    }
+
+    if (spellInfo->Id == 45816)
+    {
+        int32 const pct = spellInfo->CalculateSimpleValue(EFFECT_INDEX_1);
+        if (pct > 0)
+            return uint32(pct);
+
+        return 10;
+    }
+
+    return 0;
+}
+
+void DealMartyrBacklash(Unit* caster, SpellEntry const* spellInfo, uint32 damageDone)
+{
+    // Martyr recoil is applied in code after final damage is known.
+    if (!caster || !spellInfo || !damageDone || !caster->IsAlive())
+        return;
+
+    uint32 backlashSpellId = 0;
+    switch (spellInfo->Id)
+    {
+        case 45814:
+            backlashSpellId = 45815;
+            break;
+        case 45816:
+            backlashSpellId = 45817;
+            break;
+        default:
+            return;
+    }
+
+    uint32 const backlashPct = GetMartyrBacklashPct(caster, spellInfo);
+    if (!backlashPct)
+        return;
+
+    uint32 backlashDamage = damageDone * backlashPct / 100;
+    if (!backlashDamage)
+        backlashDamage = 1;
+
+    SpellEntry const* backlashSpell = sSpellMgr.GetSpellEntry(backlashSpellId);
+    if (!backlashSpell)
+        return;
+
+    uint32 absorb = 0;
+    caster->DealDamageMods(caster, backlashDamage, &absorb);
+    caster->SendSpellNonMeleeDamageLog(caster, backlashSpellId, backlashDamage, backlashSpell->GetSpellSchoolMask(), absorb, 0, false, 0, false);
+
+    CleanDamage cleanDamage(0, BASE_ATTACK, MELEE_HIT_NORMAL, absorb, 0);
+    caster->DealDamage(caster, backlashDamage, &cleanDamage, SELF_DAMAGE, backlashSpell->GetSpellSchoolMask(), backlashSpell, true, nullptr, true, false);
+}
+
 bool IsHolyStrikeDamageCarrierSpell(SpellEntry const* spellInfo)
 {
     return IsHolyStrikeSpell(spellInfo);
@@ -1698,6 +1770,10 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
 
         // Damage is done after procs so it can trigger auras on the victim that affect the caster.
         pCaster->DealSpellDamage(&damageInfo, true);
+
+        // Martyr: apply Seal/Judgement self-damage after final damage is known.
+        if ((m_spellInfo->Id == 45814 || m_spellInfo->Id == 45816) && damageInfo.damage)
+            DealMartyrBacklash(pRealUnitCaster, m_spellInfo, damageInfo.damage);
 
         if (!triggerWeaponProcs && m_caster->IsPlayer())
         {

@@ -290,7 +290,7 @@ pAuraHandler AuraHandler[TOTAL_AURAS] =
     &Aura::HandleNoImmediateEffect,                         //221 SPELL_AURA_MOD_ATTACK_POWER_OF_PARTY_FLAT
     &Aura::HandleNoImmediateEffect,                         //222 SPELL_AURA_MOD_ATTACK_POWER_OF_PARTY_PCT
     &Aura::HandleNoImmediateEffect,                         //223 SPELL_AURA_MOD_EQUIPPED_ITEM_PROC_CHANCE_PCT
-    &Aura::HandleNoImmediateEffect,                         //224 SPELL_AURA_MOD_BLOCKED_DAMAGE_PERCENT_TAKEN
+    &Aura::HandleNoImmediateEffect,                         //224 SPELL_AURA_MOD_BLOCKED_DAMAGE_PERCENT_TAKEN implemented in Unit block damage calculation
 };
 
 static AuraType const frozenAuraTypes[] = { SPELL_AURA_MOD_ROOT, SPELL_AURA_MOD_STUN, SPELL_AURA_NONE };
@@ -7770,7 +7770,9 @@ void SpellAuraHolder::_RemoveSpellAuraHolder()
             for (const auto& holder : holders)
             {
                 SpellEntry const* auraSpellInfo = holder.second->GetSpellProto();
-                if (auraSpellInfo->IsFitToFamily(SpellFamily(m_spellProto->SpellFamilyName), removeFamilyFlag))
+                // Seal of Command twisting: helper seal auras still keep the Judgement aura state active.
+                if ((removeState == AURA_STATE_JUDGEMENT && auraSpellInfo->IsSealSpell()) ||
+                        auraSpellInfo->IsFitToFamily(SpellFamily(m_spellProto->SpellFamilyName), removeFamilyFlag))
                 {
                     found = true;
                     break;

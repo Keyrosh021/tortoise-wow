@@ -357,6 +357,12 @@ SpellProcEventTriggerCheck Unit::IsTriggeredAtSpellProcEvent(Unit *pVictim, Spel
             if (spellProto->IsFitToFamily<SPELLFAMILY_PALADIN, CF_PALADIN_SEAL_OF_THE_CRUSADER, CF_PALADIN_SEAL_OF_WISDOM_LIGHT, CF_PALADIN_SEAL_OF_COMMAND, CF_PALADIN_SEALS>())
                 return roll_chance_u(50) ? SPELL_PROC_TRIGGER_OK : SPELL_PROC_TRIGGER_ROLL_FAILED;
         }
+        // Seal twisting: Seal of Command's triggered holy hit should also trigger the active seal.
+        if (spellProto->Id == 45802)
+        {
+            if (!isVictim && procSpell->Id == 20424 && (procFlag & PROC_FLAG_DEAL_MELEE_ABILITY))
+                return SPELL_PROC_TRIGGER_OK;
+        }
         if (spellProto->Id == 51022)
         {
             if (!procSpell->IsFitToFamily<SPELLFAMILY_DRUID, CF_DRUID_HEALING_TOUCH>() &&

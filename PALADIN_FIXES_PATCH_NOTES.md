@@ -61,9 +61,6 @@
 - Blessing of Sanctuary
   - Blessing of Sanctuary blocked-hit Holy damage fixed to 1% spellpower.
 
-- Retribution Aura
-  - Retribution Aura scales from 1% spellpower.
-
 - Shield Specialization
   - Shield Specialization mana-on-block now respects a 5 second internal cooldown.
 
