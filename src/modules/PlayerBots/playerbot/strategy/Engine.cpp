@@ -6,6 +6,7 @@
 #include "Engine.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/PerformanceMonitor.h"
+#include "playerbot/BotLearningMgr.h"
 #include "playerbot/BotActionLog.h"
 #include "MapManager.h"
 #include <algorithm>
@@ -148,6 +149,9 @@ bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
     time_t currentTime = time(0);
     MapManager::SetContinentUpdatePhase("engine-context", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     aiObjectContext->Update();
+    // Cache the outnumbered state once per tick for the learned-policy lookup below.
+    if (sPlayerbotAIConfig.learnedPolicyEnabled)
+        policyAttackerBucket = (aiObjectContext->GetValue<uint8>("attackers count")->Get() >= 2) ? 1 : 0;
     MapManager::SetContinentUpdatePhase("engine-triggers", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
     ProcessTriggers(minimal);
     MapManager::SetContinentUpdatePhase("engine-defaults", ai && ai->GetBot() ? ai->GetBot()->GetGUIDLow() : 0);
@@ -436,6 +440,20 @@ bool Engine::MultiplyAndPush(NextAction** actions, float forceRelevance, bool sk
                 if (!shouldPush)
                 {
                     shouldPush = k > 0.0f;
+                }
+
+                // LEARNED POLICY: bias triggered actions toward what historically wins
+                // for this bot's class + current state. GetActionRelevanceBonus is bounded
+                // (+/-8) and scaled by the bot's experiment cohort strength (0 = control),
+                // so it nudges the rotation without overriding hand-coded priorities or
+                // emergencies (k>=90). This closes the loop: logged (state,action,reward)
+                // -> learned action values -> the engine actually acts on them.
+                if (shouldPush && k > 0.0f && k < 90.0f && std::strcmp(pushType, "trigger") == 0 &&
+                    sPlayerbotAIConfig.learnedPolicyEnabled && ai && ai->GetBot())
+                {
+                    Player* pbot = ai->GetBot();
+                    k += BotExperiment::PolicyStrength(pbot->GetGUIDLow()) *
+                         sBotLearningMgr.GetActionRelevanceBonus(pbot, policyAttackerBucket, actionNode->getName());
                 }
 
                 if (shouldPush)
@@ -864,13 +882,12 @@ void Engine::LogAction(const char* format, ...)
     else
     {
         Player* bot = ai->GetBot();
-        if (sPlayerbotAIConfig.logInGroupOnly && !bot->GetGroup())
-            return;
-
-        sLog.outDetail( "%s %s", bot->GetName(), buf);
 
         // BotActionLog tee: every PUSH/A/Tick line also lands in the bot's
         // per-bot file under logs/bots/ when AiPlayerbot.EnableActionLog=1.
+        // This MUST run regardless of group status - the logInGroupOnly guard
+        // below only limits console (info.log) spam, not the per-bot trace, and
+        // gating the tee on it meant solo bots logged no decisions at all.
         // Tag heuristic extracts the first colon-prefix from `buf` so the
         // per-bot log gets useful tags (PUSH / A / T / etc.) instead of
         // a single "ACTION".
@@ -881,6 +898,11 @@ void Engine::LogAction(const char* format, ...)
         else if (strncmp(buf, "--- AI Tick", 11) == 0) tag = "TICK";
         else if (strncmp(buf, "no actions", 10) == 0)  tag = "NO_ACTION";
         ai::botdiag::BotActionLog::Write(ai, tag, "%s", buf);
+
+        if (sPlayerbotAIConfig.logInGroupOnly && !bot->GetGroup())
+            return;
+
+        sLog.outDetail( "%s %s", bot->GetName(), buf);
     }
 }
 

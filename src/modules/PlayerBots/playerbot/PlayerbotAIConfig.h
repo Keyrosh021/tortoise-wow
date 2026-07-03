@@ -15,6 +15,31 @@ inline std::string _D_AIPLAYERBOT_CONFIG = "aiplayerbot.conf";
 inline std::string _D_AIPLAYERBOT_CONFIG = SYSCONFDIR "aiplayerbot.conf";
 #endif
 
+// ---- Learning A/B experiment ----------------------------------------------
+// Deterministic per-bot cohort so EVERY server run is a live experiment: each
+// cohort runs a different parameter value, every fight is tagged with its cohort
+// + reward (see BotLearningMgr), and the learning report tool compares avg reward
+// by cohort to tell us which value wins. To change what we're learning each run,
+// edit the per-cohort value function(s) below; then read tools/bot_learning_report.py
+// after the run. Walk away with a learned result every single run.
+namespace BotExperiment
+{
+    constexpr uint32 COHORTS = 3;
+    inline uint32 Cohort(uint32 guidLow) { return guidLow % COHORTS; }
+
+    // CURRENT EXPERIMENT: LEARNED-POLICY STRENGTH. The engine nudges each action's
+    // relevance by its learned value (avg fight reward when used in this state), scaled
+    // by this per-cohort strength. Cohort 0 = 0.0 (CONTROL: pure hand-coded behavior),
+    // cohort 1 = 0.6, cohort 2 = 1.0 (full learned bias). Comparing avg reward by cohort
+    // tells us whether acting on the learned rotation actually IMPROVES outcomes, and how
+    // strongly to apply it. (Prior experiment learned flee<=50% HP, now baked as default.)
+    inline float PolicyStrength(uint32 guidLow)
+    {
+        static const float values[COHORTS] = { 0.0f, 0.6f, 1.0f };
+        return values[Cohort(guidLow)];
+    }
+}
+
 enum class BotCheatMask : uint32
 {
     none = 0,
@@ -247,6 +272,16 @@ public:
     float playerbotsXPrate;
     bool disableBotOptimizations;
     bool disableActivityPriorities;
+    // LOD COLD tier: brain (DoNextAction) interval for bots with no real player in their
+    // zone/map. 0 disables the COLD throttle. Slashes bot-AI execution volume for distant
+    // bots -> large CPU + crash-rate reduction (crashes scale with execution volume).
+    uint32 lodColdUpdateMs;
+    // LOD COLD radius (yards): a bot with no real player within this range goes dormant.
+    float lodColdRange;
+    // SUPERVISOR MODE: keep the whole (small) fleet at full foreground cadence even with NO player
+    // online, and write an honest per-second visible-activity trace (logs/supervisor.csv) so bot
+    // behaviour can be watched/measured autonomously. Only sane for a small fleet (~50 bots).
+    bool supervisorMode;
     bool forceActiveWhenNearPlayer;
     bool limitCombatActivity;
     bool guildOrderAlwaysActive;
@@ -268,6 +303,7 @@ public:
     // log files (logs/bots/<name>_acc<id>_<timestamp>.log) are emitted. Default
     // off so production servers don't pay disk I/O / branch overhead.
     bool enableActionLog;
+    bool learnedPolicyEnabled;
     bool enableOffSpecStrategies;
     bool useWanderAsDefaultFollowStrategy;
     std::string defaultFormation;

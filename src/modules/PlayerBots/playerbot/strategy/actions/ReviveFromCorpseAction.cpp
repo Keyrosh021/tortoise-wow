@@ -151,7 +151,15 @@ bool ReviveFromCorpseAction::Execute(Event& event)
     if (!corpse)
         return false;
 
-    if (corpse->GetGhostTime() + bot->GetCorpseReclaimDelay(corpse->GetType() == CORPSE_RESURRECTABLE_PVP) > time(nullptr))
+    // Autonomous bots must not idle out the human corpse-reclaim delay
+    // (30/60/120s, stacking on repeated deaths) — that wait was the dominant
+    // driver of the fleet sitting ~40% dead. Reclaiming AT the corpse carries no
+    // resurrection sickness, so instant reclaim on arrival is safe and far more
+    // human-like at the macro level (a real player isn't AFK on a res timer for
+    // 2 minutes). Bots grouped with a real player keep the normal delay.
+    const uint32 reclaimDelay = ai->HasRealPlayerMaster()
+        ? bot->GetCorpseReclaimDelay(corpse->GetType() == CORPSE_RESURRECTABLE_PVP) : 0u;
+    if (corpse->GetGhostTime() + reclaimDelay > time(nullptr))
         return false;
 
     if (master)
@@ -218,6 +226,103 @@ bool ReviveFromCorpseAction::Execute(Event& event)
     ClearDeadRecoveryProgress(bot);
 
     sPlayerbotAIConfig.logEvent(ai, "ReviveFromCorpseAction");
+
+    // DEATH-LOOP BREAKER. 4 bots produced 43% of all fleet deaths (Eliney: 31 deaths in 28 min) --
+    // each was trapped in an area too strong for it (L15 at the Duskwood boundary: everything aggros
+    // from huge range, unwinnable, un-outrunnable) while its travel target kept routing it back in.
+    // A real player gives up after 2-3 graveyard runs and LEAVES. On the 3rd+ revive within 15 min:
+    // dump the travel target (blacklisted via expiry), then hearthstone out (visible, legitimate);
+    // if hearthstone is on cooldown and nobody is watching, teleport to the home bind instead.
+    {
+        static std::mutex dlMx;
+        static std::unordered_map<uint32, std::deque<time_t>> recentRevives;
+        const time_t nowT = time(nullptr);
+        uint32 recentDeaths = 0;
+        {
+            std::lock_guard<std::mutex> lk(dlMx);
+            std::deque<time_t>& q = recentRevives[bot->GetGUIDLow()];
+            q.push_back(nowT);
+            while (!q.empty() && nowT - q.front() > 900)
+                q.pop_front();
+            recentDeaths = q.size();
+        }
+        if (!ai->HasRealPlayerMaster() && recentDeaths >= 3)
+        {
+            if (TravelTarget* tt = AI_VALUE(TravelTarget*, "travel target"))
+            {
+                tt->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+                tt->SetForced(false);
+            }
+            RESET_AI_VALUE(bool, "travel target active");
+            RESET_AI_VALUE(GuidPosition, "rpg target");
+
+            // Direct teleport when unobserved. (The first version tried hearthstone FIRST and trusted
+            // its return value -- but DoSpecificAction returns true when the 10s CAST STARTS, then a
+            // mob re-aggros and interrupts it, so bots logged "escaped=1" while never leaving and died
+            // 15x in the same field. Hearthstone only near players, where the visible legit cast
+            // matters and where the player's presence usually means the area is being cleared anyway.)
+            bool escaped = false;
+            if (!ai->HasPlayerNearby())
+            {
+                float hx, hy, hz; uint32 hmap;
+                bot->GetHomebindLocation(hx, hy, hz, hmap);
+                escaped = bot->TeleportTo(hmap, hx, hy, hz, bot->GetOrientation());
+            }
+            else
+                escaped = ai->DoSpecificAction("hearthstone", Event(), true);
+
+            FILE* dlf = fopen("logs/freeze_fix.csv", "a");
+            if (!dlf) dlf = fopen("../logs/freeze_fix.csv", "a");
+            if (dlf)
+            {
+                fprintf(dlf, "%s,%s,map%u,from=%.0f|%.0f,DEATHLOOP:deaths=%u escaped=%d\n",
+                    sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), bot->GetMapId(),
+                    bot->GetPositionX(), bot->GetPositionY(), recentDeaths, escaped ? 1 : 0);
+                fclose(dlf);
+            }
+            if (escaped)
+                return true;
+        }
+    }
+
+    // POST-REVIVE SAFETY HOP. A bot reclaims AT its corpse -- exactly where the mob killed it -- so it
+    // is instantly re-aggroed and killed again, looping (measured via bot_deaths.csv: the SAME bot died
+    // to the SAME creature 4x in 48s). For an autonomous bot, if a live hostile is close enough to
+    // immediately re-aggro, hop ~25y directly AWAY from it onto validated ground so it can actually
+    // recover instead of dying on the spot. Crash-safe NearTeleportTo + GetHeight validation (same as
+    // FreezeNudge / CorrectBotZ). Only when solo (grouped-with-a-real-player bots keep normal behavior).
+    // IMMERSION: never teleport where a real player can see it (a blinking bot is obviously a bot).
+    if (!ai->HasRealPlayerMaster() && !ai->HasPlayerNearby() && bot->GetMap())
+    {
+        Unit* nearestHostile = nullptr;
+        float nd = 18.0f;
+        for (const ObjectGuid& g : AI_VALUE(std::list<ObjectGuid>, "possible targets"))
+        {
+            Unit* u = ai->GetUnit(g);
+            if (!u || !u->IsAlive() || u->GetMapId() != bot->GetMapId() || sServerFacade.IsFriendlyTo(bot, u))
+                continue;
+            const float d = bot->GetDistance(u);
+            if (d < nd) { nd = d; nearestHostile = u; }
+        }
+        if (nearestHostile)
+        {
+            const float away = nearestHostile->GetAngle(bot);   // hostile -> bot direction = away from it
+            const float bx = bot->GetPositionX(), by = bot->GetPositionY(), bz = bot->GetPositionZ();
+            Map* map = bot->GetMap();
+            for (uint8 k = 0; k < 5; ++k)
+            {
+                const float a = away + ((k % 2) ? -1.0f : 1.0f) * (float)(k / 2) * (M_PI_F / 6.0f);
+                const float tx = bx + cosf(a) * 25.0f, ty = by + sinf(a) * 25.0f;
+                const float tz = map->GetHeight(tx, ty, bz + 5.0f, true);
+                if (tz > INVALID_HEIGHT && fabs(tz - bz) < 12.0f)
+                {
+                    bot->NearTeleportTo(tx, ty, tz + 0.5f, bot->GetOrientation());
+                    sPlayerbotAIConfig.logEvent(ai, "PostReviveSafetyHop", nearestHostile->GetName());
+                    break;
+                }
+            }
+        }
+    }
 
     return true;
 }

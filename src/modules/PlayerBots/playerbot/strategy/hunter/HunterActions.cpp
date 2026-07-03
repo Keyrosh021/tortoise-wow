@@ -29,6 +29,12 @@ bool CastAutoShotAction::isUseful()
     if (ai->IsInVehicle() && !ai->IsInVehicle(false, false, true))
         return false;
 
+    // Range gate: starting Auto Shot beyond weapon range failed OUT_OF_RANGE 15.7k/day and
+    // requeued every tick (decision churn). Let reach-spell close distance first.
+    Unit* target = AI_VALUE(Unit*, "current target");
+    if (target && sServerFacade.GetDistance2d(bot, target) > ai->GetRange("shoot"))
+        return false;
+
     return ai->HasStrategy("ranged", BotState::BOT_STATE_COMBAT) && AI_VALUE(uint32, "active spell") != AI_VALUE2(uint32, "spell id", getName());
 }
 

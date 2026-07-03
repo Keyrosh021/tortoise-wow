@@ -27,12 +27,16 @@ namespace ai
         virtual std::vector<std::string> GetUsedValues() { return { "attackers", "attack target"}; }
 #endif 
 
+    public:
+        // Public: InvalidTargetValue's approach-commitment must release targets tapped by others
+        // (grey name = unhittable/unlootable) instead of keeping bots staring at them.
+        static bool IsTapped(Unit* target, Player* player);
+
 	private:
 		void RemoveNonThreating(std::list<ObjectGuid>& targets, bool getOne);
 
         static bool IsImmuneToDamage(Unit* target, Player* player);
         static bool HasIgnoreCCRti(Unit* target, Player* player);
-        static bool IsTapped(Unit* target, Player* player);
     };
 
     class PossibleAddsValue : public BoolCalculatedValue

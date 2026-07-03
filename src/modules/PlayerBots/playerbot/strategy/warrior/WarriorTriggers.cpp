@@ -17,6 +17,11 @@ bool SunderArmorDebuffTrigger::IsActive()
     if (!target)
         return false;
 
+    // Sunder costs 15 rage; without this gate rage-starved warriors queued it every tick and the
+    // cast failed NO_POWER 120k+ times per day (pure decision churn, no visible action).
+    if (AI_VALUE2(uint8, "rage", "self target") < 15)
+        return false;
+
     if (ai->IsTank(bot) && !target->IsPlayer())
         return true;
 

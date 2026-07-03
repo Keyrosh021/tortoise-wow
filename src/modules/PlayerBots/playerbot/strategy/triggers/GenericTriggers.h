@@ -761,6 +761,16 @@ namespace ai
         virtual bool IsActive() override;
     };
 
+    // Fires for an autonomous grouped FOLLOWER when a fellow group member is in combat and there is
+    // a live mob within sight to help on -> used to push "dps assist" above "follow" so followers
+    // proactively JOIN the group's fight instead of passively trailing the leader.
+    class GroupAssistTrigger : public Trigger
+    {
+    public:
+        GroupAssistTrigger(PlayerbotAI* ai) : Trigger(ai, "group assist needed", 2) {}
+        virtual bool IsActive() override;
+    };
+
     class PossibleAddsTrigger : public Trigger
     {
     public:

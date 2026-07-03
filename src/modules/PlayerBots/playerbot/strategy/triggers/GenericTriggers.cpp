@@ -82,16 +82,47 @@ bool HasAggroTrigger::IsActive()
 
 bool PanicTrigger::IsActive()
 {
-    return !ai->IsInPvp() &&
-           AI_VALUE2(uint8, "health", "self target") < sPlayerbotAIConfig.criticalHealth &&
-		   (!AI_VALUE2(bool, "has mana", "self target") || 
-            AI_VALUE2(uint8, "mana", "self target") < sPlayerbotAIConfig.lowMana);
+    if (ai->IsInPvp())
+        return false;
+
+    // Must be in real trouble: critically low health, and (for mana users) too low
+    // on mana to keep fighting effectively.
+    const uint8 selfHealth = AI_VALUE2(uint8, "health", "self target");
+    if (selfHealth >= sPlayerbotAIConfig.criticalHealth)
+        return false;
+
+    if (AI_VALUE2(bool, "has mana", "self target") &&
+        AI_VALUE2(uint8, "mana", "self target") >= sPlayerbotAIConfig.lowMana)
+        return false;
+
+    // Only panic-flee when actually LOSING. Against a single mob that is more hurt
+    // than we are, we're winning the kill race — finish it instead of running
+    // circles around it at low HP. A target healthier than us (we die first), or
+    // more than one attacker, means we're losing: flee. (Genuine outnumbering is
+    // also caught independently by OutNumberedTrigger.)
+    if (AI_VALUE(uint8, "attackers count") <= 1)
+    {
+        Unit* target = AI_VALUE(Unit*, "current target");
+        if (target && AI_VALUE2(uint8, "health", "current target") < selfHealth)
+            return false;
+    }
+
+    return true;
 }
 
 bool OutNumberedTrigger::IsActive()
 {
     // Don't trigger if the bot is a dungeon or raid
     if (!bot->IsInWorld() || bot->IsBeingTeleported() || bot->GetMap()->IsDungeon() || bot->GetMap()->IsRaid())
+        return false;
+
+    // Don't flee while still healthy. A real player commits to a fight and only bails
+    // once actually getting hurt - not from any fight the power-formula below scores as
+    // marginally unfavorable (a single +2-3 level mob at full HP). Without this gate,
+    // bots fled winnable fights constantly (flee was the #1 action, 2.5x more than melee).
+    // 50% is the value the cohort experiment learned (now baked); the live experiment has
+    // moved on to learned-policy strength (see BotExperiment::PolicyStrength).
+    if (AI_VALUE2(uint8, "health", "self target") >= 50)
         return false;
 
     // Don't trigger if the bot is in a raid group
@@ -421,14 +452,19 @@ bool BoostTrigger::IsActive()
 {
     if (ai->IsStateActive(BotState::BOT_STATE_COMBAT) && BuffTrigger::IsActive())
     {
+        // Autonomous bots SHOULD use their offensive cooldowns in real fights, not
+        // only when badly outnumbered. The old `balance <= 50` gate (balance is ~100
+        // for a solo even-level fight) silenced Death Wish / Recklessness / Tiger's
+        // Fury / Combustion / Cold Snap / trinkets for the ENTIRE open-world fleet -
+        // bots never popped a cooldown. Fire whenever in combat with the buff missing
+        // (each cooldown action self-gates on its actual cooldown, so no spam); skip
+        // only trivially-easy grey targets (balance > 130 = enemy >~3 levels below us)
+        // where blowing a cooldown would be wasted.
         if (!ai->HasRealPlayerMaster())
         {
-            return AI_VALUE(uint8, "balance") <= balance;
+            return AI_VALUE(uint8, "balance") <= 130;
         }
-        else
-        {
-            return true;
-        }
+        return true;
     }
 
     return false;
@@ -696,6 +732,39 @@ bool NotDpsAoeTargetActiveTrigger::IsActive()
     }
 
     return false;
+}
+
+bool GroupAssistTrigger::IsActive()
+{
+    // Make an autonomous grouped FOLLOWER proactively join the group's fight instead of trailing
+    // the leader (bot-cam: a follower mage spent 34% of life on "follow", only 20% in combat; and
+    // the user observed followers "select a target but never get close to help/cast"). Fires only
+    // when: we are in a bot-led group (no real player giving orders), a fellow member is actually
+    // in combat near us, and there is a live mob within sight to assist on. The pushed "dps assist"
+    // (above "follow") then both picks the assist target AND drives the bot to engage it.
+    Group* group = bot->GetGroup();
+    if (!group || ai->HasActivePlayerMaster() || bot->IsInCombat())
+        return false;
+
+    bool memberInCombat = false;
+    Group::MemberSlotList const& slots = group->GetMemberSlots();
+    for (Group::member_citerator itr = slots.begin(); itr != slots.end(); ++itr)
+    {
+        Player* m = sObjectMgr.GetPlayer(itr->guid);
+        if (m && m != bot && m->IsInWorld() && !m->IsBeingTeleported() &&
+            m->GetMapId() == bot->GetMapId() && sServerFacade.IsAlive(m) && m->IsInCombat() &&
+            sServerFacade.GetDistance2d(bot, m) <= sPlayerbotAIConfig.sightDistance)
+        {
+            memberInCombat = true;
+            break;
+        }
+    }
+    if (!memberInCombat)
+        return false;
+
+    Unit* dps = AI_VALUE(Unit*, "dps target");
+    return dps && sServerFacade.IsAlive(dps) && !sServerFacade.IsFriendlyTo(bot, dps) &&
+           sServerFacade.GetDistance2d(bot, dps) <= sPlayerbotAIConfig.sightDistance;
 }
 
 bool IsSwimmingTrigger::IsActive()

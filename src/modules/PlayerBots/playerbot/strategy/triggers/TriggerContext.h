@@ -80,6 +80,7 @@ namespace ai
             creators["target in sight"] = [](PlayerbotAI* ai) { return new TargetInSightTrigger(ai); };
             creators["not dps target active"] = [](PlayerbotAI* ai) { return new NotDpsTargetActiveTrigger(ai); };
             creators["not dps aoe target active"] = [](PlayerbotAI* ai) { return new NotDpsAoeTargetActiveTrigger(ai); };
+            creators["group assist needed"] = [](PlayerbotAI* ai) { return new GroupAssistTrigger(ai); };
             creators["has nearest adds"] = [](PlayerbotAI* ai) { return new HasNearestAddsTrigger(ai); };
             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
 

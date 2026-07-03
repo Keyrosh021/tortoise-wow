@@ -55,9 +55,16 @@ void BalanceDruidStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
         NextAction::array(0, new NextAction("regrowth", ACTION_CRITICAL_HEAL + 1),
                              new NextAction("healing touch", ACTION_CRITICAL_HEAL), NULL)));
 
+    // Low HP: a squishy caster druid being meleed cannot land a 2s Regrowth (pushback)
+    // and dies mid-cast. Shift to BEAR FORM first - instant, ~+180% armor + a health
+    // bonus - to actually SURVIVE (then bear-melee / disengage), falling back to Regrowth
+    // when bear form isn't available (CastBearFormAction self-gates on known/level/form).
+    // Data: low-level Balance druids were the worst class (~38% survival) - they had no
+    // defensive tool wired into combat at all.
     triggers.push_back(new TriggerNode(
         "low health",
-        NextAction::array(0, new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
+        NextAction::array(0, new NextAction("bear form", ACTION_MEDIUM_HEAL + 2),
+                             new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
 
     triggers.push_back(new TriggerNode(
         "faerie fire",
@@ -85,9 +92,16 @@ void BalanceDruidStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& trigge
 {
     DruidStrategy::InitNonCombatTriggers(triggers);
 
+    // Low HP: a squishy caster druid being meleed cannot land a 2s Regrowth (pushback)
+    // and dies mid-cast. Shift to BEAR FORM first - instant, ~+180% armor + a health
+    // bonus - to actually SURVIVE (then bear-melee / disengage), falling back to Regrowth
+    // when bear form isn't available (CastBearFormAction self-gates on known/level/form).
+    // Data: low-level Balance druids were the worst class (~38% survival) - they had no
+    // defensive tool wired into combat at all.
     triggers.push_back(new TriggerNode(
         "low health",
-        NextAction::array(0, new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
+        NextAction::array(0, new NextAction("bear form", ACTION_MEDIUM_HEAL + 2),
+                             new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
 }
 
 void BalanceDruidStrategy::InitReactionTriggers(std::list<TriggerNode*>& triggers)
@@ -481,9 +495,16 @@ void BalanceDruidStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
         NextAction::array(0, new NextAction("regrowth", ACTION_CRITICAL_HEAL + 1),
                              new NextAction("healing touch", ACTION_CRITICAL_HEAL), NULL)));
 
+    // Low HP: a squishy caster druid being meleed cannot land a 2s Regrowth (pushback)
+    // and dies mid-cast. Shift to BEAR FORM first - instant, ~+180% armor + a health
+    // bonus - to actually SURVIVE (then bear-melee / disengage), falling back to Regrowth
+    // when bear form isn't available (CastBearFormAction self-gates on known/level/form).
+    // Data: low-level Balance druids were the worst class (~38% survival) - they had no
+    // defensive tool wired into combat at all.
     triggers.push_back(new TriggerNode(
         "low health",
-        NextAction::array(0, new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
+        NextAction::array(0, new NextAction("bear form", ACTION_MEDIUM_HEAL + 2),
+                             new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
 
     triggers.push_back(new TriggerNode(
         "faerie fire",
@@ -506,9 +527,16 @@ void BalanceDruidStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& trigge
 {
     DruidStrategy::InitNonCombatTriggers(triggers);
 
+    // Low HP: a squishy caster druid being meleed cannot land a 2s Regrowth (pushback)
+    // and dies mid-cast. Shift to BEAR FORM first - instant, ~+180% armor + a health
+    // bonus - to actually SURVIVE (then bear-melee / disengage), falling back to Regrowth
+    // when bear form isn't available (CastBearFormAction self-gates on known/level/form).
+    // Data: low-level Balance druids were the worst class (~38% survival) - they had no
+    // defensive tool wired into combat at all.
     triggers.push_back(new TriggerNode(
         "low health",
-        NextAction::array(0, new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
+        NextAction::array(0, new NextAction("bear form", ACTION_MEDIUM_HEAL + 2),
+                             new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
 }
 
 void BalanceDruidStrategy::InitReactionTriggers(std::list<TriggerNode*>& triggers)
@@ -878,9 +906,16 @@ void BalanceDruidStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
         NextAction::array(0, new NextAction("regrowth", ACTION_CRITICAL_HEAL + 1),
                              new NextAction("healing touch", ACTION_CRITICAL_HEAL), NULL)));
 
+    // Low HP: a squishy caster druid being meleed cannot land a 2s Regrowth (pushback)
+    // and dies mid-cast. Shift to BEAR FORM first - instant, ~+180% armor + a health
+    // bonus - to actually SURVIVE (then bear-melee / disengage), falling back to Regrowth
+    // when bear form isn't available (CastBearFormAction self-gates on known/level/form).
+    // Data: low-level Balance druids were the worst class (~38% survival) - they had no
+    // defensive tool wired into combat at all.
     triggers.push_back(new TriggerNode(
         "low health",
-        NextAction::array(0, new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
+        NextAction::array(0, new NextAction("bear form", ACTION_MEDIUM_HEAL + 2),
+                             new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
 
     triggers.push_back(new TriggerNode(
         "eclipse (solar)",
@@ -911,9 +946,16 @@ void BalanceDruidStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& trigge
 {
     DruidStrategy::InitNonCombatTriggers(triggers);
 
+    // Low HP: a squishy caster druid being meleed cannot land a 2s Regrowth (pushback)
+    // and dies mid-cast. Shift to BEAR FORM first - instant, ~+180% armor + a health
+    // bonus - to actually SURVIVE (then bear-melee / disengage), falling back to Regrowth
+    // when bear form isn't available (CastBearFormAction self-gates on known/level/form).
+    // Data: low-level Balance druids were the worst class (~38% survival) - they had no
+    // defensive tool wired into combat at all.
     triggers.push_back(new TriggerNode(
         "low health",
-        NextAction::array(0, new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
+        NextAction::array(0, new NextAction("bear form", ACTION_MEDIUM_HEAL + 2),
+                             new NextAction("regrowth", ACTION_MEDIUM_HEAL), NULL)));
 }
 
 void BalanceDruidStrategy::InitReactionTriggers(std::list<TriggerNode*>& triggers)

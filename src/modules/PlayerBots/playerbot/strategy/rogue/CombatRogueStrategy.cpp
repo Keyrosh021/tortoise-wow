@@ -221,6 +221,17 @@ void CombatRogueBuffRaidStrategy::InitNonCombatTriggers(std::list<TriggerNode*>&
 void CombatRogueBoostStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
 {
     RogueBoostStrategy::InitCombatTriggers(triggers);
+
+    // Adrenaline Rush / Blade Flurry are COMBAT cooldowns but were mis-wired into
+    // InitNonCombatTriggers, so they could NEVER fire during a fight. Use them on
+    // cooldown in combat (each action self-gates on its real cooldown/energy).
+    triggers.push_back(new TriggerNode(
+        "adrenaline rush",
+        NextAction::array(0, new NextAction("adrenaline rush", ACTION_HIGH + 5), NULL)));
+
+    triggers.push_back(new TriggerNode(
+        "blade flurry",
+        NextAction::array(0, new NextAction("blade flurry", ACTION_HIGH + 4), NULL)));
 }
 
 void CombatRogueBoostStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
@@ -628,6 +639,17 @@ void CombatRogueBuffRaidStrategy::InitNonCombatTriggers(std::list<TriggerNode*>&
 void CombatRogueBoostStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
 {
     RogueBoostStrategy::InitCombatTriggers(triggers);
+
+    // Adrenaline Rush / Blade Flurry are COMBAT cooldowns but were mis-wired into
+    // InitNonCombatTriggers, so they could NEVER fire during a fight. Use them on
+    // cooldown in combat (each action self-gates on its real cooldown/energy).
+    triggers.push_back(new TriggerNode(
+        "adrenaline rush",
+        NextAction::array(0, new NextAction("adrenaline rush", ACTION_HIGH + 5), NULL)));
+
+    triggers.push_back(new TriggerNode(
+        "blade flurry",
+        NextAction::array(0, new NextAction("blade flurry", ACTION_HIGH + 4), NULL)));
 }
 
 void CombatRogueBoostStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
@@ -1035,6 +1057,17 @@ void CombatRogueBuffRaidStrategy::InitNonCombatTriggers(std::list<TriggerNode*>&
 void CombatRogueBoostStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
 {
     RogueBoostStrategy::InitCombatTriggers(triggers);
+
+    // Adrenaline Rush / Blade Flurry are COMBAT cooldowns but were mis-wired into
+    // InitNonCombatTriggers, so they could NEVER fire during a fight. Use them on
+    // cooldown in combat (each action self-gates on its real cooldown/energy).
+    triggers.push_back(new TriggerNode(
+        "adrenaline rush",
+        NextAction::array(0, new NextAction("adrenaline rush", ACTION_HIGH + 5), NULL)));
+
+    triggers.push_back(new TriggerNode(
+        "blade flurry",
+        NextAction::array(0, new NextAction("blade flurry", ACTION_HIGH + 4), NULL)));
 }
 
 void CombatRogueBoostStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)

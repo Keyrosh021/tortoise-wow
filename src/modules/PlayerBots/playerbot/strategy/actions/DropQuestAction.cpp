@@ -57,7 +57,14 @@ bool CleanQuestLogAction::Execute(Event& event)
     uint8 totalQuests = 0;
 
     DropQuestType(requester, totalQuests); //Count the total quests
-     
+
+    // Zone-outlevel hygiene: abandon gray/red quests regardless of log fullness, like a real
+    // player leaving a zone. Completed quests are kept for turn-in and class quests are always
+    // protected inside DropQuestType. Without this, stale starter-zone quests pin the travel
+    // router to gray objectives and bots never migrate to level-appropriate hubs.
+    if (!ai->HasActivePlayerMaster() && AI_VALUE(bool, "can fight equal"))
+        DropQuestType(requester, totalQuests, 0, false, true, false);
+
     if (MAX_QUEST_LOG_SIZE - totalQuests > 6)
     {
         DropQuestType(requester, totalQuests, MAX_QUEST_LOG_SIZE, true, true); //Drop failed quests
@@ -92,7 +99,7 @@ bool CleanQuestLogAction::Execute(Event& event)
     return false;
 }
 
-void CleanQuestLogAction::DropQuestType(Player* requester, uint8 &numQuest, uint8 wantNum, bool isGreen, bool hasProgress, bool isComplete)
+void CleanQuestLogAction::DropQuestType(Player* requester, uint8 &numQuest, uint8 wantNum, bool isGreen, bool hasProgress, bool isComplete, bool grayOnly)
 {
     std::vector<uint8> slots;
 
@@ -125,8 +132,13 @@ void CleanQuestLogAction::DropQuestType(Player* requester, uint8 &numQuest, uint
                 numQuest++;
 
             int32 lowLevelDiff = sWorld.getConfig(CONFIG_INT32_QUEST_LOW_LEVEL_HIDE_DIFF);
-            if (lowLevelDiff < 0 || bot->GetLevel() <= bot->GetQuestLevelForPlayer(quest) + uint32(lowLevelDiff)) //Quest is not gray
+            if (lowLevelDiff < 0)
+                lowLevelDiff = 4 + (int32)bot->GetLevel() / 10; // vanilla gray boundary: gray at level >= questLevel + 5 + level/10 (strict > needs -1)
+            if (bot->GetLevel() <= bot->GetQuestLevelForPlayer(quest) + uint32(lowLevelDiff)) //Quest is not gray
             {
+                if (grayOnly) //Keep red quests: dropping them invites pickup/drop churn at quest givers
+                    continue;
+
                 if (bot->GetLevel() + 5 > bot->GetQuestLevelForPlayer(quest)) //Quest is not red
                     if (!isGreen)
                         continue;

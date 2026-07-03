@@ -211,6 +211,18 @@ bool QuestAction::ProcessQuests(WorldObject* questGiver)
             continue;
         }
 
+        // PROGRESSION GATE: an autonomous bot won't ACCEPT a quest it's already >=6 levels above
+        // (grey). Without this, bots immediately re-accept the same trivial quests the cleaner just
+        // dropped, and keep grinding an out-levelled zone forever. Rejecting grey local quests makes
+        // a bot that has out-levelled its area travel on to find level-appropriate content (the next
+        // zone). Class quests and level-less quests are always allowed.
+        if (!ai->HasActivePlayerMaster() && sRandomPlayerbotMgr.IsRandomBot(bot) &&
+            !quest->GetRequiredClasses() && quest->GetQuestLevel() > 0 &&
+            (int32)bot->GetLevel() - (int32)bot->GetQuestLevelForPlayer(quest) >= 6)
+        {
+            continue;
+        }
+
         hasAccept |= ProcessQuest(GetMaster(), quest, questGiver);
     }
 
@@ -223,6 +235,17 @@ bool QuestAction::AcceptQuest(Player* requester, Quest const* quest, uint64 ques
     {
         sPlayerbotAIConfig.logEvent(ai, "ChallengeQuestSkipped", quest ? quest->GetTitle() : "unknown", quest ? std::to_string(quest->GetQuestId()) : "0");
         return false;
+    }
+
+    // Don't self-accept gray quests: quest-log hygiene would drop them again (accept/drop
+    // churn) and they pin outleveled bots to old zones. Class quests and master orders exempt.
+    if (!ai->HasActivePlayerMaster() && !quest->GetRequiredClasses())
+    {
+        int32 lowLevelDiff = sWorld.getConfig(CONFIG_INT32_QUEST_LOW_LEVEL_HIDE_DIFF);
+        if (lowLevelDiff < 0)
+            lowLevelDiff = 4 + (int32)bot->GetLevel() / 10; // vanilla gray boundary (see DropQuestAction)
+        if (bot->GetLevel() > bot->GetQuestLevelForPlayer(quest) + uint32(lowLevelDiff))
+            return false;
     }
 
     bool success = false;

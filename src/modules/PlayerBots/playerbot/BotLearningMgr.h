@@ -5,6 +5,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <array>
 #include <unordered_map>
 #include <vector>
 
@@ -47,7 +48,31 @@ namespace ai
 
         float GetTravelPenalty(Player* bot, TravelDestination* destination, WorldPosition const* position, std::string* reason = nullptr);
         void RecordBotTelemetry(PlayerbotAI* ai, uint32 elapsed);
+        // Sampled (~1/sec) per-bot combat decision: captures the bot's state + the
+        // action it just took, tagged with the current fightId so it can be joined to
+        // the fight's reward. Cheap no-op when not in combat / not the bot's turn to sample.
+        void RecordCombatDecision(PlayerbotAI* ai, std::string const& action);
         void FlushTelemetry();
+
+        // ---- Learned policy (closes the loop: logged (state,action,reward) -> action bias) ----
+        // Aggregates the decision+reward data into an in-memory action-value table
+        // (per class + HP bucket: how much above/below the local average reward an action
+        // is). Recomputed periodically from FlushTelemetry as data accumulates.
+        void ComputeAndLoadPolicy();
+        // Bounded relevance nudge for `action` given the bot's class + current state
+        // (HP, mana, and whether it's outnumbered: attackerBucket 0 = <=1 attacker, 1 =
+        // 2+). The engine adds this (scaled by the bot's experiment cohort strength) to
+        // the action's relevance, biasing the rotation toward what historically wins. 0
+        // if no data / disabled. Cheap: one hashed lookup. The engine computes
+        // attackerBucket once per tick (not per action) to keep this off the hot path.
+        float GetActionRelevanceBonus(Player* bot, uint8 attackerBucket, std::string const& action);
+
+        // LEARNED SPEC: best-performing talent tab for a class, derived from the fleet's own fight
+        // rewards (avg reward by class+spec_tab over the newest samples, recomputed with the policy).
+        // Returns -1 when there is not enough data; caller falls back to config probabilities.
+        // Used by PlayerbotFactory::InitTalentsTree to bias NEW spec rolls toward what wins,
+        // with exploration preserved so all specs keep generating data.
+        int GetLearnedBestSpec(uint8 cls);
 
     private:
         struct TaskSample
@@ -120,6 +145,37 @@ namespace ai
             int32 levelDelta = 0;
             int32 xpDelta = 0;
             int32 moneyDelta = 0;
+            // Single fitness score for this fight (computed from the outcome fields
+            // above). This is the LEARNING SIGNAL: every fight becomes a labeled
+            // training example (context -> reward). Higher = better fight.
+            float reward = 0.0f;
+            // A/B EXPERIMENT cohort (bot guid % cohorts). Each cohort runs a different
+            // parameter value this run; comparing avg reward by cohort = what we learn.
+            uint8 cohort = 0;
+            // Links this fight's REWARD to the per-decision (state,action) rows logged
+            // during it (DecisionSample.fightId). Join on it to get (state,action,reward).
+            uint32 fightId = 0;
+        };
+
+        // One sampled COMBAT DECISION: the bot's state + the action it took. Joined to
+        // CombatSample by fightId to attach the fight's reward -> (state, action, reward)
+        // tuples = the dataset for learning a per-class rotation POLICY (which action
+        // wins in which state) instead of hand-coded triggers.
+        struct DecisionSample
+        {
+            uint32 fightId = 0;
+            uint32 botGuid = 0;
+            uint8 clazz = 0;
+            int8 specTab = -1;
+            uint8 level = 0;
+            uint8 cohort = 0;
+            uint8 healthPct = 100;        // bot HP%
+            uint8 powerPct = 100;         // bot mana/energy/rage %
+            uint8 targetHealthPct = 100;  // current target HP%
+            uint8 attackerCount = 0;      // mobs attacking the bot
+            bool inMelee = false;         // in melee range of the target
+            int8 levelDelta = 0;          // target level - bot level
+            std::string action;           // executed action name
         };
 
         struct BotTelemetryState
@@ -147,6 +203,8 @@ namespace ai
             float combatMinHealthPct = 100.0f;
             float combatMinPowerPct = 100.0f;
             bool combatDeathObserved = false;
+            uint32 fightId = 0;          // unique id for the current fight (decision<->reward link)
+            uint32 lastDecisionMs = 0;   // throttle decision sampling to ~1/sec per bot
         };
 
         int32 BucketCoord(float value, float size = 25.0f) const;
@@ -155,8 +213,10 @@ namespace ai
         void EnsureTelemetryTables();
         void QueueTaskSample(TaskSample const& sample);
         void QueueCombatSample(CombatSample const& sample);
+        void QueueDecisionSample(DecisionSample const& sample);
         uint32 FlushTaskSamples(std::vector<TaskSample> const& samples);
         uint32 FlushCombatSamples(std::vector<CombatSample> const& samples);
+        uint32 FlushDecisionSamples(std::vector<DecisionSample> const& samples);
 
         std::mutex loadMutex;
         std::mutex telemetryMutex;
@@ -167,9 +227,23 @@ namespace ai
         std::unordered_map<uint32, BotTelemetryState> telemetryStates;
         std::deque<TaskSample> taskSampleQueue;
         std::deque<CombatSample> combatSampleQueue;
+        std::deque<DecisionSample> decisionSampleQueue;
         uint32 lastTelemetryFlushMs = 0;
         uint32 droppedTaskSamples = 0;
         uint32 droppedCombatSamples = 0;
+        uint32 droppedDecisionSamples = 0;
+        uint32 nextFightId = 1;
+
+        // Learned action-value table: key "class|hpBucket|action" -> bounded relevance
+        // bonus. Read by GetActionRelevanceBonus (engine, hot path), rebuilt by
+        // ComputeAndLoadPolicy. Guarded by its own mutex so engine reads don't contend
+        // on telemetryMutex.
+        std::unordered_map<std::string, float> policyBonus;
+        std::mutex policyMutex;
+        // class -> best spec tab (0-2) by avg fight reward; -1 = insufficient data. Guarded by policyMutex.
+        std::array<int, 16> learnedBestSpec{};
+        bool learnedSpecReady = false;
+        uint32 lastPolicyComputeMs = 0;
     };
 }
 

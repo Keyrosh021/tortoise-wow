@@ -51,6 +51,10 @@ public:
     static void Init();
     void Refresh();
     void Randomize(bool incremental, bool syncWithMaster);
+    // Learn every class-trainer spell the bot's level qualifies for (all ranks).
+    // Public so it can be called on bot LOGIN (existing bots leveled before AutoLearn
+    // was on and are missing most of their kit -> caps every class + the learned policy).
+    void LearnClassTrainerSpells();
     static std::list<uint32> classQuestIds;
     static std::list<uint32> specialQuestIds;
     void InitSkills();

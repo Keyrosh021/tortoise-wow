@@ -129,6 +129,37 @@ void ai::DeferForeignLootGuidForBot(Player* bot, ObjectGuid guid)
     DeferLootGuidForBot(bot, guid, PLAYERBOT_FOREIGN_LOOT_RETRY_DELAY);
 }
 
+void ai::ClearLootGuidSkipForBot(Player* bot, ObjectGuid guid)
+{
+    if (!bot || !guid)
+        return;
+    {
+        std::lock_guard<std::mutex> guard(s_suppressedLootGuidsMutex);
+        s_suppressedLootGuids.erase(guid.GetRawValue());
+    }
+    if (PlayerbotAI* ai = bot->GetPlayerbotAI())
+        ai->GetAiObjectContext()->GetValue<time_t>("manual time", GetLootSkipQualifier(guid))->Set(0);
+}
+
+bool ai::IsLootObjectCloseEnoughToOpen(Player* bot, LootObject& lootObject, float creatureRange)
+{
+    if (!bot || lootObject.IsEmpty())
+        return false;
+
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai)
+        return false;
+
+    if (lootObject.guid.IsGameObject())
+    {
+        GameObject* go = ai->GetGameObject(lootObject.guid);
+        return go && sServerFacade.isSpawned(go) && go->IsAtInteractDistance(bot);
+    }
+
+    WorldObject* wo = lootObject.GetWorldObject(bot);
+    return wo && sServerFacade.GetDistance2d(bot, wo) <= creatureRange;
+}
+
 LootTarget::LootTarget(ObjectGuid guid) : guid(guid), asOfTime(time(0))
 {
 }
@@ -181,6 +212,7 @@ void LootObject::Refresh(Player* bot, ObjectGuid guid, bool debug)
 
     PlayerbotAI* ai = bot->GetPlayerbotAI();
     Creature* creature = ai->GetCreature(guid);
+
     if (creature && sServerFacade.GetDeathState(creature) == CORPSE)
     {
         if (creature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE))
@@ -188,7 +220,16 @@ void LootObject::Refresh(Player* bot, ObjectGuid guid, bool debug)
             if (debug)
                 ai->TellDebug(ai->GetMaster(), "Creature flag lootable.", "debug loot");
 
+            // LOOT WINS while the corpse is still lootable. This core can flag a corpse LOOTABLE and
+            // SKINNABLE simultaneously (verified live on Princess: lootable=1 skinnable=1), and the
+            // skinnable branch below then OVERWRITES the object into a skinning node (skillId set) --
+            // every non-skinner rejected the corpse as "a node I can't harvest" and NEVER LOOTED it.
+            // Starter zones are ~80% beasts, so this silently killed most looting (quest drops like
+            // the Brass Collar included: 45 bots stuck, 0 completions ever). A player can't skin an
+            // unlooted corpse anyway -- register plain loot and only consider skinning once the
+            // lootable flag is gone.
             this->guid = guid;
+            return;
         }
 
         if (creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))
@@ -357,7 +398,22 @@ bool LootObject::IsLootPossible(Player* bot)
     AiObjectContext* context = ai->GetAiObjectContext();
 
     if (IsLootGuidSkippedForBot(bot, guid))
-        return false;
+    {
+        // Respawned creatures REUSE their guid, so a skip recorded against a PREVIOUS corpse (foreign
+        // kill defer / empty-loot suppression -- and the suppression layer is GLOBAL across bots!)
+        // poisons the bot's OWN later kill of the same guid. Verified live: Helinaria repeatedly
+        // killed Princess (kill xp granted) but never opened the corpse, so quest-drop items were
+        // never obtainable fleet-wide (45 bots stuck on 'Princess Must Die!', 0 completions ever).
+        // If the bot has loot RIGHTS on the current corpse, the skip is stale: clear it and proceed.
+        Creature* skipCreature = guid.IsCreature() ? ai->GetCreature(guid) : nullptr;
+        if (skipCreature && sServerFacade.GetDeathState(skipCreature) == CORPSE &&
+            bot->IsAllowedToLoot(skipCreature))
+        {
+            ClearLootGuidSkipForBot(bot, guid);
+        }
+        else
+            return false;
+    }
 
     if (reqItem && !bot->HasItemCount(reqItem, 1))
         return false;

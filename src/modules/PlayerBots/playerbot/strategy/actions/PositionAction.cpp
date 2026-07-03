@@ -204,6 +204,14 @@ bool ReturnToStayPositionAction::isPossible()
 
 bool ReturnToPullPositionAction::isPossible()
 {
+    // Returning to the pull position only makes sense to DRAG the mob back to a GROUP camp. A solo
+    // bot walking back mid-fight just breaks its own auto-attack until the mob leashes and evade-heals
+    // to full -- watched Hurtian damage a boar to 77%, walk away on this action, the boar reset, and
+    // he moved on to a fresh mob; repeated forever = constant movement, zero kills, zero XP. Solo
+    // bots fight where they stand.
+    if (!bot->GetGroup() && !ai->HasRealPlayerMaster())
+        return false;
+
     PositionMap& posMap = AI_VALUE(PositionMap&, "position");
     PositionEntry stayPosition = posMap["pull"];
     if (stayPosition.isSet())

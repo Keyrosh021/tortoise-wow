@@ -16,6 +16,11 @@
 using namespace ai;
 using namespace MaNGOS;
 
+// Grace window (seconds) a travel target's conditions must stay continuously inactive
+// before we cool down + re-plan. Smooths the transient condition flicker that was the
+// dominant source of quest-travel re-plan churn. See TravelTarget status-check logic.
+static const time_t TRAVEL_CONDITION_INACTIVE_GRACE_SEC = 6;
+
 // Penqle's Singleton<> requires an explicit instantiation in a .cpp file.
 INSTANTIATE_SINGLETON_1(ai::TravelMgr);
 
@@ -118,7 +123,9 @@ bool QuestRelationTravelDestination::IsPossible(const PlayerTravelInfo& info) co
 
     if (GetRelation() == 0)
     {
-        if (!forceThisQuest && (int32)quest->GetQuestLevel() >= (int32)info.GetLevel() + (int32)5)
+        // Don't pick up quests whose level is above the bot's own level — keeps
+        // low-level bots out of too-high/dangerous content. Focus quests bypass this.
+        if (!forceThisQuest && (int32)quest->GetQuestLevel() > (int32)info.GetLevel())
             return false;
 
         if ((int32)info.GetLevel() < quest->GetMinLevel() || (int32)info.GetLevel() > quest->GetMaxLevel())
@@ -927,9 +934,14 @@ TravelTarget::TravelTarget(PlayerbotAI* ai) : AiObject(ai)
 }
 
 void TravelTarget::SetTarget(TravelDestination* tDestination1, WorldPosition* wPosition1) {
-    if (dynamic_cast<TemporaryTravelDestination*>(tDestination) && tDestination1 != tDestination)
-        delete tDestination;
-
+    // DO NOT delete the previous TemporaryTravelDestination here. Destination pointers are
+    // SHARED: CopyTarget() (group travel) copies one bot's tDestination into another bot's
+    // TravelTarget, and bots update on parallel map-update threads. Deleting it on replace
+    // freed a destination another bot/thread still held -> dangling pointer -> SIGSEGV in
+    // MoveToTravelTargetAction::isUseful()/TrackActionMetrics (dynamic_cast on a freed vtable).
+    // ~TravelTarget is already =default (never frees tDestination), so temporary destinations
+    // are already intentionally leaked on logout; not freeing on replace keeps that behavior
+    // and is memory-safe. (TemporaryTravelDestinations are rare -- only dynamic hub targets.)
     wPosition = wPosition1;
     tDestination = tDestination1;
 
@@ -969,9 +981,10 @@ void TravelTarget::SetStatus(TravelStatus status) {
             (typeid(*tDestination) == typeid(QuestRelationTravelDestination) ||
              typeid(*tDestination) == typeid(QuestObjectiveTravelDestination)))
         {
-            // Quest travel is allowed to retry quickly. A long cooldown leaves low-level bots
-            // refusing grind targets because quest work exists, while also not choosing new travel.
-            statusTime = 1000;
+            // Quest travel may retry faster than the 60s default, but 1s made re-planning
+            // effectively instant: an ended target was replaced within a tick, so decisions
+            // flickered (measured 66 target-ends/min fleet-wide). 20s reads as a purposeful pause.
+            statusTime = 20000;
         }
     default: break;
     }
@@ -1090,6 +1103,26 @@ void TravelTarget::CheckStatus()
     {
         bool destinationInactive = !IsDestinationActive() && !IsForced();
         bool conditionsInactive = !destinationInactive && !IsConditionsActive(); // Only check conditions if destination is still active
+
+        // CONDITION-FLICKER HYSTERESIS: travel conditions (e.g. "need quest objective")
+        // blink false transiently as nearby objects/values recompute between scans. The
+        // old code cooled down + re-planned on EVERY flicker -> measured ~42k
+        // conditions-inactive cooldowns + 53k re-plans + 40k async path computations/run.
+        // Require the conditions to stay inactive past a short grace window before acting;
+        // a flicker that recovers within the window keeps the bot traveling. A genuinely
+        // completed objective instead goes destinationInactive (bypasses this grace).
+        if (conditionsInactive)
+        {
+            const time_t nowCond = time(0);
+            if (!m_conditionsInactiveSince)
+                m_conditionsInactiveSince = nowCond;
+            if (nowCond - m_conditionsInactiveSince < TRAVEL_CONDITION_INACTIVE_GRACE_SEC)
+                conditionsInactive = false; // within grace -> treat the flicker as still active
+        }
+        else
+        {
+            m_conditionsInactiveSince = 0; // conditions active (or destination inactive) -> reset timer
+        }
         QuestRelationTravelDestination* questRelationDest = dynamic_cast<QuestRelationTravelDestination*>(tDestination);
         QuestObjectiveTravelDestination* questObjectiveDest = dynamic_cast<QuestObjectiveTravelDestination*>(tDestination);
         const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
@@ -1129,6 +1162,7 @@ void TravelTarget::CheckStatus()
                 sPlayerbotAIConfig.logEvent(ai, "TravelCooldownTrace", tDestination ? tDestination->GetTitle() : "travel", out.str());
             }
             forced = false;
+            m_conditionsInactiveSince = 0; // start fresh for the next destination
             SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
             if (questObjectiveRetry)
             {
@@ -1156,7 +1190,7 @@ void TravelTarget::CheckStatus()
             }
             else if (lowLevelQuestgiverRetry || lowLevelQuestTurnInRetry)
             {
-                SetExpireIn(15000);
+                SetExpireIn(5000);
                 ai->GetAiObjectContext()->ClearValues("no active travel destinations");
                 if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
                 {
@@ -1241,6 +1275,10 @@ void TravelMgr::Clear()
 
 int32 TravelMgr::GetAreaLevel(uint32 area_id)
 {
+    // Serialize all access to the areaLevels cache. This runs on the async travel
+    // workers and recursively for sub-areas; concurrent map writes corrupted the heap.
+    std::lock_guard<std::recursive_mutex> lock(areaLevelsMutex);
+
     auto lev = areaLevels.find(area_id);
 
     if (lev != areaLevels.end())
@@ -2796,6 +2834,12 @@ namespace
         const TravelDestinationPurpose purpose = static_cast<TravelDestinationPurpose>(purposeFlag);
         switch (purpose)
         {
+        // IMPORTANT: do NOT remove QuestGiver here. Un-bypassing it makes
+        // IsLocationLevelValid() -> WorldPosition::getAreaLevel() -> loadVMap run on the
+        // ASYNC travel thread (GetPartitions is async), which races shared terrain data
+        // and causes intermittent heap-corruption SIGSEGV at scale (verified, see memory).
+        // Over-level gating for quest pickup is done THREAD-SAFELY via quest->GetQuestLevel()
+        // in QuestRelationTravelDestination::IsPossible() instead.
         case TravelDestinationPurpose::QuestGiver:
         case TravelDestinationPurpose::QuestTaker:
         case TravelDestinationPurpose::QuestObjective1:

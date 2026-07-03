@@ -169,8 +169,13 @@ void WarriorAoeStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
         "melee light aoe",
         NextAction::array(0, new NextAction("cleave", ACTION_HIGH + 3), NULL)));
 
+    // Thunder Clap is an AoE ability: only use it when MULTIPLE enemies are
+    // attacking (and the bot has rage). The bare "thunder clap" trigger fired
+    // whenever the target lacked the debuff, so warriors were Thunder Clapping
+    // single mobs. "thunder clap and rage and aoe" = debuff-missing AND medium
+    // rage AND 2+ nearby attackers.
     triggers.push_back(new TriggerNode(
-        "thunder clap",
+        "thunder clap and rage and aoe",
         NextAction::array(0, new NextAction("thunder clap", ACTION_HIGH + 2), NULL)));
 
     triggers.push_back(new TriggerNode(
@@ -460,8 +465,13 @@ void WarriorAoeStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
         "melee light aoe",
         NextAction::array(0, new NextAction("cleave", ACTION_HIGH + 3), NULL)));
 
+    // Thunder Clap is an AoE ability: only use it when MULTIPLE enemies are
+    // attacking (and the bot has rage). The bare "thunder clap" trigger fired
+    // whenever the target lacked the debuff, so warriors were Thunder Clapping
+    // single mobs. "thunder clap and rage and aoe" = debuff-missing AND medium
+    // rage AND 2+ nearby attackers.
     triggers.push_back(new TriggerNode(
-        "thunder clap",
+        "thunder clap and rage and aoe",
         NextAction::array(0, new NextAction("thunder clap", ACTION_HIGH + 2), NULL)));
 
     triggers.push_back(new TriggerNode(
@@ -747,8 +757,13 @@ void WarriorAoeStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
         "melee light aoe",
         NextAction::array(0, new NextAction("cleave", ACTION_HIGH + 3), NULL)));
 
+    // Thunder Clap is an AoE ability: only use it when MULTIPLE enemies are
+    // attacking (and the bot has rage). The bare "thunder clap" trigger fired
+    // whenever the target lacked the debuff, so warriors were Thunder Clapping
+    // single mobs. "thunder clap and rage and aoe" = debuff-missing AND medium
+    // rage AND 2+ nearby attackers.
     triggers.push_back(new TriggerNode(
-        "thunder clap",
+        "thunder clap and rage and aoe",
         NextAction::array(0, new NextAction("thunder clap", ACTION_HIGH + 2), NULL)));
 
     triggers.push_back(new TriggerNode(

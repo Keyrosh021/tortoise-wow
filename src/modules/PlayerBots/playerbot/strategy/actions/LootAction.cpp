@@ -11,12 +11,20 @@
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/SharedValueContext.h"
 
+#include <mutex>
+#include <unordered_map>
+
 
 using namespace ai;
 
 namespace
 {
-    static constexpr float PLAYERBOT_STRICT_LOOT_RANGE = 2.0f;
+    // 4.5y, was 2.0y: the core accepts CMSG_LOOT within INTERACTION_DISTANCE (5y), but forcing bots
+    // to converge to 2y made MoveNear ORBIT the corpse (each dispatch lands on a slightly different
+    // offset point) until the loot target timed out -- watched Seranon kill Princess at melee range,
+    // wobble around her corpse for 8s in "move to loot", and give up without ever opening it. At
+    // 4.5y the first hop is already close enough to open.
+    static constexpr float PLAYERBOT_STRICT_LOOT_RANGE = 4.5f;
     static constexpr time_t PLAYERBOT_EMPTY_LOOT_RETRY_DELAY = 30;
     static constexpr time_t PLAYERBOT_GO_OPEN_RETRY_DELAY = 10;
 
@@ -94,19 +102,16 @@ namespace
         if (!aiContext)
             return false;
 
+        // Only ACTUAL combat pressure blocks looting -- the bot is flagged in-combat or is being
+        // attacked. A merely QUEUED next grind target (HasAttachedLiveTarget / HasLiveHostileTarget)
+        // must NOT block looting: grinding bots ALWAYS have the next mob queued as "current target",
+        // so counting that as pressure deferred (and the caller ABANDONED) the loot on nearly every
+        // kill -> the fleet earned 0 gold and never looted quest items. Real players loot their kills
+        // with the next mob already targeted; so do we.
         if (aiContext->GetValue<bool>("combat", "self target")->Get())
             return true;
 
-        if (HasAttachedLiveTarget(ai, bot, currentTarget))
-            return true;
-
         if (aiContext->GetValue<bool>("has attackers")->Get())
-            return true;
-
-        // Bots can keep a living hostile "current target" while the generic combat flag
-        // has already dropped. Treat that as combat pressure too so they do not kneel,
-        // loot, or stay visually stuck in a loot animation mid-fight.
-        if (HasLiveHostileTarget(bot, currentTarget))
             return true;
 
         return false;
@@ -254,9 +259,15 @@ bool LootAction::Execute(Event& event)
 
     if (!prevLoot.IsEmpty() && prevLoot.guid != lootObject.guid)
     {
-        WorldPacket packet(CMSG_LOOT_RELEASE, 8);
-        packet << prevLoot.guid;
-        bot->GetSession()->HandleLootReleaseOpcode(packet);
+        // Switching loot target: release the previous one, but ONLY if the bot actually
+        // has it open (GetLootGuid). Releasing a GO the bot merely targeted but never
+        // opened would run DoLootRelease's "not fully looted" branch and LOCK it. This
+        // matches the old HandleLootReleaseOpcode, which only ever released GetLootGuid.
+        if (bot->GetLootGuid() == prevLoot.guid)
+        {
+            if (WorldSession* session = bot->GetSession())
+                session->DoLootRelease(prevLoot.guid);
+        }
     }
 
     context->GetValue<LootObject>("loot target")->Set(lootObject);
@@ -328,6 +339,26 @@ bool OpenLootAction::Execute(Event& event)
         ClearActiveLootState(ai, bot, lootObject.guid);
         context->GetValue<LootObject>("loot target")->Set(LootObject());
     }
+    else
+    {
+        // DoLoot failed but ILP still passes: without a bound this retries every tick forever
+        // (the SKINNABLE-gate mismatch spun 1.43M times on one corpse). After a few consecutive
+        // failures on the same guid, defer it briefly so the bot moves on and retries later.
+        struct FailSt { ObjectGuid guid; uint32 count; };
+        static std::mutex failMx;
+        static std::unordered_map<uint32, FailSt> failTrack;
+        std::lock_guard<std::mutex> lk(failMx);
+        FailSt& fs = failTrack[bot->GetGUIDLow()];
+        if (fs.guid != lootObject.guid) { fs.guid = lootObject.guid; fs.count = 0; }
+        if (++fs.count >= 5)
+        {
+            fs.count = 0;
+            AI_VALUE(LootObjectStack*, "available loot")->Remove(lootObject.guid);
+            context->GetValue<LootObject>("loot target")->Set(LootObject());
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                sPlayerbotAIConfig.logEvent(ai, "LootOpenGivenUp", std::to_string(lootObject.guid.GetCounter()), "reason=5-consecutive-doloot-failures");
+        }
+    }
     return result;
 }
 
@@ -340,7 +371,11 @@ bool OpenLootAction::DoLoot(LootObject& lootObject)
     }
 
     Creature* creature = ai->GetCreature(lootObject.guid);
-    if (creature && sServerFacade.GetDistance2d(bot, creature) > PLAYERBOT_STRICT_LOOT_RANGE)
+    // Mirror the CORE's loot-range test exactly (Player::SendLoot uses 3D IsWithinDistInMap with
+    // GetMaxLootDistance and no size credit). The old 2D 4.5y gate passed positions the core then
+    // rejected with LOOT_ERROR_TOO_FAR -- the bot stood "in range" by its own math, got the error
+    // response, never re-approached, and spun on the corpse forever.
+    if (creature && !bot->IsWithinDistInMap(creature, bot->GetMaxLootDistance(creature), true, SizeFactor::None))
     {
         if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
         {
@@ -352,10 +387,18 @@ bool OpenLootAction::DoLoot(LootObject& lootObject)
         }
 
         bot->SetWalk(false, false);
-        return MoveNear(creature, PLAYERBOT_STRICT_LOOT_RANGE);
+        // HYSTERESIS: approach well INSIDE the open gate (1.5y vs the 4.5y check above). Approaching
+        // to exactly the gate distance made MoveNear land ON the ring edge, float-jittering in/out --
+        // the bot orbited its own kill until the loot target timed out, never opening.
+        return MoveNear(creature, 1.5f);
     }
 
-    if (creature && creature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE) && !creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))
+    // LOOT WINS at the dispatch gate too: this core sets SKINNABLE at death, so fresh corpses are
+    // lootable+skinnable simultaneously. Requiring !SKINNABLE here sent every such corpse into the
+    // skinning branch, which returns false for bots without the skill -- the rights holder retried
+    // forever and CMSG_LOOT was NEVER sent (measured: 1.43M refresh spins, zero opens, quest 88
+    // never completed by any bot). Mirrors the loot-wins rule in LootObject::Refresh.
+    if (creature && creature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE) && lootObject.skillId != SKILL_SKINNING)
     {
         if (!lootObject.IsLootPossible(bot)) //Clear loot if bot can't loot it.
         {
@@ -665,6 +708,21 @@ bool StoreLootAction::Execute(Event& event)
 
     bot->SetLootGuid(guid);
 
+    // TEMP DIAG (Princess/quest-drop hunt): record every OPEN of creature 330's corpse with the
+    // packet contents summary, so "never opens corpse" vs "opens but collar missing from view" is
+    // distinguishable. Remove after the quest-loot root cause is fixed.
+    if (guid.IsCreature() && guid.GetEntry() == 330)
+    {
+        FILE* qf = fopen("logs/questloot_diag.csv", "a");
+        if (!qf) qf = fopen("../logs/questloot_diag.csv", "a");
+        if (qf)
+        {
+            fprintf(qf, "%s,%s,item=0,slotType=0,idx=0,OPEN330:gold=%u items=%u lootType=%u\n",
+                sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), gold, (uint32)items, (uint32)loot_type);
+            fclose(qf);
+        }
+    }
+
     if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
     {
         std::ostringstream out;
@@ -677,6 +735,23 @@ bool StoreLootAction::Execute(Event& event)
             << " currentTargetAlive=" << (currentTarget && !sServerFacade.UnitIsDead(currentTarget) ? 1 : 0)
             << " currentTarget=" << (currentTarget ? currentTarget->GetName() : "none");
         sPlayerbotAIConfig.logEvent(ai, "StoreLootCombatTrace", std::to_string(guid.GetCounter()), out.str());
+    }
+
+    // Short SMSG_LOOT_RESPONSE (guid + type=0 + error byte) = Player::SendLootError refusal
+    // (TOO_FAR, DIDNT_KILL, ...). Drop the loot target so the bot re-plans instead of keeping a
+    // corpse the core just refused (measured: refused bots spun REFRESH on the corpse forever).
+    if (loot_type == 0 && p.size() <= 10)
+    {
+        uint8 lootError = 0;
+        if (p.size() == 10)
+            p >> lootError;
+        AI_VALUE(LootObjectStack*, "available loot")->Remove(guid);
+        context->GetValue<LootObject>("loot target")->Set(LootObject());
+        bot->SetLootGuid(ObjectGuid());
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            sPlayerbotAIConfig.logEvent(ai, "LootOpenError", std::to_string(guid.GetCounter()),
+                "err=" + std::to_string((uint32)lootError));
+        return false;
     }
 
     if (HasActiveCombatPressure(ai, bot, currentTarget))
@@ -693,14 +768,16 @@ bool StoreLootAction::Execute(Event& event)
             sPlayerbotAIConfig.logEvent(ai, "StoreLootDeferredCombat", std::to_string(guid.GetCounter()), out.str());
         }
 
-        AI_VALUE(LootObjectStack*, "available loot")->Remove(guid);
+        // DEFER, do NOT abandon: keep the corpse in "available loot" so the bot comes back and loots
+        // it the moment combat clears, instead of permanently forgetting it (the old Remove(guid) here
+        // is what made bots earn 0 gold). Just close the open loot window so we're not stuck kneeling
+        // in the loot animation mid-fight, and clear the CURRENT loot target so combat actions run.
         RESET_AI_VALUE(LootObject, "loot target");
-        RESET_AI_VALUE2(bool, "should loot object", std::to_string(guid.GetRawValue()));
-        bot->SetLootGuid(ObjectGuid());
-
-        WorldPacket releasePacket(CMSG_LOOT_RELEASE, 8);
-        releasePacket << guid;
-        bot->GetSession()->HandleLootReleaseOpcode(releasePacket);
+        // Release by EXPLICIT guid. HandleLootReleaseOpcode ignores the packet's guid and
+        // releases bot->GetLootGuid() instead, so clearing the loot guid first (as the old
+        // code did here) made the release a NO-OP.
+        if (WorldSession* session = bot->GetSession())
+            session->DoLootRelease(guid);
         return false;
     }
 
@@ -721,12 +798,9 @@ bool StoreLootAction::Execute(Event& event)
         AI_VALUE(LootObjectStack*, "available loot")->Remove(guid);
         RESET_AI_VALUE(LootObject, "loot target");
         RESET_AI_VALUE2(bool, "should loot object", std::to_string(guid.GetRawValue()));
-        bot->SetLootGuid(ObjectGuid());
+        if (WorldSession* session = bot->GetSession())
+            session->DoLootRelease(guid);   // explicit guid; see note above
         ClearActiveLootState(ai, bot, guid);
-
-        WorldPacket packet(CMSG_LOOT_RELEASE, 8);
-        packet << guid;
-        bot->GetSession()->HandleLootReleaseOpcode(packet);
 
         LogLootTrace(ai, bot, "StoreLootReleased", guid,
             "accelerateRespawn=0 reason=missing-loot suppressUntil=" + std::to_string(uint32(suppressUntil)));
@@ -766,12 +840,30 @@ bool StoreLootAction::Execute(Event& event)
 
         ItemQualifier itemQualifier(itemid, ((int32)randomPropertyId));
 
+        // QUEST-LOOT DIAG (always-on): quest-needed items were NEVER obtained fleet-wide (45 bots
+        // stuck on 'Princess Must Die!', 0 completions ever) -- log every decision this loop makes
+        // about an item the bot needs for a quest, so the failing step is provable.
+        const bool qdiag = ItemUsageValue::IsNeededForQuest(bot, itemid);
+        auto qlog = [&](char const* verdict)
+        {
+            if (!qdiag) return;
+            FILE* f = fopen("logs/questloot_diag.csv", "a");
+            if (!f) f = fopen("../logs/questloot_diag.csv", "a");
+            if (f)
+            {
+                fprintf(f, "%s,%s,item=%u,slotType=%u,idx=%u,%s\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+                    bot->GetName(), itemid, (uint32)lootslot_type, (uint32)itemindex, verdict);
+                fclose(f);
+            }
+        };
+
         if (lootslot_type != LOOT_SLOT_NORMAL
 #ifndef MANGOSBOT_ZERO
 		        && lootslot_type != LOOT_SLOT_OWNER
 #endif
             )
         {
+            qlog("SKIP:slotType");
             ++skippedSlotType;
 			continue;
         }
@@ -784,6 +876,7 @@ bool StoreLootAction::Execute(Event& event)
         // "That is already being used." Corpse loot can still follow bot strategy.
         if (!isGameObjectLoot && loot_type != LOOT_SKINNING && !IsLootAllowed(itemQualifier, ai))
         {
+            qlog("SKIP:strategy");
             ++skippedStrategy;
             continue;
         }
@@ -791,6 +884,7 @@ bool StoreLootAction::Execute(Event& event)
         ItemPrototype const *proto = sItemStorage.LookupEntry<ItemPrototype>(itemid);
         if (!proto)
         {
+            qlog("SKIP:proto");
             ++skippedProto;
             continue;
         }
@@ -801,6 +895,7 @@ bool StoreLootAction::Execute(Event& event)
 
             if (!CanStoreLootItem(bot, itemid, itemcount))
             {
+                qlog("SKIP:space");
                 ++skippedSpace;
                 LogLootTrace(ai, bot, "StoreLootSkippedSpace", guid,
                     "item=" + std::to_string(itemid) +
@@ -820,6 +915,7 @@ bool StoreLootAction::Execute(Event& event)
 
         if (!lootItem)
         {
+            qlog("SKIP:missingSlot");
             ++skippedMissingSlot;
             continue;
         }
@@ -828,9 +924,11 @@ bool StoreLootAction::Execute(Event& event)
         // slots are not mistaken for missing raw item slots.
         if (!lootItem->AllowedForPlayer(bot, loot->GetLootTarget()) || (!qitem && lootItem->is_blocked))
         {
+            qlog("SKIP:blocked");
             ++skippedBlocked;
             continue;
         }
+        qlog("STORE");
 
         Player* master = ai->GetMaster();
         if (sRandomPlayerbotMgr.IsRandomBot(bot) && master)
@@ -875,13 +973,13 @@ bool StoreLootAction::Execute(Event& event)
     AI_VALUE(LootObjectStack*, "available loot")->Remove(guid);
     RESET_AI_VALUE(LootObject, "loot target");
     RESET_AI_VALUE2(bool, "should loot object", std::to_string(guid.GetRawValue()));
-    bot->SetLootGuid(ObjectGuid());
+    // Release by EXPLICIT guid (see note in the combat-defer path above). The old
+    // SetLootGuid(empty)-then-HandleLootReleaseOpcode order made the release a no-op,
+    // so a chest the bot only PARTIALLY looted (it skips gray/unneeded items) was never
+    // unlocked -- stuck "Still being used" for everyone.
+    if (WorldSession* session = bot->GetSession())
+        session->DoLootRelease(guid);
     ClearActiveLootState(ai, bot, guid);
-
-    // release loot
-    WorldPacket packet(CMSG_LOOT_RELEASE, 8);
-    packet << guid;
-    bot->GetSession()->HandleLootReleaseOpcode(packet);
 
     LogLootTrace(ai, bot, "StoreLootReleased", guid, "accelerateRespawn=1");
 
@@ -954,25 +1052,21 @@ bool StoreLootAction::IsLootAllowed(ItemQualifier& itemQualifier, PlayerbotAI *a
 bool ReleaseLootAction::Execute(Event& event)
 {
     ObjectGuid previousLootGuid = bot->GetLootGuid();
-    std::list<ObjectGuid> gos = context->GetValue<std::list<ObjectGuid> >("nearest game objects no los")->Get();
-    for (std::list<ObjectGuid>::iterator i = gos.begin(); i != gos.end(); i++)
-    {
-        WorldPacket packet(CMSG_LOOT_RELEASE, 8);
-        packet << *i;
-        bot->GetSession()->HandleLootReleaseOpcode(packet);
-    }
 
-    std::list<ObjectGuid> corpses = context->GetValue<std::list<ObjectGuid> >("nearest corpses")->Get();
-    for (std::list<ObjectGuid>::iterator i = corpses.begin(); i != corpses.end(); i++)
+    // Release ONLY the loot the bot itself currently has open. The old code swept over all
+    // nearby gameobjects/corpses sending CMSG_LOOT_RELEASE, but HandleLootReleaseOpcode
+    // ignores the packet guid and only releases bot->GetLootGuid() -- so the sweep was a
+    // no-op past the first object anyway. Releasing arbitrary nearby objects by guid would
+    // be actively harmful: DoLootRelease on a chest the bot is NOT looting runs its
+    // "not fully looted" branch -> SetLootState(GO_ACTIVATED), LOCKING it for everyone.
+    if (previousLootGuid)
     {
-        WorldPacket packet(CMSG_LOOT_RELEASE, 8);
-        packet << *i;
-        bot->GetSession()->HandleLootReleaseOpcode(packet);
+        if (WorldSession* session = bot->GetSession())
+            session->DoLootRelease(previousLootGuid);
     }
 
     bot->SetLootGuid(ObjectGuid());
     LogLootTrace(ai, bot, "ReleaseLootSweep", previousLootGuid,
-        "gameobjects=" + std::to_string(gos.size()) +
-        " corpses=" + std::to_string(corpses.size()));
+        "released=" + std::to_string(previousLootGuid.GetCounter()));
     return true;
 }

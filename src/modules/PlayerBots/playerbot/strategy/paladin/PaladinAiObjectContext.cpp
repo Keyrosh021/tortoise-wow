@@ -231,6 +231,11 @@ namespace ai
                 creators["judgement of wisdom"] = [](PlayerbotAI* ai) { return new JudgementOfWisdomTrigger(ai); };
                 creators["judgement of light"] = [](PlayerbotAI* ai) { return new JudgementOfLightTrigger(ai); };
                 creators["seal"] = [](PlayerbotAI* ai) { return new SealTrigger(ai); };
+                // Paladin-specific COMBAT self-heal threshold (25%) so it does not use
+                // the global 50% "low health" shared by every class. Fires in
+                // [criticalHealth, 25%); below criticalHealth the "critical health"
+                // emergency response takes over.
+                creators["paladin low health"] = [](PlayerbotAI* ai) { return new LowHealthTrigger(ai, "paladin low health", 25.0f, sPlayerbotAIConfig.criticalHealth); };
                 creators["art of war"] = [](PlayerbotAI* ai) { return new ArtOfWarTrigger(ai); };
                 creators["blessing"] = [](PlayerbotAI* ai) { return new BlessingTrigger(ai); };
                 creators["greater blessing"] = [](PlayerbotAI* ai) { return new GreaterBlessingTrigger(ai); };

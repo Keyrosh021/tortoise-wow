@@ -62,11 +62,9 @@ namespace ai
                 {
                     std::map<std::string, std::string> placeholders;
                     placeholders["%name"] = master->GetName();
-                    std::string reply;
-                    if (urand(0, 3))
-                        reply = BOT_TEXT2("Send me an invite %name!", placeholders);
-                    else
-                        reply = BOT_TEXT2("Sure I will join you.", placeholders);
+                    // Random human variant (see ai_playerbot_texts 'accept_group'); reads like a
+                    // real "yeah, count me in" reply instead of a fixed robotic line.
+                    std::string reply = BOT_TEXT2("accept_group", placeholders);
 
                     Guild* guild = sGuildMgr.GetGuildById(bot->GetGuildId());
 

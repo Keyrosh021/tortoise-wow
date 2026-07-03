@@ -56,6 +56,15 @@ bool CheckMailAction::isUseful()
     if (ai->GetMaster() || !bot->GetMailSize() || bot->InBattleGround())
         return false;
 
+    // RPG maintenance must YIELD to actual objectives. Watched priest Eliney "check mail" for 24s
+    // straight while its quest boar (its current target) stood 40y away. Don't check mail while in
+    // combat, or while there's a live hostile "current target" the bot should be fighting/pursuing.
+    if (bot->IsInCombat())
+        return false;
+    if (Unit* tgt = AI_VALUE(Unit*, "current target"))
+        if (tgt->IsAlive() && !bot->IsFriendlyTo(tgt))
+            return false;
+
     return true;
 }
 

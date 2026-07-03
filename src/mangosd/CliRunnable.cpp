@@ -40,6 +40,26 @@
 
 #include <iterator>
 
+#ifdef WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
+// True only when stdin is a real interactive terminal. Used so that EOF on stdin is
+// treated as an operator "shut down" (Ctrl-D) ONLY in an interactive console. When
+// mangosd is launched headless / detached (stdin redirected from /dev/null or closed),
+// stdin is not a tty and reports EOF the instant the console would block -- which would
+// otherwise shut the freshly-booted server down immediately.
+static bool CliConsoleIsInteractive()
+{
+#ifdef WIN32
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(fileno(stdin)) != 0;
+#endif
+}
+
 void utf8print(std::any, const char* str)
 {
 #if PLATFORM == PLATFORM_WINDOWS
@@ -556,7 +576,10 @@ void CliRunnable::operator()()
 
         if (retval == -1)
         {
-            World::StopNow(SHUTDOWN_EXIT_CODE);
+            // stdin error. Only shut the world down for an interactive console;
+            // headless just ends the (useless) CLI thread and keeps running.
+            if (CliConsoleIsInteractive())
+                World::StopNow(SHUTDOWN_EXIT_CODE);
             break;
         }
 #endif
@@ -587,7 +610,12 @@ void CliRunnable::operator()()
         }
         else if (feof(stdin))
         {
-            World::StopNow(SHUTDOWN_EXIT_CODE);
+            // EOF on stdin. Interactive = operator pressed Ctrl-D -> shut down.
+            // Headless (stdin from /dev/null or closed) -> EOF fires right after
+            // boot; do NOT shut down, just end the CLI thread and keep the world up.
+            if (CliConsoleIsInteractive())
+                World::StopNow(SHUTDOWN_EXIT_CODE);
+            break;
         }
     }
 

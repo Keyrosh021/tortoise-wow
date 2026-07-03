@@ -1,0 +1,499 @@
+{
+  "event_counts": {
+    "VisibleBotActivityTrace": 7860,
+    "VisibleBotLowApm": 332,
+    "VisibleBotStuckState": 381
+  },
+  "state_metrics": {
+    "active": {
+      "samples": 2330,
+      "avg_apm": 68.03,
+      "avg_decision_tpm": 202.54
+    },
+    "loot_stall": {
+      "samples": 75,
+      "avg_apm": 85.45,
+      "avg_decision_tpm": 204.4
+    },
+    "passive_loop": {
+      "samples": 2606,
+      "avg_apm": 31.59,
+      "avg_decision_tpm": 171.83
+    },
+    "target_stall": {
+      "samples": 2411,
+      "avg_apm": 151.25,
+      "avg_decision_tpm": 358.53
+    },
+    "travel_cooldown": {
+      "samples": 382,
+      "avg_apm": 57.97,
+      "avg_decision_tpm": 594.24
+    },
+    "travel_move": {
+      "samples": 638,
+      "avg_apm": 36.54,
+      "avg_decision_tpm": 363.56
+    },
+    "travel_prepare": {
+      "samples": 114,
+      "avg_apm": 65.44,
+      "avg_decision_tpm": 293.78
+    },
+    "travel_work": {
+      "samples": 17,
+      "avg_apm": 48.12,
+      "avg_decision_tpm": 620.24
+    }
+  },
+  "top_state_actions": [
+    {
+      "visible_state": "passive_loop",
+      "action": "none",
+      "count": 685,
+      "example_bot": "Rikwa",
+      "example_position": "POINT(-13039.90 -5748.36)",
+      "example_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=82 decisionTpm=218 windowSec=30 executedTicks=41 noProgressTicks=68 sameActionStreak=0 sinceProgressSec=18 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "target_stall",
+      "action": "reach melee",
+      "count": 5,
+      "example_bot": "Grireth",
+      "example_position": "POINT(-9185.56 -3125.28)",
+      "example_message": "priority=1 visibleState=target_stall healthScore=60 healthIssue=no_progress_15s apm=36 decisionTpm=812 windowSec=45 executedTicks=27 noProgressTicks=582 sameActionStreak=357 sinceProgressSec=18 minimalTicks=0 state=0 action=reach melee target=Armored Scorpid loot=0 travelStatus=5 travel=get xp or gold from killing |cFFFFFF00|Hentry:38:|h[Defias Thug]|h|r moving=1 combat=1 afk=0 waiting=0 delayMs=49 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "target_stall",
+      "action": "-ranged,+close",
+      "count": 4,
+      "example_bot": "Bekina",
+      "example_position": "POINT(-13604.72 -6383.23)",
+      "example_message": "priority=1 visibleState=target_stall healthScore=45 healthIssue=low_apm apm=14 decisionTpm=1162 windowSec=30 executedTicks=7 noProgressTicks=574 sameActionStreak=415 sinceProgressSec=21 minimalTicks=0 state=0 action=-ranged,+close target=Prairie Wolf loot=0 travelStatus=5 travel=get xp or gold from killing |cFFFFFF00|Hentry:80:|h[Kobold Laborer]|h|r moving=0 combat=1 afk=0 waiting=0 delayMs=50 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "passive_loop",
+      "action": "reset raids",
+      "count": 4,
+      "example_bot": "Duamudrica",
+      "example_position": "POINT(-12963.56 -6098.23)",
+      "example_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=5 decisionTpm=360 windowSec=33 executedTicks=3 noProgressTicks=195 sameActionStreak=15 sinceProgressSec=23 minimalTicks=0 state=0 action=reset raids target=none loot=0 travelStatus=6 travel=loot |cffffffff|Hitem:4751:0:0:0|h[Windfury Talon]|h|r from |cFFFFFF00|Hentry:2962:|h[Windfury Harpy]|h|r (objective 1) moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "travel_cooldown",
+      "action": "choose rpg target",
+      "count": 3,
+      "example_bot": "Peldi",
+      "example_position": "POINT(-8731.35 -4689.27)",
+      "example_message": "priority=1 visibleState=travel_cooldown healthScore=35 healthIssue=no_work apm=196 decisionTpm=360 windowSec=30 executedTicks=98 noProgressTicks=82 sameActionStreak=26 sinceProgressSec=15 minimalTicks=0 state=1 action=choose rpg target target=none loot=0 travelStatus=5 travel=get xp or gold from killing |cFFFFFF00|Hentry:3183:|h[Yarrog Baneshadow]|h|r moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "target_stall",
+      "action": "update pve strats",
+      "count": 3,
+      "example_bot": "Emaelas",
+      "example_position": "POINT(-14049.21 6370.31)",
+      "example_message": "priority=1 visibleState=target_stall healthScore=70 healthIssue=no_progress_15s apm=42 decisionTpm=112 windowSec=51 executedTicks=36 noProgressTicks=59 sameActionStreak=68 sinceProgressSec=18 minimalTicks=0 state=0 action=update pve strats target=Nightsaber loot=0 travelStatus=0 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "active",
+      "action": "shadow bolt",
+      "count": 2,
+      "example_bot": "Adrinon",
+      "example_position": "POINT(-149.70 -9807.34)",
+      "example_message": "priority=1 visibleState=active healthScore=45 healthIssue=low_apm apm=16 decisionTpm=588 windowSec=30 executedTicks=8 noProgressTicks=286 sameActionStreak=270 sinceProgressSec=19 minimalTicks=0 state=0 action=shadow bolt target=none loot=0 travelStatus=0 travel=no destination moving=0 combat=1 afk=0 waiting=0 delayMs=28 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "target_stall",
+      "action": "select new target",
+      "count": 2,
+      "example_bot": "Bekina",
+      "example_position": "POINT(-13493.25 -6386.44)",
+      "example_message": "priority=1 visibleState=target_stall healthScore=45 healthIssue=low_apm apm=11 decisionTpm=940 windowSec=45 executedTicks=8 noProgressTicks=697 sameActionStreak=556 sinceProgressSec=28 minimalTicks=0 state=0 action=select new target target=Prairie Wolf loot=0 travelStatus=6 travel=loot |cffffffff|Hitem:10459:0:0:0|h[Chief Sharptusk Thornmantle's Head]|h|r from |cFFFFFF00|Hentry:8554:|h[Chief Sharptusk Thornmantle]|h|r (objective 1) moving=0 combat=1 afk=0 waiting=0 delayMs=51 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "target_stall",
+      "action": "emote",
+      "count": 2,
+      "example_bot": "Dragial",
+      "example_position": "POINT(-9144.92 -3221.28)",
+      "example_message": "priority=1 visibleState=target_stall healthScore=45 healthIssue=low_apm apm=2 decisionTpm=1196 windowSec=30 executedTicks=1 noProgressTicks=597 sameActionStreak=342 sinceProgressSec=18 minimalTicks=0 state=0 action=emote target=Armored Scorpid loot=0 travelStatus=5 travel=get xp or gold from killing |cFFFFFF00|Hentry:38:|h[Defias Thug]|h|r moving=1 combat=1 afk=0 waiting=0 delayMs=50 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "active",
+      "action": "none",
+      "count": 1,
+      "example_bot": "Sergio",
+      "example_position": "POINT(619.92 -1312.09)",
+      "example_message": "priority=1 visibleState=active healthScore=50 healthIssue=zero_apm apm=0 decisionTpm=1016 windowSec=15 executedTicks=0 noProgressTicks=254 sameActionStreak=0 sinceProgressSec=15 minimalTicks=0 state=1 action=none target=none loot=0 travelStatus=6 travel=no destination moving=1 combat=0 afk=0 waiting=0 delayMs=51 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "target_stall",
+      "action": "jump",
+      "count": 1,
+      "example_bot": "Viviayana",
+      "example_position": "POINT(-14426.53 5741.42)",
+      "example_message": "priority=1 visibleState=target_stall healthScore=65 healthIssue=low_apm apm=7 decisionTpm=13 windowSec=55 executedTicks=6 noProgressTicks=6 sameActionStreak=1 sinceProgressSec=18 minimalTicks=0 state=0 action=jump target=Timberling loot=1 travelStatus=6 travel=loot |cffffffff|Hitem:5169:0:0:0|h[Timberling Sprout]|h|r from |cFFFFFF00|Hentry:4608:|h[Timberling Sprout]|h|r (objective 1) moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "visible_state": "target_stall",
+      "action": "move random",
+      "count": 1,
+      "example_bot": "Perrec",
+      "example_position": "POINT(-1506.61 1821.71)",
+      "example_message": "priority=1 visibleState=target_stall healthScore=30 healthIssue=zero_apm apm=0 decisionTpm=1 windowSec=54 executedTicks=0 noProgressTicks=1 sameActionStreak=67 sinceProgressSec=54 minimalTicks=0 state=0 action=move random target=Mindless Zombie loot=0 travelStatus=0 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    }
+  ],
+  "top_bots": [
+    {
+      "bot": "Oderianne",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-636.05 2435.33)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=56 windowSec=16 executedTicks=0 noProgressTicks=15 sameActionStreak=0 sinceProgressSec=115 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Ciklis",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(193.77 -5746.17)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=191 windowSec=16 executedTicks=0 noProgressTicks=51 sameActionStreak=0 sinceProgressSec=110 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Charanok",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-457.12 2358.06)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=172 windowSec=31 executedTicks=0 noProgressTicks=89 sameActionStreak=0 sinceProgressSec=114 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Ralolla",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-12823.74 -5836.47)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=154 windowSec=34 executedTicks=0 noProgressTicks=87 sameActionStreak=0 sinceProgressSec=119 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Neslus",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-244.77 -6085.37)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=193 windowSec=24 executedTicks=0 noProgressTicks=77 sameActionStreak=0 sinceProgressSec=116 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Qehochmi",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-12819.99 -5992.72)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=155 windowSec=46 executedTicks=0 noProgressTicks=119 sameActionStreak=0 sinceProgressSec=119 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Eustere",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-813.04 2303.40)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=175 windowSec=47 executedTicks=0 noProgressTicks=137 sameActionStreak=0 sinceProgressSec=119 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Loluhnowhe",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-13453.31 -5740.51)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=173 windowSec=46 executedTicks=0 noProgressTicks=133 sameActionStreak=0 sinceProgressSec=113 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Caita",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-711.27 2516.24)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=193 windowSec=48 executedTicks=0 noProgressTicks=154 sameActionStreak=0 sinceProgressSec=110 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Galenic",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-265.54 -9468.01)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=188 windowSec=47 executedTicks=0 noProgressTicks=147 sameActionStreak=0 sinceProgressSec=117 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Brorgund",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(518.92 -5680.04)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=200 windowSec=46 executedTicks=0 noProgressTicks=153 sameActionStreak=0 sinceProgressSec=110 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Sinary",
+      "count": 14,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(1537.49 -9576.57)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=198 windowSec=47 executedTicks=0 noProgressTicks=155 sameActionStreak=0 sinceProgressSec=110 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Hekosut",
+      "count": 13,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-13512.56 -6630.55)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=176 windowSec=16 executedTicks=0 noProgressTicks=47 sameActionStreak=0 sinceProgressSec=111 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Cemkack",
+      "count": 13,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(519.03 -5686.17)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=194 windowSec=21 executedTicks=0 noProgressTicks=68 sameActionStreak=0 sinceProgressSec=112 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Zherili",
+      "count": 13,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-9801.23 -4552.06)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=198 windowSec=17 executedTicks=0 noProgressTicks=56 sameActionStreak=0 sinceProgressSec=105 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Tozos",
+      "count": 12,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-12803.33 -6588.53)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=180 windowSec=2 executedTicks=0 noProgressTicks=6 sameActionStreak=0 sinceProgressSec=109 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Davierio",
+      "count": 12,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(279.07 -9072.08)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=81 windowSec=48 executedTicks=0 noProgressTicks=65 sameActionStreak=0 sinceProgressSec=116 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Finke",
+      "count": 12,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(448.29 -5673.08)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=137 windowSec=45 executedTicks=0 noProgressTicks=103 sameActionStreak=0 sinceProgressSec=106 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Litokam",
+      "count": 12,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-13095.77 -6059.44)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=199 windowSec=45 executedTicks=0 noProgressTicks=149 sameActionStreak=0 sinceProgressSec=116 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Erielah",
+      "count": 12,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(1089.94 -9394.34)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=200 windowSec=33 executedTicks=0 noProgressTicks=110 sameActionStreak=0 sinceProgressSec=101 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Nadar",
+      "count": 12,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-665.82 2078.66)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=199 windowSec=34 executedTicks=0 noProgressTicks=113 sameActionStreak=0 sinceProgressSec=102 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Oletta",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-492.03 2348.67)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=135 windowSec=45 executedTicks=0 noProgressTicks=101 sameActionStreak=0 sinceProgressSec=102 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Enklanken",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(667.06 -592.95)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=195 windowSec=4 executedTicks=0 noProgressTicks=13 sameActionStreak=0 sinceProgressSec=29 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Phina",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-587.21 2343.81)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=180 windowSec=45 executedTicks=0 noProgressTicks=135 sameActionStreak=0 sinceProgressSec=104 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Baglo",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(447.64 -5657.40)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=29 windowSec=52 executedTicks=0 noProgressTicks=25 sameActionStreak=0 sinceProgressSec=108 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Felilia",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-83.71 -9348.49)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=105 windowSec=52 executedTicks=0 noProgressTicks=91 sameActionStreak=0 sinceProgressSec=99 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Aberent",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-7.57 -9609.70)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=193 windowSec=45 executedTicks=0 noProgressTicks=145 sameActionStreak=0 sinceProgressSec=104 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Astemas",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(1228.68 -9617.11)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=199 windowSec=45 executedTicks=0 noProgressTicks=149 sameActionStreak=0 sinceProgressSec=101 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Lamjuhi",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-8934.08 -3455.12)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=197 windowSec=45 executedTicks=0 noProgressTicks=148 sameActionStreak=0 sinceProgressSec=101 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Kwehumi",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-12767.92 -6092.26)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=160 windowSec=15 executedTicks=0 noProgressTicks=40 sameActionStreak=0 sinceProgressSec=109 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Biancy",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-570.52 2331.79)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=200 windowSec=15 executedTicks=0 noProgressTicks=50 sameActionStreak=0 sinceProgressSec=116 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Gemmi",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-660.29 2321.97)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=94 windowSec=30 executedTicks=0 noProgressTicks=47 sameActionStreak=0 sinceProgressSec=113 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Duigder",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(483.10 -5676.40)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=200 windowSec=30 executedTicks=0 noProgressTicks=100 sameActionStreak=0 sinceProgressSec=114 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Gamtor",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-9378.04 -4273.98)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=198 windowSec=30 executedTicks=0 noProgressTicks=99 sameActionStreak=0 sinceProgressSec=111 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Yhrurrarn",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(592.50 -732.80)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=199 windowSec=47 executedTicks=0 noProgressTicks=156 sameActionStreak=0 sinceProgressSec=98 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Grarzoty",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-9377.13 -4039.23)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=198 windowSec=34 executedTicks=0 noProgressTicks=112 sameActionStreak=0 sinceProgressSec=82 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Nytoraen",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-15491.32 6254.45)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=199 windowSec=37 executedTicks=0 noProgressTicks=123 sameActionStreak=0 sinceProgressSec=89 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Teshien",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-13041.72 -6562.34)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=90 windowSec=2 executedTicks=0 noProgressTicks=3 sameActionStreak=0 sinceProgressSec=75 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Lenelle",
+      "count": 10,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-553.50 2339.28)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=120 windowSec=1 executedTicks=0 noProgressTicks=2 sameActionStreak=0 sinceProgressSec=86 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Rikwa",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-13039.90 -5748.36)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=20 windowSec=51 executedTicks=0 noProgressTicks=17 sameActionStreak=0 sinceProgressSec=99 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Herlino",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-686.14 2090.86)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=9 windowSec=14 executedTicks=0 noProgressTicks=2 sameActionStreak=0 sinceProgressSec=90 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Tunnizi",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-13367.08 -6546.92)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=197 windowSec=45 executedTicks=0 noProgressTicks=148 sameActionStreak=0 sinceProgressSec=92 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Thessylall",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-501.25 -5929.65)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=199 windowSec=45 executedTicks=0 noProgressTicks=149 sameActionStreak=0 sinceProgressSec=90 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Ittugsqa",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-13272.03 -5894.51)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=200 windowSec=15 executedTicks=0 noProgressTicks=50 sameActionStreak=0 sinceProgressSec=109 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Druka",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-8683.75 -4462.47)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=200 windowSec=15 executedTicks=0 noProgressTicks=50 sameActionStreak=0 sinceProgressSec=112 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Mineria",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-494.90 2350.24)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=200 windowSec=15 executedTicks=0 noProgressTicks=50 sameActionStreak=0 sinceProgressSec=119 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Grireth",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-8873.34 -3443.41)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=199 windowSec=45 executedTicks=0 noProgressTicks=149 sameActionStreak=0 sinceProgressSec=88 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Ederen",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-492.68 2344.42)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=14 windowSec=44 executedTicks=0 noProgressTicks=10 sameActionStreak=0 sinceProgressSec=110 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Deronimo",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-2736.95 2216.88)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=200 windowSec=15 executedTicks=0 noProgressTicks=50 sameActionStreak=0 sinceProgressSec=114 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    },
+    {
+      "bot": "Feldreas",
+      "count": 9,
+      "latest_event": "VisibleBotStuckState",
+      "latest_position": "POINT(-14741.38 6427.72)",
+      "latest_message": "priority=1 visibleState=passive_loop healthScore=0 healthIssue=no_work apm=0 decisionTpm=162 windowSec=43 executedTicks=0 noProgressTicks=116 sameActionStreak=0 sinceProgressSec=114 minimalTicks=0 state=2 action=none target=none loot=0 travelStatus=6 travel=no destination moving=0 combat=0 afk=0 waiting=0 delayMs=0 casting=0 currentSpell=none currentSpellId=0"
+    }
+  ]
+}

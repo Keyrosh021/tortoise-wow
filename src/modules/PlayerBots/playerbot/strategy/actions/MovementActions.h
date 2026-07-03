@@ -49,7 +49,7 @@ namespace ai
             float maxDist,
             bool isWalking);
 
-        void DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking, bool forceWalk);
+        bool DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking, bool forceWalk);
 
         Unit* GetMover(Player* bot);
 

@@ -173,6 +173,13 @@ bool CastSpellAction::isUseful()
     if (ai->IsInVehicle() && !ai->IsInVehicle(false, false, true))
         return false;
 
+    // Don't waste engine cycles on spells the bot has not LEARNED yet: class strategies queue
+    // level-gated spells unconditionally (e.g. Holy Fire on a L15 priest, learned at L20), and every
+    // tick the node churned its whole reach-prerequisite chain just to die on SPELL_FAILED_NOT_KNOWN
+    // (measured: 1074 of 1229 reach-chain aborts). Unknown spell -> the node is dead, skip instantly.
+    if (spellId && !bot->HasSpell(spellId))
+        return false;
+
     if(!AI_VALUE2(bool, "spell cast useful", spellName))
         return false;
 

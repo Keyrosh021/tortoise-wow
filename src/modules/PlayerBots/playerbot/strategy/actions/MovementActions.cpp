@@ -1,4 +1,5 @@
 
+#include <set>
 #include "playerbot/playerbot.h"
 #include "playerbot/PerformanceMonitor.h"
 #include "MovementActions.h"
@@ -10,9 +11,11 @@
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/PositionValue.h"
+#include "playerbot/strategy/values/PossibleAttackTargetsValue.h"
 #include "playerbot/strategy/values/Stances.h"
 #include "Movement/TargetedMovementGenerator.h"
 #include "playerbot/TravelMgr.h"
+#include "Group/Group.h"
 #include "Transports/Transport.h"
 #ifdef MANGOSBOT_TWO
 #include "Entities/Vehicle.h"
@@ -46,6 +49,15 @@ namespace
             bot->SetStandState(UNIT_STAND_STATE_STAND);
     }
 
+    bool PrepareRandomMovePoint(Player* bot, float& x, float& y, float& z)
+    {
+        if (!bot || !bot->GetMap() || !MaNGOS::IsValidMapCoord(x, y))
+            return false;
+
+        bot->UpdateAllowedPositionZ(x, y, z);
+        return MaNGOS::IsValidMapCoord(x, y, z);
+    }
+
     uint32 BuildMoveOptions(bool walk, bool pathfinding, bool fly = false, bool excludeSteepSlopes = false)
     {
         uint32 options = pathfinding ? MOVE_PATHFINDING : MOVE_NONE;
@@ -55,6 +67,145 @@ namespace
         if (fly)
             options |= MOVE_FLY_MODE;
         return options;
+    }
+
+    // FLEE-STUCK detector: is a fleeing bot failing to actually move? Autonomous flee uses MoveChase
+    // (pathfinding) away from the threat; when the navmesh path fails (cornered / off-mesh hole) the
+    // bot stands in place taking hits and dies -- and resurrects on the same spot into a death loop
+    // (measured: same bot killed by the same mob 4x in 48s; "flee" shows as an IDLE intent). Net
+    // displacement <5y over 3s while fleeing == stuck. Short window because combat kills fast.
+    bool FleeStuck(Player* bot)
+    {
+        if (!bot)
+            return false;
+        struct St { float x; float y; uint32 sinceMs; };
+        static std::mutex mx;
+        static std::unordered_map<uint32, St> track;
+        const uint32 now = WorldTimer::getMSTime();
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        if (!s.sinceMs) { s.x = bot->GetPositionX(); s.y = bot->GetPositionY(); s.sinceMs = now; return false; }
+        const float dx = bot->GetPositionX() - s.x, dy = bot->GetPositionY() - s.y;
+        if (dx * dx + dy * dy >= 5.0f * 5.0f) { s.x = bot->GetPositionX(); s.y = bot->GetPositionY(); s.sinceMs = now; return false; }
+        return (now - s.sinceMs) >= 3000;
+    }
+
+    bool HasAbnormalPathGeometry(TravelPath& path, const WorldPosition& startPosition)
+    {
+        if (path.empty())
+            return false;
+
+        WorldPosition previous = startPosition;
+        float totalXY = 0.0f;
+        float totalZ = 0.0f;
+        float maxZDelta = 0.0f;
+        uint32 checked = 0;
+
+        for (PathNodePoint& point : path.getPath())
+        {
+            if (previous.getMapId() != point.point.getMapId())
+                break;
+
+            const float xy = std::sqrt(previous.sqDistance2d(point.point));
+            const float dz = std::fabs(point.point.getZ() - previous.getZ());
+            totalXY += xy;
+            totalZ += dz;
+            maxZDelta = std::max(maxZDelta, dz);
+
+            if ((dz > 50.0f && xy < 100.0f) ||
+                (totalZ > 30.0f && totalXY > 0.1f && totalZ / totalXY > 1.5f))
+                return true;
+
+            previous = point.point;
+            if (++checked >= 4)
+                break;
+        }
+
+        return false;
+    }
+
+    bool IsReusableCachedPath(PlayerbotAI* ai, Player* bot, LastMovement& lastMove,
+        const WorldPosition& startPosition, const WorldPosition& endPosition, float maxDistChange,
+        char const* reason)
+    {
+        TravelPath& path = lastMove.lastPath;
+        if (path.empty())
+            return false;
+
+        const float destinationTolerance = std::max<float>(maxDistChange, sPlayerbotAIConfig.targetPosRecalcDistance);
+        const bool destinationMatches =
+            path.getBack().getMapId() == endPosition.getMapId() &&
+            path.getBack().distance(endPosition) <= destinationTolerance;
+
+        if (!destinationMatches)
+            return false;
+
+        const bool startsOnSameMap = path.getFront().getMapId() == startPosition.getMapId();
+        const float firstPointDistance = startsOnSameMap ? path.getFront().distance(startPosition) : 999999.0f;
+        const float maxFirstPointDistance =
+            std::max<float>(sPlayerbotAIConfig.reactDistance * 2.0f, sPlayerbotAIConfig.sightDistance);
+        const bool startsNearBot = startsOnSameMap && firstPointDistance <= maxFirstPointDistance;
+        const bool abnormalGeometry = startsOnSameMap && HasAbnormalPathGeometry(path, startPosition);
+
+        if (startsNearBot && !abnormalGeometry)
+            return true;
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ai && bot)
+        {
+            std::ostringstream out;
+            out << "reason=" << (reason ? reason : "cached-path")
+                << " startsSameMap=" << (startsOnSameMap ? 1 : 0)
+                << " firstDist=" << std::fixed << std::setprecision(1) << firstPointDistance
+                << " maxFirstDist=" << maxFirstPointDistance
+                << " abnormalGeometry=" << (abnormalGeometry ? 1 : 0)
+                << " points=" << path.getPath().size()
+                << " start=" << startPosition.getX() << "," << startPosition.getY() << "," << startPosition.getZ()
+                << " front=" << path.getFront().getX() << "," << path.getFront().getY() << "," << path.getFront().getZ()
+                << " end=" << endPosition.getX() << "," << endPosition.getY() << "," << endPosition.getZ();
+            sPlayerbotAIConfig.logEvent(ai, "CachedPathRejected", "", out.str());
+        }
+
+        lastMove.lastPath.clear();
+        return false;
+    }
+
+    bool RejectAbnormalFinalPath(PlayerbotAI* ai, Player* bot, LastMovement& lastMove,
+        TravelPath& movePath, const WorldPosition& startPosition, char const* reason)
+    {
+        if (!ai || !bot || movePath.empty())
+            return false;
+
+        if (bot->GetTransport() || bot->IsTaxiFlying() || bot->IsFlying() || bot->IsFreeFlying())
+            return false;
+
+        if (!HasAbnormalPathGeometry(movePath, startPosition))
+            return false;
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            const float firstDist = movePath.getFront().getMapId() == startPosition.getMapId()
+                ? movePath.getFront().distance(startPosition)
+                : 999999.0f;
+            const float endDist = movePath.getBack().getMapId() == startPosition.getMapId()
+                ? movePath.getBack().distance(startPosition)
+                : 999999.0f;
+
+            std::ostringstream out;
+            out << "reason=" << (reason ? reason : "final-path")
+                << " points=" << movePath.getPath().size()
+                << " firstDist=" << std::fixed << std::setprecision(1) << firstDist
+                << " endDist=" << endDist
+                << " start=" << startPosition.getX() << "," << startPosition.getY() << "," << startPosition.getZ()
+                << " front=" << movePath.getFront().getX() << "," << movePath.getFront().getY() << "," << movePath.getFront().getZ()
+                << " back=" << movePath.getBack().getX() << "," << movePath.getBack().getY() << "," << movePath.getBack().getZ();
+            sPlayerbotAIConfig.logEvent(ai, "FinalMovementPathRejected", "", out.str());
+        }
+
+        movePath.clear();
+        lastMove.lastPath.clear();
+        lastMove.setPath(movePath);
+        ai->StopMoving();
+        return true;
     }
 
     void ScrubFakeBotFlight(Player* bot, bool /*notify*/ = false)
@@ -70,7 +221,22 @@ namespace
         bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_LEVITATING);
     }
 
-    bool IsPathTerrainSane(Player* bot, const std::vector<WorldPosition>& path, std::string* reason = nullptr)
+    bool IsInteriorConnectedVerticalStep(Player* bot, WorldPosition const& from, WorldPosition const& to, float stepXY, float stepZ)
+    {
+        if (!bot || from.getMapId() != to.getMapId() || from.getMapId() != bot->GetMapId())
+            return false;
+
+        if (stepXY < 0.05f || stepXY > 12.0f || stepZ < 2.0f || stepZ > 8.0f)
+            return false;
+
+        const bool hasInteriorEndpoint = !from.isOutside() || !to.isOutside();
+        if (!hasInteriorEndpoint)
+            return false;
+
+        return from.IsInLineOfSight(to, bot->GetCollisionHeight());
+    }
+
+    bool IsPathTerrainSane(Player* bot, const std::vector<WorldPosition>& path, std::string* reason = nullptr, std::string* allowedReason = nullptr)
     {
         if (!bot || path.empty() || bot->IsTaxiFlying() || bot->IsInWater())
             return true;
@@ -79,6 +245,8 @@ namespace
         float totalXY = 0.0f;
         float totalZ = 0.0f;
         float maxStepZ = 0.0f;
+        float interiorConnectedZ = 0.0f;
+        uint32 interiorConnectedSteps = 0;
 
         for (WorldPosition const& point : path)
         {
@@ -94,8 +262,28 @@ namespace
             totalZ += stepZ;
             maxStepZ = std::max(maxStepZ, stepZ);
 
-            if (stepXY > 0.1f && stepXY < 25.0f && stepZ > 4.0f && stepZ / stepXY > 1.0f)
+            const bool interiorConnectedVertical = IsInteriorConnectedVerticalStep(bot, previous, point, stepXY, stepZ);
+            if (interiorConnectedVertical)
             {
+                interiorConnectedZ += stepZ;
+                ++interiorConnectedSteps;
+            }
+
+            const bool hasInteriorEndpoint = !previous.isOutside() || !point.isOutside();
+            const bool extremeVerticalStep =
+                (stepXY < 1.0f && stepZ > 12.0f) ||
+                (stepXY < 4.0f && stepZ > 18.0f) ||
+                (stepZ > 28.0f && stepZ / std::max(stepXY, 0.1f) > 1.5f);
+
+            if (stepXY > 0.1f && stepXY < 25.0f && stepZ > 4.0f && stepZ / stepXY > 1.0f &&
+                (hasInteriorEndpoint || extremeVerticalStep))
+            {
+                if (interiorConnectedVertical)
+                {
+                    previous = point;
+                    continue;
+                }
+
                 if (reason)
                 {
                     std::ostringstream out;
@@ -106,8 +294,16 @@ namespace
                 }
                 return false;
             }
+            else if (stepXY > 0.1f && stepXY < 25.0f && stepZ > 4.0f && stepZ / stepXY > 1.0f && allowedReason && allowedReason->empty())
+            {
+                std::ostringstream out;
+                out << "outdoor-slope-tolerated xy=" << std::fixed << std::setprecision(2) << stepXY
+                    << " dz=" << stepZ
+                    << " ratio=" << (stepZ / stepXY);
+                *allowedReason = out.str();
+            }
 
-            if ((stepXY < 1.0f && stepZ > 12.0f) || (stepXY < 4.0f && stepZ > 18.0f))
+            if (extremeVerticalStep)
             {
                 if (reason)
                 {
@@ -124,6 +320,36 @@ namespace
 
         if (totalXY > 0.1f && totalZ > 12.0f && totalZ / totalXY > 1.25f && maxStepZ > 4.0f)
         {
+            if (interiorConnectedSteps > 0 && interiorConnectedZ >= totalZ * 0.65f && maxStepZ <= 8.0f)
+            {
+                if (allowedReason)
+                {
+                    std::ostringstream out;
+                    out << "interior-stair-like xy=" << std::fixed << std::setprecision(2) << totalXY
+                        << " z=" << totalZ
+                        << " ratio=" << (totalZ / totalXY)
+                        << " maxStepZ=" << maxStepZ
+                        << " connectedSteps=" << interiorConnectedSteps;
+                    *allowedReason = out.str();
+                }
+                return true;
+            }
+
+            const bool extremePathClimb = maxStepZ > 28.0f || (totalZ > 60.0f && totalZ / totalXY > 2.25f);
+            if (!extremePathClimb)
+            {
+                if (allowedReason && allowedReason->empty())
+                {
+                    std::ostringstream out;
+                    out << "outdoor-path-slope-tolerated xy=" << std::fixed << std::setprecision(2) << totalXY
+                        << " z=" << totalZ
+                        << " ratio=" << (totalZ / totalXY)
+                        << " maxStepZ=" << maxStepZ;
+                    *allowedReason = out.str();
+                }
+                return true;
+            }
+
             if (reason)
             {
                 std::ostringstream out;
@@ -207,6 +433,35 @@ namespace
         return target && target->GetObjectGuid() == bot->GetObjectGuid();
     }
 
+    // True when the bot is mid-cast on a hostile DAMAGING spell aimed at a creature
+    // while NOT yet in combat -- i.e. a PULL. The bot must hold still and let the cast
+    // land so its damage flags the (often neutral) mob into combat, exactly like a real
+    // player. The generic movement path (MoveTo2) was interrupting these casts to
+    // reposition, so for neutral mobs -- which can ONLY enter combat from the bot's own
+    // damage -- the pull never landed: the mob stayed at full HP and the bot looped,
+    // burned mana, OOM'd, and gave up (measured: ranged bots cast 40+ times with ZERO
+    // deliveries; melee, which hits instantly with no cast bar to interrupt, succeeded
+    // 99%). Treat this like the self-heal exception and do not interrupt it to move.
+    // Scoped to out-of-combat only, so in-combat repositioning/kiting is unaffected.
+    bool IsCastingHostilePull(Player* bot)
+    {
+        if (!bot || bot->IsInCombat())
+            return false;
+
+        Spell* currentSpell = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+        if (!currentSpell || !currentSpell->m_spellInfo)
+            return false;
+
+        bool isDamage = false;
+        for (int i = 0; i < MAX_EFFECT_INDEX; ++i)
+            if (currentSpell->m_spellInfo->Effect[i] == SPELL_EFFECT_SCHOOL_DAMAGE) { isDamage = true; break; }
+        if (!isDamage)
+            return false;
+
+        Unit* target = currentSpell->m_targets.getUnitTarget();
+        return target && target->GetTypeId() == TYPEID_UNIT && target->GetObjectGuid() != bot->GetObjectGuid();
+    }
+
     bool HasNullTravelDestination(PlayerbotAI* ai)
     {
         if (!ai)
@@ -234,7 +489,7 @@ namespace
             return false;
 
         const bool isRangedBot = ai->IsRanged(bot);
-        const bool isCasterRanged = isRangedBot && bot->getClass() != CLASS_HUNTER;
+        const bool isCasterRanged = isRangedBot && bot->getClass() != CLASS_HUNTER && bot->getClass() != CLASS_PALADIN;
         const bool hasManaBar = context->GetValue<bool>("has mana", "self target")->Get();
         const uint8 manaPct = hasManaBar ? context->GetValue<uint8>("mana", "self target")->Get() : 0;
 
@@ -244,8 +499,15 @@ namespace
     bool IsTravelMovementAction(std::string const& actionName)
     {
         return actionName == "move to travel target" ||
-            actionName == "move to rpg target" ||
-            actionName == "find corpse";
+            actionName == "move to rpg target";
+    }
+
+    bool IsCorpseRecoveryMovement(Player* bot, std::string const& actionName)
+    {
+        return actionName == "find corpse" &&
+            bot &&
+            bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) &&
+            bot->GetCorpse();
     }
 
     std::string BuildMovementDestinationKey(Player* bot, TravelTarget* travelTarget, WorldPosition const& end, std::string const& actionName)
@@ -1095,7 +1357,8 @@ TravelPath MovementAction::ResolveMovePath(const WorldPosition& startPosition, c
     float maxDistChange = totalDistance * 0.1f;
 
     // Last long path still leads to roughly the same destination.
-    if (!lastMove.lastPath.empty() && lastMove.lastPath.getBack().distance(endPosition) < maxDistChange)
+    if (IsReusableCachedPath(ai, bot, lastMove, startPosition, endPosition, maxDistChange,
+        "resolve-same-destination"))
     {
         return lastMove.lastPath;
     }
@@ -1124,8 +1387,13 @@ TravelPath MovementAction::ResolveMovePath(const WorldPosition& startPosition, c
         outMovePath.addPath(path);
     }
 
-    if (!lastMove.lastPath.empty() && !outMovePath.empty() && lastMove.lastPath.getBack().distance(endPosition) <= outMovePath.getBack().distance(endPosition))
+    if (!outMovePath.empty() &&
+        IsReusableCachedPath(ai, bot, lastMove, startPosition, endPosition, maxDistChange,
+            "resolve-new-path-worse") &&
+        lastMove.lastPath.getBack().distance(endPosition) <= outMovePath.getBack().distance(endPosition))
+    {
         outMovePath = lastMove.lastPath;
+    }
 
     if (outMovePath.empty())
         outMovePath.addPoint(endPosition);
@@ -1371,12 +1639,15 @@ void MovementAction::UpdateFlyingState(
 #endif // !MANGOSBOT_ZERO
 }
 
-void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking, bool forceWalk)
+bool MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking, bool forceWalk)
 {
     MotionMaster& mm = *bot->GetMotionMaster();
 
+    // Throttled: we did NOT clear the existing spline, so if the bot is already moving it keeps going.
+    // Report that as "still moving" (true) so a genuinely in-progress bot isn't penalized; report a
+    // stationary throttled bot as false so it can retry.
     if (!ai->AllowPressureWork(PerfStats::BOT_PRESSURE_WORK_PATH_RETRY, 1000, 3500))
-        return;
+        return sServerFacade.isMoving(bot);
 
     mm.Clear();
 
@@ -1446,7 +1717,7 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
     GeneratePathAvoidingHazards(path);
 
     if (path.empty())
-        return;
+        return false;
 
     AiObjectContext* aiContext = ai->GetAiObjectContext();
     TravelTarget* travelTarget = aiContext ? aiContext->GetValue<TravelTarget*>("travel target")->Get() : nullptr;
@@ -1470,13 +1741,15 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
                 << " endZ=" << end.getZ();
             sPlayerbotAIConfig.logEvent(ai, "MovementDestinationSuppressed", std::to_string(bot->GetMapId()), out.str());
         }
-        return;
+        return false;
     }
 
     std::string rejectReason;
-    if (!IsPathTerrainSane(bot, path, &rejectReason))
+    std::string allowedReason;
+    if (!IsPathTerrainSane(bot, path, &rejectReason, &allowedReason))
     {
         WorldPosition end = path.back();
+        const bool corpseRecoveryMove = IsCorpseRecoveryMovement(bot, getName());
         if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementPathRejected", 15))
         {
             std::ostringstream out;
@@ -1491,8 +1764,38 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
             sPlayerbotAIConfig.logEvent(ai, "MovementPathRejected", std::to_string(bot->GetMapId()), out.str());
         }
 
-        RecoverFromRejectedMovement(ai, bot, getName(), end, rejectReason);
-        return;
+        if (!corpseRecoveryMove)
+        {
+            RecoverFromRejectedMovement(ai, bot, getName(), end, rejectReason);
+            return false;
+        }
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "DeadCorpsePathRejectedAllowed", 15))
+        {
+            std::ostringstream out;
+            out << "action=" << getName()
+                << " reason=" << rejectReason
+                << " points=" << path.size()
+                << " endMap=" << end.getMapId()
+                << " endX=" << std::fixed << std::setprecision(2) << end.getX()
+                << " endY=" << end.getY()
+                << " endZ=" << end.getZ();
+            sPlayerbotAIConfig.logEvent(ai, "DeadCorpsePathRejectedAllowed", std::to_string(bot->GetMapId()), out.str());
+        }
+    }
+    else if (!allowedReason.empty() && sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementInteriorVerticalPathAllowed", 15))
+    {
+        WorldPosition end = path.back();
+        std::ostringstream out;
+        out << "action=" << getName()
+            << " reason=" << allowedReason
+            << " points=" << path.size()
+            << " endMap=" << end.getMapId()
+            << " endX=" << std::fixed << std::setprecision(2) << end.getX()
+            << " endY=" << end.getY()
+            << " endZ=" << end.getZ()
+            << " generatePath=" << (generatePath ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(ai, "MovementInteriorVerticalPathAllowed", std::to_string(bot->GetMapId()), out.str());
     }
 
     std::vector<G3D::Vector3> pointPath = WorldPosition().toPointsArray(path);
@@ -1545,6 +1848,7 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
 #endif
     }
     WaitForReach(size);
+    return true;
 }
 
 
@@ -1579,7 +1883,35 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     if (!ai->CanMove())
         return false;
 
-    if (IsCastingSelfHeal(bot))
+    // MOVEMENT COMMITMENT (anti ping-pong). Competing movement owners (travel / rpg / grind / random)
+    // were re-steering the bot to a DIFFERENT destination every 1-2s as their relevances flapped --
+    // watched bots reverse direction 10-25x/min, walking forward-back-forward with actions canceling
+    // each other out. A real player commits to where he's going. For 2.5s after a dispatch, a request
+    // to a destination >20y from the committed one is absorbed (report success, keep driving); same-
+    // destination refreshes and combat/reaction moves pass through freely.
+    if (!react && !bot->IsInCombat() && !ai->HasRealPlayerMaster())
+    {
+        struct Commit { float x; float y; uint32 ms; };
+        static std::mutex cmx;
+        static std::unordered_map<uint32, Commit> commits;
+        const uint32 nowMs = WorldTimer::getMSTime();
+        std::lock_guard<std::mutex> lk(cmx);
+        Commit& c = commits[bot->GetGUIDLow()];
+        const float ddx = endPos.getX() - c.x, ddy = endPos.getY() - c.y;
+        if (c.ms && nowMs - c.ms < 2500 && (ddx * ddx + ddy * ddy) > 20.0f * 20.0f &&
+            sServerFacade.isMoving(bot))
+            return true;                            // stay the course; re-evaluate when window expires
+        c.x = endPos.getX(); c.y = endPos.getY(); c.ms = nowMs;
+    }
+
+    // Hold position while casting ANY cast-time / channeled spell, not just self-heals.
+    // Moving cancels the cast AND makes the bot unreachable to the creature it is fighting,
+    // so the creature evades and heals back to full -- the "bot fireballs a boar, boar drops
+    // combat the moment it enters and resets to full HP, bot OOMs and drinks" behavior. By
+    // holding, the cast completes (damage lands) and the bot stays reachable so combat sticks.
+    // Movement resumes next tick once the bot is no longer casting. (Bots out of range are not
+    // casting yet, so closing distance still works -- the hold only applies once a cast starts.)
+    if (IsCastingSelfHeal(bot) || bot->IsNonMeleeSpellCasted(true, false, true))
     {
         ai->StopMoving();
         SetDuration(250);
@@ -1696,6 +2028,9 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
         }
     }
 
+    if (RejectAbnormalFinalPath(ai, bot, lastMove, movePath, startPos, "dispatch-preflight"))
+        return false;
+
     if (!react)
     {
         float fullPathDist = startPos.getPathLength(movePath.getPointPath());
@@ -1709,7 +2044,7 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
         if (!bot->IsStandState())
             bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-        if (bot->IsNonMeleeSpellCasted(true, false, true) && !IsCastingSelfHeal(bot))
+        if (bot->IsNonMeleeSpellCasted(true, false, true) && !IsCastingSelfHeal(bot) && !IsCastingHostilePull(bot))
             ai->InterruptSpell(false);
     }
 
@@ -1820,21 +2155,50 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     }
     // END DEBUG
 
-    DispatchMovement(movePath, generatePath, masterWalking, forceWalk);
+    // Return whether a REAL movement was actually dispatched. If DispatchMovement bailed (path empty
+    // /rejected/suppressed) the bot is standing still, and returning true here made callers believe a
+    // frozen bot was moving -- e.g. MoveToTravelTargetAction would WaitForReach + DecRetry forever,
+    // so the retry/blacklist/re-plan that would send the bot to a REACHABLE objective never fired
+    // (watched: Rogerolan frozen at Stormwind gate spamming "move to travel target" for 30s+). By
+    // propagating the real result, a stuck bot reports failure and re-plans instead of standing.
+    const bool moved = DispatchMovement(movePath, generatePath, masterWalking, forceWalk);
 
     if (!idle)
         ClearIdleState();
 
-    return true;
+    return moved;
 }
 
 bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, bool react, bool noPath, bool ignoreEnemyTargets, bool forceWalk)
 {
-    if (IsCastingSelfHeal(bot))
+    // Hold position while casting ANY cast-time / channeled spell, not just self-heals.
+    // Moving cancels the cast AND makes the bot unreachable to the creature it is fighting,
+    // so the creature evades and heals back to full -- the "bot fireballs a boar, boar drops
+    // combat the moment it enters and resets to full HP, bot OOMs and drinks" behavior. By
+    // holding, the cast completes (damage lands) and the bot stays reachable so combat sticks.
+    // Movement resumes next tick once the bot is no longer casting. (Bots out of range are not
+    // casting yet, so closing distance still works -- the hold only applies once a cast starts.)
+    if (IsCastingSelfHeal(bot) || bot->IsNonMeleeSpellCasted(true, false, true))
     {
         ai->StopMoving();
         SetDuration(250);
         return true;
+    }
+
+    if (!MaNGOS::IsValidMapCoord(x, y, z))
+    {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "reason=invalid-input"
+                << " map=" << mapId
+                << " x=" << x
+                << " y=" << y
+                << " z=" << z
+                << " action=" << getName();
+            sPlayerbotAIConfig.logEvent(ai, "MovementRejectedInvalidCoord", std::to_string(mapId), out.str());
+        }
+        return false;
     }
 
     if (sPlayerbotAIConfig.hasLog("bot_events.csv") && ShouldLogMovementTrace(bot, "MovementActionTrace"))
@@ -1899,7 +2263,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
                 moveState = s_humanLikeMoveStates[low];
             }
 
-            if (moveState.nextPause <= now && frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikePauseChance)
+            const bool autonomousRandomBot = !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster();
+            if (!autonomousRandomBot && moveState.nextPause <= now && frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikePauseChance)
             {
                 uint32 pauseMs = urand(sPlayerbotAIConfig.humanLikePauseMinMs, sPlayerbotAIConfig.humanLikePauseMaxMs);
                 SetDuration(pauseMs);
@@ -1934,6 +2299,22 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
                     x += dx * forwardJitter + lateralX * lateralJitter;
                     y += dy * forwardJitter + lateralY * lateralJitter;
 
+                    if (!MaNGOS::IsValidMapCoord(x, y, z))
+                    {
+                        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                        {
+                            std::ostringstream out;
+                            out << "reason=jitter-invalid"
+                                << " map=" << mapId
+                                << " x=" << x
+                                << " y=" << y
+                                << " z=" << z
+                                << " action=" << getName();
+                            sPlayerbotAIConfig.logEvent(ai, "MovementRejectedInvalidCoord", std::to_string(mapId), out.str());
+                        }
+                        return false;
+                    }
+
                     sPlayerbotAIConfig.logEvent(
                         ai,
                         "HumanLikePathJitter",
@@ -1944,7 +2325,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
 
             if (moveState.nextJump <= now)
             {
-                if (frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeSpinChance)
+                if (!sServerFacade.UnitIsDead(bot) &&
+                    frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeSpinChance)
                 {
                     float spinOffset = frand(0.9f * static_cast<float>(M_PI), 1.8f * static_cast<float>(M_PI));
                     float wobble = frand(-0.45f, 0.45f);
@@ -1952,7 +2334,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
                     sPlayerbotAIConfig.logEvent(ai, "HumanLikeSpin", std::to_string(spinOffset), std::to_string(wobble));
                 }
 
-                if (frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeJumpChance)
+                if (!sServerFacade.UnitIsDead(bot) &&
+                    frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeJumpChance)
                 {
                     sPlayerbotAIConfig.logEvent(ai, "HumanLikeJumpAttempt", std::to_string(mapId), "jump::random");
                     ai->DoSpecificAction("jump::random", Event(), true);
@@ -2060,7 +2443,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
 
     if (lastMove.lastMoveShort.distance(endPosition) < maxDistChange && startPosition.distance(lastMove.lastMoveShort) < maxDist && !bot->GetTransport()) //The last short movement was to the same place we want to move now.
         movePosition = endPosition;
-    else if (!lastMove.lastPath.empty() && lastMove.lastPath.getBack().distance(endPosition) < maxDistChange) //The last long movement was to the same place we want to move now.
+    else if (IsReusableCachedPath(ai, bot, lastMove, startPosition, endPosition, maxDistChange,
+        "move-same-destination")) //The last long movement was to the same place we want to move now.
     {
         movePath = lastMove.lastPath;
     }
@@ -2176,7 +2560,10 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
         movePath.addPath(startPosition.fromPointsArray(points));
     }
 
-    if (!lastMove.lastPath.empty() && !movePath.empty() && lastMove.lastPath.getBack().distance(endPosition) <= movePath.getBack().distance(endPosition)) //new path is worse than the last path. Keep going the old path.
+    if (!movePath.empty() &&
+        IsReusableCachedPath(ai, bot, lastMove, startPosition, endPosition, maxDistChange,
+            "move-new-path-worse") &&
+        lastMove.lastPath.getBack().distance(endPosition) <= movePath.getBack().distance(endPosition)) //new path is worse than the last path. Keep going the old path.
     {
         movePath = lastMove.lastPath;
     }
@@ -2622,6 +3009,9 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
             ai->TellPlayerNoFacing(GetMaster(), "Setting movePosition to water surface.");
     }
 
+    if (!movePath.empty() && RejectAbnormalFinalPath(ai, bot, lastMove, movePath, startPosition, "move-to-preflight"))
+        return false;
+
     //Visual waypoints
     if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
     {
@@ -2671,7 +3061,7 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
         if (!bot->IsStandState())
             bot->SetStandState(UNIT_STAND_STATE_STAND);
 
-        if (bot->IsNonMeleeSpellCasted(true, false, true) && !IsCastingSelfHeal(bot))
+        if (bot->IsNonMeleeSpellCasted(true, false, true) && !IsCastingSelfHeal(bot) && !IsCastingHostilePull(bot))
         {
             ai->InterruptSpell(false);
         }
@@ -2851,7 +3241,14 @@ bool MovementAction::MoveTo(Unit* target, float distance)
         return false;
     }
 
-    if (IsCastingSelfHeal(bot))
+    // Hold position while casting ANY cast-time / channeled spell, not just self-heals.
+    // Moving cancels the cast AND makes the bot unreachable to the creature it is fighting,
+    // so the creature evades and heals back to full -- the "bot fireballs a boar, boar drops
+    // combat the moment it enters and resets to full HP, bot OOMs and drinks" behavior. By
+    // holding, the cast completes (damage lands) and the bot stays reachable so combat sticks.
+    // Movement resumes next tick once the bot is no longer casting. (Bots out of range are not
+    // casting yet, so closing distance still works -- the hold only applies once a cast starts.)
+    if (IsCastingSelfHeal(bot) || bot->IsNonMeleeSpellCasted(true, false, true))
     {
         ai->StopMoving();
         SetDuration(250);
@@ -3182,10 +3579,14 @@ bool MovementAction::Follow(Unit* target, float distance, float angle)
     if (!bot->IsStandState())
         bot->SetStandState(UNIT_STAND_STATE_STAND);
 
+    // Don't break an in-progress cast just to start following (measured top self-interrupt path:
+    // combat drops mid-cast, the non-combat engine wakes instantly, and follow cancelled the cast
+    // -> visible "starts casting then stops"). Hold position for a beat and follow next tick.
     if (bot->IsNonMeleeSpellCasted(true))
     {
-        bot->CastStop();
-        ai->InterruptSpell();
+        ai->StopMoving();
+        SetDuration(250);
+        return true;
     }
 
     AI_VALUE(LastMovement&, "last movement").Set(target);
@@ -3371,7 +3772,8 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
         const bool hasManaBar = AI_VALUE2(bool, "has mana", "self target");
         const uint8 manaPct = hasManaBar ? AI_VALUE2(uint8, "mana", "self target") : 0;
 
-        if (ai->IsRanged(bot) && inLos && distance > 0.0f &&
+        const bool holdAsRanged = ai->IsRanged(bot) && bot->getClass() != CLASS_PALADIN;
+        if (holdAsRanged && inLos && distance > 0.0f &&
             !sServerFacade.IsDistanceGreaterThan(distanceToTarget, distance + sPlayerbotAIConfig.contactDistance))
         {
             ai->StopMoving();
@@ -3502,12 +3904,14 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
             float distance = botPosition.getPathLength(path);
             mm.Clear(false, true);
 
-            std::vector<G3D::Vector3> pointsArray = WorldPosition().toPointsArray(path);
-#ifndef MANGOSBOT_TWO  
-            mm.MovePath(pointsArray, FORCED_MOVEMENT_RUN, false, false);
-#else
-            mm.MovePath(pointsArray, FORCED_MOVEMENT_RUN, false);
-#endif
+            // MotionMaster::MovePath is a cmangos-compat NO-OP in this repo (see DispatchMovement),
+            // so this branch used to "succeed" WITHOUT ISSUING ANY MOVEMENT -- the exact watched bug:
+            // a caster's reach-spell action "executed" every tick while the bot stood at 42y from its
+            // target forever (Eliney [smite] spam). Dispatch a REAL pathfinding MovePoint to the
+            // hazard-checked end position instead, exactly like DispatchMovement does.
+            const WorldPosition& chaseEnd = path.empty() ? endPosition : path.back();
+            mm.MovePoint(chaseEnd.getMapId(), chaseEnd.getX(), chaseEnd.getY(), chaseEnd.getZ(),
+                MOVE_PATHFINDING | MOVE_RUN_MODE, 0.0f, -10.0f);
             WaitForReach(distance);
             return true;
         }
@@ -3598,10 +4002,11 @@ void MovementAction::WaitForReach(float distance)
     if (duration > sPlayerbotAIConfig.maxWaitForMove)
         duration = sPlayerbotAIConfig.maxWaitForMove;
 
-    /*Unit* target = *ai->GetAiObjectContext()->GetValue<Unit*>("current target");
-    Unit* player = *ai->GetAiObjectContext()->GetValue<Unit*>("enemy player target");
-    if ((player || target) && duration > sPlayerbotAIConfig.globalCoolDown)
-        duration = sPlayerbotAIConfig.globalCoolDown;*/
+    // If the bot has a combat target, don't park on a multi-second move-wait -- re-evaluate within
+    // one global cooldown so it engages/reacts promptly instead of walking obliviously toward a
+    // point while a mob it already targeted (or one attacking it) is right there.
+    if (duration > sPlayerbotAIConfig.globalCoolDown && AI_VALUE(Unit*, "current target"))
+        duration = sPlayerbotAIConfig.globalCoolDown;
 
     if (duration < 0.0f)
         duration = 0.0f;
@@ -3628,11 +4033,13 @@ void MovementAction::WaitForReach(const Movement::PointsArray& path)
 
 bool MovementAction::Flee(Unit *target)
 {
-    // Random open-world bots are numerous enough that expensive flee path
-    // generation can stall a continent worker. Keep flee behavior for
-    // explicitly-mastered bots, where the extra movement is worth the cost.
-    if (!ai->HasRealPlayerMaster())
-        return false;
+    // Autonomous (masterless) bots ARE allowed to flee. A losing / outnumbered bot,
+    // or one stuck on an unreachable mob, must be able to disengage and reset instead
+    // of standing there failing to flee every tick forever (observed: hunters in
+    // combat with an unreachable target spammed "flee FAILED" 2000+ times and never
+    // moved or reset). Cost is bounded by the per-bot lastFlee/fleeDelay throttle
+    // below and by the smart panic/outnumbered triggers, which only fire when the bot
+    // is genuinely losing. (Previously this returned false for all masterless bots.)
 
     Player* master = GetMaster();
     if (!target)
@@ -3799,7 +4206,73 @@ bool MovementAction::Flee(Unit *target)
                 return true;
         }
 
+        // If pathfinding-based flee (MoveChase) isn't actually moving us (cornered / off-mesh navmesh
+        // hole), RUN STRAIGHT AWAY from the threat (noPath straight-line spline) toward validated
+        // ground so the bot physically escapes instead of dying in place / looping on res.
+        // Throttled per-bot: re-issuing the spline every tick spammed 9.8k events/75min from one
+        // underwater-stranded bot and hammered the map thread. If many consecutive escapes go
+        // nowhere, the position is hopeless (deep water/off-mesh) -> graveyard unstick, unobserved.
+        if (FleeStuck(bot) && bot->GetMap())
+        {
+            struct FleeEsc { uint32 lastMs; uint32 stuckCount; float x; float y; };
+            static std::mutex fleeEscMx;
+            static std::unordered_map<uint32, FleeEsc> fleeEscTrack;
+            bool rescueNow = false;
+            {
+                const uint32 nowMs = WorldTimer::getMSTime();
+                std::lock_guard<std::mutex> lk(fleeEscMx);
+                FleeEsc& fe = fleeEscTrack[bot->GetGUIDLow()];
+                if (fe.lastMs && (nowMs - fe.lastMs) < 2000)
+                    return true;                          // spline already issued <2s ago; let it run
+                const float fdx = bot->GetPositionX() - fe.x, fdy = bot->GetPositionY() - fe.y;
+                if (fe.lastMs && fdx * fdx + fdy * fdy < 4.0f * 4.0f)
+                    ++fe.stuckCount;                      // another escape attempt from the same spot
+                else
+                    fe.stuckCount = 0;
+                fe.lastMs = nowMs; fe.x = bot->GetPositionX(); fe.y = bot->GetPositionY();
+                if (fe.stuckCount >= 15)                  // ~30s+ of escapes going nowhere -> hopeless spot
+                {
+                    fe.stuckCount = 0;
+                    rescueNow = true;
+                }
+            }
+            if (rescueNow && !ai->HasPlayerNearby())
+            {
+                if (WorldSafeLocsEntry const* gy = sObjectMgr.GetClosestGraveYard(
+                        bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId(), bot->GetTeam()))
+                {
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                        sPlayerbotAIConfig.logEvent(ai, "FleeStrandedRescue", target->GetName());
+                    bot->CombatStop(true);
+                    bot->TeleportTo(gy->map_id, gy->x, gy->y, gy->z, bot->GetOrientation());
+                    return true;
+                }
+            }
+            const float away = target->GetAngle(bot);   // threat -> bot direction = away from threat
+            const float bx = bot->GetPositionX(), by = bot->GetPositionY(), bz = bot->GetPositionZ();
+            for (uint8 k = 0; k < 5; ++k)
+            {
+                const float a = away + ((k % 2) ? -1.0f : 1.0f) * (float)(k / 2) * (M_PI_F / 6.0f);
+                const float tx = bx + cosf(a) * distance, ty = by + sinf(a) * distance;
+                const float tz = bot->GetMap()->GetHeight(tx, ty, bz + 5.0f, true);
+                if (tz > INVALID_HEIGHT && fabs(tz - bz) < 12.0f)
+                {
+                    if (MoveTo(bot->GetMapId(), tx, ty, tz, false, false, true))   // noPath straight-line
+                    {
+                        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                            sPlayerbotAIConfig.logEvent(ai, "FleeStraightLineEscape", target->GetName());
+                        AI_VALUE(LastMovement&, "last movement").lastFlee = time(0);
+                        return true;
+                    }
+                }
+            }
+        }
+
         mm->MoveChase(target, distance, WorldPosition(bot).getAngleTo(target));
+        // Record the flee so the post-flee hold (travel/rpg movement) actually applies to AUTONOMOUS
+        // bots -- this branch previously returned without setting lastFlee, so held-out mobs were
+        // re-approached instantly (the flee<->travel aggro-boundary ping-pong).
+        AI_VALUE(LastMovement&, "last movement").lastFlee = time(0);
         return true;
     }
 
@@ -4086,6 +4559,12 @@ bool MoveToLootAction::Execute(Event& event)
         return false;
     }
 
+    if (bot->GetLootGuid() || bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING) || bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        SetDuration(sPlayerbotAIConfig.lootDelay);
+        return true;
+    }
+
     LootObject loot = AI_VALUE(LootObject, "loot target");
     if (!loot.IsLootPossible(bot))
     {
@@ -4117,6 +4596,9 @@ bool MoveToLootAction::Execute(Event& event)
         return false;
     }
 
+    if (IsLootObjectCloseEnoughToOpen(bot, loot))
+        return false;
+
     if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT) || ai->HasStrategy("debug loot", BotState::BOT_STATE_NON_COMBAT))
     {
         std::ostringstream out;
@@ -4136,7 +4618,7 @@ bool MoveToLootAction::Execute(Event& event)
         }
 
         bot->SetWalk(false, false);
-        return MoveNear(wo, PLAYERBOT_STRICT_LOOT_RANGE);
+        return MoveNear(wo, loot.guid.IsGameObject() ? INTERACTION_DISTANCE : PLAYERBOT_STRICT_LOOT_RANGE);
     }
 
     return MoveTo(WorldPosition(wo));
@@ -4342,23 +4824,292 @@ bool MoveOutOfCollisionAction::isUseful()
         ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid> >("nearest non bot players")->Get().size() > 0;
 }
 
+// Needed kill-quest creature entries for a bot (incomplete kill objectives only).
+static void CollectNeededKillEntriesMove(Player* bot, std::set<uint32>& out)
+{
+    if (!bot)
+        return;
+    for (auto const& kv : bot->getQuestStatusMap())
+    {
+        if (kv.second.m_status != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* quest = sObjectMgr.GetQuestTemplate(kv.first);
+        if (!quest)
+            continue;
+        for (uint32 o = 0; o < QUEST_OBJECTIVES_COUNT; ++o)
+            if (quest->ReqCreatureOrGOCount[o] &&
+                kv.second.m_creatureOrGOcount[o] < quest->ReqCreatureOrGOCount[o] &&
+                quest->ReqCreatureOrGOId[o] > 0)
+                out.insert(uint32(quest->ReqCreatureOrGOId[o]));
+    }
+}
+
 bool MoveRandomAction::Execute(Event& event)
 {
-    //uint32 randnum = bot->GetGUIDLow();                            //Semi-random but fixed number for each bot.
-    //uint32 cycle = floor(WorldTimer::getMSTime() / (1000*60));     //Semi-random number adds 1 each minute.
+    // NO fake/rescue movement is ever allowed to interrupt a real fight. The
+    // "rescue" cascades force this action via DoSpecificAction(..., true), which
+    // bypasses isUseful() — that is how bots were being yanked out of melee to
+    // walk around mid-combat. Hard-refuse whenever the bot is fighting, has a
+    // live target, or is casting. A bot in combat fights until combat ends.
+    if (sServerFacade.IsInCombat(bot) ||
+        bot->GetVictim() ||
+        AI_VALUE(Unit*, "current target") ||
+        bot->IsNonMeleeSpellCasted(true, false, true) ||
+        !AI_VALUE(LootObject, "loot target").IsEmpty())
+        return false;
 
-    //randnum = ((randnum + cycle) % 1000) + 1;
+    WorldPosition botPos(bot);
 
-    uint32 randnum = urand(1, 2000);
+    // GO TO THE LIVE MOB (the real fix): if the bot has a kill quest, walk to the nearest ALIVE
+    // instance of its target creature found in the grid (up to 500yd). PROVEN: live quest mobs
+    // sit 75-500yd from idle bots (at spawn points the bot isn't standing on) but the bots don't
+    // go to them. Prefer an UNTAPPED (free) one for credit; otherwise position at any live one so
+    // the bot is there to grab the next free respawn. It engages on arrival ("attack anything").
+    {
+        std::set<uint32> needed;
+        CollectNeededKillEntriesMove(bot, needed);
+        if (!needed.empty())
+        {
+            // GROUP-CAMP: a non-leader group member stays in the LEADER'S area and fans across the
+            // nearby spawn points (within CAMP_RADIUS of the leader), aggressively going to a mob to
+            // win/share the tag (group loot shares quest credit). It prefers an untapped mob that NO
+            // groupmate is already on, so the pack covers MORE spawn points instead of stacking on
+            // one. If nothing's near the leader, it returns to the pack. Solo bots / leaders search
+            // their own 500yd vicinity as before.
+            Player* leader = (bot->GetGroup() && !ai->IsGroupLeader()) ? ai->GetGroupMaster() : nullptr;
+            const bool grouped = leader && leader->IsInWorld() && leader->GetMapId() == bot->GetMapId();
+            // Keep the fan-out INSIDE the 74yd group-credit bubble around the (central) leader,
+            // so every member's kill cross-credits the leader and nearby mates. Members still
+            // spread across the spawn points within this radius (aggressive multi-point camping),
+            // just clustered tightly enough that the scarce kills actually share. The >90yd
+            // seat-efficiency leave (LeaveFarAwayAction) sits beyond this with a safe buffer.
+            const float CAMP_RADIUS = 65.0f;
 
-    float angle = M_PI  * (float)randnum / 1000; //urand(1, 1000);
-    float distance = urand(20,200);
+            std::set<uint32> mateTargets;   // mobs groupmates are already on -> spread to others
+            if (grouped)
+                if (Group* g = bot->GetGroup())
+                    for (GroupReference* ref = g->GetFirstMember(); ref; ref = ref->next())
+                    {
+                        Player* m = ref->getSource();
+                        if (m && m != bot && m->GetVictim())
+                            mateTargets.insert(m->GetVictim()->GetGUIDLow());
+                    }
 
-    return MoveTo(bot->GetMapId(), bot->GetPositionX() + cos(angle) * distance, bot->GetPositionY() + sin(angle) * distance, bot->GetPositionZ());
+            const float searchRange = grouped ? (CAMP_RADIUS + 70.0f) : 500.0f;
+            Creature* bestFree = nullptr; float bestFreeD = 1e9f;
+            Creature* bestAny  = nullptr; float bestAnyD  = 1e9f;
+            bool anyMobNearLeader = false;
+            for (uint32 e : needed)
+            {
+                std::list<Creature*> found;
+                bot->GetCreatureListWithEntryInGrid(found, e, searchRange);
+                for (Creature* c : found)
+                {
+                    if (!c || !c->IsAlive())
+                        continue;
+                    if (grouped && leader->GetDistance(c) > CAMP_RADIUS)
+                        continue;   // members stay in the leader's camp area
+                    anyMobNearLeader = true;
+                    const float d = bot->GetDistance(c);
+                    if (d <= 8.0f)
+                        continue;
+                    if (d < bestAnyD) { bestAnyD = d; bestAny = c; }
+                    const bool mateOn = mateTargets.count(c->GetGUIDLow()) > 0;
+                    // "free" must mean CLAIMABLE for THIS bot (untapped or tapped by a
+                    // groupmate -> shared credit), not merely "not in combat". IsPossibleTarget
+                    // is the same test the proof metric uses, so the bot routes to a mob it can
+                    // actually tap+credit instead of parking on one already claimed by a stranger.
+                    const bool claimable = ai::PossibleAttackTargetsValue::IsPossibleTarget(c, bot, searchRange, false);
+                    if (claimable && !mateOn && d < bestFreeD) { bestFreeD = d; bestFree = c; }
+                }
+            }
+            // Solo bots: only chase a CLAIMABLE mob; if every nearby instance is tapped, do
+            // NOT park on one (bestAny) -> fall through to explore-away-from-crowd to find a
+            // less-contested area. Grouped members keep bestAny so they stay in the leader's
+            // camp (cohesion + shared credit) even when the local mobs are momentarily claimed.
+            if (Creature* go = (bestFree ? bestFree : (grouped ? bestAny : nullptr)))
+            {
+                float gx = go->GetPositionX(), gy = go->GetPositionY(), gz = go->GetPositionZ();
+                if (PrepareRandomMovePoint(bot, gx, gy, gz) && MoveTo(bot->GetMapId(), gx, gy, gz))
+                    return true;
+            }
+            // grouped member with nothing to camp near the leader -> rejoin the pack (cohesion)
+            if (grouped && !anyMobNearLeader && bot->GetDistance(leader) > 25.0f)
+            {
+                const float ang = (float)(bot->GetGUIDLow() % 628) / 100.0f;   // per-bot offset so they don't stack
+                float lx = leader->GetPositionX() + cos(ang) * 12.0f;
+                float ly = leader->GetPositionY() + sin(ang) * 12.0f;
+                float lz = leader->GetPositionZ();
+                if (PrepareRandomMovePoint(bot, lx, ly, lz) && MoveTo(bot->GetMapId(), lx, ly, lz))
+                    return true;
+            }
+        }
+    }
+
+    // DIRECTED "SEARCHING": if the bot is parked on a real quest objective (not a null
+    // travel destination), run to one of that objective's OTHER spawn points to hunt its
+    // target mob, instead of moving randomly. The objective already carries every spawn
+    // point; GetNextPoint(..., allowSame=false) returns a DIFFERENT one (biased farther via
+    // the chances list). The bot hops point-to-point covering the area; the instant the
+    // target comes within sight, "attack anything" (rel 5) preempts and engages it.
+    // (isUseful already gates this to genuinely-idle, not-moving autonomous bots.)
+    {
+        TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+        TravelDestination* dest = travelTarget ? travelTarget->GetDestination() : nullptr;
+        if (dest && typeid(*dest) != typeid(NullTravelDestination))
+        {
+            std::list<uint8> chances = { 100, 100 };   // bias toward a farther spawn point
+            if (WorldPosition* next = dest->GetNextPoint(botPos, chances, false))
+            {
+                if (next->getMapId() == bot->GetMapId())
+                {
+                    const float d = next->distance(botPos);
+                    if (d > 8.0f && d < 600.0f)
+                    {
+                        float sx = next->getX(), sy = next->getY(), sz = next->getZ();
+                        if (PrepareRandomMovePoint(bot, sx, sy, sz) && MoveTo(bot->GetMapId(), sx, sy, sz))
+                            return true;
+                    }
+                }
+            }
+        }
+    }
+
+    const bool idleRescue = event.getParam() == "idle rescue";
+
+    if (idleRescue)
+    {
+        for (uint32 i = 0; i < 8; ++i)
+        {
+            float gx = botPos.getX();
+            float gy = botPos.getY();
+            float gz = botPos.getZ();
+            const float radius = static_cast<float>(urand(12, 70));
+#ifndef MANGOSBOT_TWO
+            const bool found = bot->GetMap()->GetReachableRandomPointOnGround(gx, gy, gz, radius);
+#else
+            const bool found = bot->GetMap()->GetReachableRandomPointOnGround(bot->GetPhaseMask(), gx, gy, gz, radius);
+#endif
+            if (!found)
+                continue;
+
+            if (!PrepareRandomMovePoint(bot, gx, gy, gz))
+                continue;
+
+            if (MoveTo(bot->GetMapId(), gx, gy, gz))
+                return true;
+        }
+    }
+
+    // SMART EXPLORE: bias the explore direction AWAY from the nearby bot crowd toward
+    // less-contested ground. Proven: an idle bot's nearby mobs are almost all TAPPED by other
+    // bots (86% of idle kill-quest bots have no claimable target), so wherever bots pile up,
+    // every spawn is instantly claimed. Heading away from the densest cluster of bots is the
+    // smart way to find untapped mobs. Falls back to a random direction when not crowded.
+    float awayAngle = -100.0f;   // < -10 means "no crowd bias, use random"
+    if (!idleRescue)
+    {
+        float cx = 0.0f, cy = 0.0f;
+        int crowd = 0;
+        for (ObjectGuid const& g : AI_VALUE(std::list<ObjectGuid>, "nearest friendly players"))
+        {
+            Unit* u = ai->GetUnit(g);
+            if (u && u != bot && u->IsPlayer() && ((Player*)u)->GetPlayerbotAI())
+            {
+                cx += u->GetPositionX();
+                cy += u->GetPositionY();
+                ++crowd;
+            }
+        }
+        if (crowd >= 3)
+        {
+            cx /= crowd; cy /= crowd;
+            const float dx = bot->GetPositionX() - cx, dy = bot->GetPositionY() - cy;
+            if (dx * dx + dy * dy > 1.0f)
+                awayAngle = atan2(dy, dx);   // point away from the crowd centroid
+        }
+    }
+
+    for (uint32 i = 0; i < (idleRescue ? 6 : 1); ++i)
+    {
+        uint32 randnum = urand(1, 2000);
+        float angle = (awayAngle > -10.0f)
+            ? awayAngle + ((float)urand(0, 1000) - 500.0f) / 1000.0f * ((float)M_PI / 3.0f)  // away +/- 60deg
+            : M_PI * (float)randnum / 1000;
+        // explore farther when fleeing a crowd so the bot actually clears the contested cluster
+        float distance = idleRescue ? static_cast<float>(urand(12, 80))
+                        : (awayAngle > -10.0f ? static_cast<float>(urand(120, 280))
+                                              : static_cast<float>(urand(20, 200)));
+        float x = bot->GetPositionX() + cos(angle) * distance;
+        float y = bot->GetPositionY() + sin(angle) * distance;
+        float z = bot->GetPositionZ();
+
+        if (!PrepareRandomMovePoint(bot, x, y, z))
+            continue;
+
+        if (MoveTo(bot->GetMapId(), x, y, z))
+            return true;
+    }
+
+    if (idleRescue && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "map=" << bot->GetMapId()
+            << " x=" << std::fixed << std::setprecision(2) << bot->GetPositionX()
+            << " y=" << bot->GetPositionY()
+            << " z=" << bot->GetPositionZ();
+        sPlayerbotAIConfig.logEvent(ai, "MoveRandomIdleRescueFailed", "", out.str());
+    }
+
+    return false;
 }
 
 bool MoveRandomAction::isUseful()
-{    
+{
+    // SUSTAINED-IDLE HOLD: travel-target churn (choose -> cooldown -> re-choose) leaves 1-tick
+    // eligibility gaps, and firing a random hop in each gap read as scatter-brained direction
+    // flips (measured: 1,181 travel->move-random transitions in ~33min; fleet intent churn 12.3
+    // switches/min). A player pauses between goals; wander only after sustained idleness. The
+    // clock resets the moment the bot is busy again, so gaps can't accumulate across legs.
+    static std::mutex idleMx;
+    static std::unordered_map<uint32, uint32> idleSince;
+
+    bool idleEligible = false;
+    if (!ai->HasRealPlayerMaster() &&
+        !ai->HasActivePlayerMaster() &&
+        !sServerFacade.IsInCombat(bot) &&
+        !sServerFacade.isMoving(bot) &&
+        !bot->isMovingOrTurning() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        !AI_VALUE(Unit*, "current target") &&
+        AI_VALUE(LootObject, "loot target").IsEmpty())
+    {
+        TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+        const TravelStatus status = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+
+        // Wander/patrol only when idle and NOT actively en route (TRAVEL/READY keep walking via
+        // MoveToTravelTargetAction). For WORK/PREPARE/COOLDOWN/EXPIRED/NONE the bot is standing
+        // around with nothing to do; if a mob is near, "attack anything" (rel 5) outranks this
+        // wander (rel 0.4) and the bot grinds it instead.
+        idleEligible = (status != TravelStatus::TRAVEL_STATUS_TRAVEL &&
+                        status != TravelStatus::TRAVEL_STATUS_READY);
+    }
+
+    {
+        const uint32 now = WorldTimer::getMSTime();
+        std::lock_guard<std::mutex> lk(idleMx);
+        uint32& since = idleSince[bot->GetGUIDLow()];
+        if (!idleEligible)
+            since = 0;
+        else if (!since)
+            since = now;
+        else if (now - since >= 3000)
+        {
+            since = 0;
+            return true;
+        }
+    }
+
     return !ai->HasRealPlayerMaster() && ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid> >("nearest friendly players")->Get().size() > urand(25, 100);
 }
 
@@ -4376,12 +5127,18 @@ bool MoveToAction::Execute(Event& event)
 
 bool JumpAction::isUseful()
 {
+    if (sServerFacade.UnitIsDead(bot))
+        return false;
+
     const bool allowAutonomousRandomJump = getQualifier() == "random" && !ai->HasRealPlayerMaster();
     return bot->IsInWorld() && !ai->IsJumping() && (allowAutonomousRandomJump || ai->HasPlayerNearby());
 }
 
 bool JumpAction::Execute(ai::Event &event)
 {
+    if (sServerFacade.UnitIsDead(bot))
+        return false;
+
     // don't jump while casting without real player command
     if (!event.getOwner() && bot->IsNonMeleeSpellCasted(false, false, true))
         return false;
@@ -4710,6 +5467,9 @@ WorldPosition JumpAction::CalculateJumpParameters(const WorldPosition& src, Unit
     if (!jumper)
         return WorldPosition();
 
+    if (!src || !jumper->GetMap() || !MaNGOS::IsValidMapCoord(src.getX(), src.getY(), src.getZ()))
+        return WorldPosition();
+
     // static data
     float const m_gravity = 19.2911f;
     float const timeForMaxHeight = vSpeed / m_gravity;
@@ -4731,6 +5491,8 @@ WorldPosition JumpAction::CalculateJumpParameters(const WorldPosition& src, Unit
         float fx = ox;
         float fy = oy;
         float fz = oz + maxHeight + jumper->GetCollisionHeight();
+        if (!MaNGOS::IsValidMapCoord(ox, oy, oz) || !MaNGOS::IsValidMapCoord(fx, fy, fz))
+            return WorldPosition();
 #ifdef MANGOSBOT_TWO
         if (jumper->GetMap()->GetHitPosition(ox, oy, oz, fx, fy, fz, jumper->GetPhaseMask(), -0.5f))
 #else
@@ -4788,6 +5550,9 @@ WorldPosition JumpAction::CalculateJumpParameters(const WorldPosition& src, Unit
         fx += jumper->GetCollisionWidth() * vcos;
         fy += jumper->GetCollisionWidth() * vsin;
 
+        if (!MaNGOS::IsValidMapCoord(ox, oy, oz) || !MaNGOS::IsValidMapCoord(fx, fy, fz))
+            return WorldPosition();
+
 #ifdef MANGOSBOT_TWO
         foundCollision = jumper->GetMap()->GetHitPosition(ox, oy, oz, fx, fy, fz, jumper->GetPhaseMask(), -0.5f);
 #else
@@ -4802,6 +5567,9 @@ WorldPosition JumpAction::CalculateJumpParameters(const WorldPosition& src, Unit
 
             fx += jumper->GetCollisionWidth() * vcos;
             fy += jumper->GetCollisionWidth() * vsin;
+
+            if (!MaNGOS::IsValidMapCoord(ox, oy, oz + 0.5f) || !MaNGOS::IsValidMapCoord(fx, fy, fz))
+                return WorldPosition();
 
 #ifdef MANGOSBOT_TWO
             foundCollision = jumper->GetMap()->GetHitPosition(ox, oy, oz, fx, fy, fz, jumper->GetPhaseMask(), -0.5f);
@@ -4850,6 +5618,8 @@ WorldPosition JumpAction::CalculateJumpParameters(const WorldPosition& src, Unit
                 goodLanding = false;
                 // reduce landing height by collision height
                 float fz_mod = fz - CONTACT_DISTANCE - jumper->GetCollisionHeight();
+                if (!MaNGOS::IsValidMapCoord(fx, fy, fz) || !MaNGOS::IsValidMapCoord(fx, fy, fz_mod))
+                    return WorldPosition();
 #ifdef MANGOSBOT_TWO
                 jumper->GetMap()->GetHitPosition(fx, fy, fz, fx, fy, fz_mod, jumper->GetPhaseMask(), -0.5f);
 #else

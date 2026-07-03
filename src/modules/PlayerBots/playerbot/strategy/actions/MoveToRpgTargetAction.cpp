@@ -8,11 +8,81 @@
 #include "playerbot/strategy/values/PossibleRpgTargetsValue.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/TravelMgr.h"
+#include <mutex>
+#include <unordered_map>
 
 using namespace ai;
 
 namespace
 {
+    // RPG-MOVE FREEZE BREAKER (same defect + same fix as travel): "move to rpg target" can "succeed"
+    // (a MovePoint is issued) toward an rpg target the bot can't path to, so it stands "moving" forever
+    // while the rpg target churns. Key on the BOT's NET DISPLACEMENT over wall-clock (NOT the guid,
+    // which resets every tick): physically moved <8y in 8s -> stuck.
+    bool RpgMoveStuck(Player* bot, bool legitimatelyStationary = false)
+    {
+        if (!bot)
+            return false;
+        struct St { float x; float y; uint32 sinceMs; };
+        constexpr uint32 WINDOW_MS = 8000;
+        constexpr float MIN_DISP = 8.0f;
+        static std::mutex mx;
+        static std::unordered_map<uint32, St> track;
+        const uint32 now = WorldTimer::getMSTime();
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        // Legit stationary states reset the window instead of aging it (see travel breaker: the
+        // window aging through combat made the first post-fight drink read as an 8s+ freeze).
+        if (!s.sinceMs || legitimatelyStationary)
+        {
+            s.x = bot->GetPositionX(); s.y = bot->GetPositionY(); s.sinceMs = now;
+            return false;
+        }
+        const float dx = bot->GetPositionX() - s.x, dy = bot->GetPositionY() - s.y;
+        if (dx * dx + dy * dy >= MIN_DISP * MIN_DISP)
+        {
+            s.x = bot->GetPositionX(); s.y = bot->GetPositionY(); s.sinceMs = now;
+            return false;
+        }
+        return (now - s.sinceMs) >= WINDOW_MS;
+    }
+
+    bool IsProgressionTravelStatus(TravelStatus status)
+    {
+        return status == TravelStatus::TRAVEL_STATUS_READY ||
+               status == TravelStatus::TRAVEL_STATUS_TRAVEL;
+    }
+
+    bool HasProgressionTravelTarget(TravelTarget* travelTarget)
+    {
+        if (!travelTarget || !travelTarget->IsActive() || !travelTarget->GetDestination() || travelTarget->GetEntry() == 0)
+            return false;
+
+        return IsProgressionTravelStatus(travelTarget->GetStatus());
+    }
+
+    bool ShouldYieldRpgMovement(Player* bot, TravelTarget* travelTarget)
+    {
+        return HasProgressionTravelTarget(travelTarget);
+    }
+
+    void LogRpgTargetDroppedForProgression(PlayerbotAI* ai, GuidPosition const& guidP, TravelTarget* travelTarget, char const* phase)
+    {
+        if (!sPlayerbotAIConfig.hasLog("bot_events.csv") || urand(1, 20) != 1)
+            return;
+
+        std::ostringstream out;
+        out << "phase=" << phase;
+        if (travelTarget)
+        {
+            out << " travelStatus=" << static_cast<uint32>(travelTarget->GetStatus())
+                << " travelEntry=" << travelTarget->GetEntry()
+                << " travel=" << (travelTarget->GetDestination() ? travelTarget->GetDestination()->GetTitle() : "none");
+        }
+
+        sPlayerbotAIConfig.logEvent(ai, "RpgTargetDroppedForProgress", guidP ? guidP.to_string() : "none", out.str());
+    }
+
     bool BuildRpgApproachPosition(Player* bot, WorldObject* wo, WorldPosition& movePos)
     {
         if (!bot || !wo)
@@ -36,6 +106,17 @@ namespace
 
 bool MoveToRpgTargetAction::Execute(Event& event)
 {
+    TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+    if (ShouldYieldRpgMovement(bot, travelTarget))
+    {
+        GuidPosition guidP = AI_VALUE(GuidPosition, "rpg target");
+        if (guidP)
+            AI_VALUE(std::set<ObjectGuid>&, "ignore rpg target").insert(guidP);
+        RESET_AI_VALUE(GuidPosition, "rpg target");
+        LogRpgTargetDroppedForProgression(ai, guidP, travelTarget, "execute");
+        return false;
+    }
+
     GuidPosition guidP = AI_VALUE(GuidPosition, "rpg target");
     Unit* unit = ai->GetUnit(guidP);
     GameObject* go = ai->GetGameObject(guidP);
@@ -74,19 +155,6 @@ bool MoveToRpgTargetAction::Execute(Event& event)
         }
     }
 
-    if (unit && unit->IsMoving() && !urand(0, 20) && guidP.sqDistance2d(bot) < INTERACTION_DISTANCE * INTERACTION_DISTANCE * 2)
-    {
-        AI_VALUE(std::set<ObjectGuid>&,"ignore rpg target").insert(AI_VALUE(GuidPosition, "rpg target"));
-
-        RESET_AI_VALUE(GuidPosition,"rpg target");
-
-        if (ai->HasStrategy("debug rpg", BotState::BOT_STATE_NON_COMBAT))
-        {
-            ai->TellPlayerNoFacing(GetMaster(), "Rpg target is moving. Random drop target.");
-        }
-        return false;
-    }
-
     if (!CanFreeMoveValue::CanFreeMoveTo(ai, wo))
     {
         AI_VALUE(std::set<ObjectGuid>&, "ignore rpg target").insert(AI_VALUE(GuidPosition, "rpg target"));
@@ -122,19 +190,6 @@ bool MoveToRpgTargetAction::Execute(Event& event)
         if (ai->HasStrategy("debug rpg", BotState::BOT_STATE_NON_COMBAT))
         {
             ai->TellPlayerNoFacing(GetMaster(), "Under/above object drop rpg target");
-        }
-        return false;
-    }
-
-    if (!urand(0, 50))
-    {
-        AI_VALUE(std::set<ObjectGuid>&, "ignore rpg target").insert(AI_VALUE(GuidPosition, "rpg target"));
-
-        RESET_AI_VALUE(GuidPosition, "rpg target");
-
-        if (ai->HasStrategy("debug rpg", BotState::BOT_STATE_NON_COMBAT))
-        {
-            ai->TellPlayerNoFacing(GetMaster(), "Random drop rpg target");
         }
         return false;
     }
@@ -214,6 +269,21 @@ bool MoveToRpgTargetAction::Execute(Event& event)
         }
     }
 
+    // Frozen while "moving" to an unreachable rpg target for 8s+ -> drop it and re-pick instead of
+    // standing forever (measured as the #2 idle cause after travel freezes).
+    const bool rpgHoldLegit = sServerFacade.IsInCombat(bot) ||
+        bot->IsNonMeleeSpellCasted(false) ||
+        bot->getStandState() != UNIT_STAND_STATE_STAND ||
+        bot->HasAuraType(SPELL_AURA_MOD_REGEN) || bot->HasAuraType(SPELL_AURA_MOD_POWER_REGEN);
+    if (rpgHoldLegit)
+        RpgMoveStuck(bot, true); // reset the freeze window; do not age it through the hold
+    else if (couldMove && RpgMoveStuck(bot))
+    {
+        AI_VALUE(std::set<ObjectGuid>&, "ignore rpg target").insert(AI_VALUE(GuidPosition, "rpg target"));
+        RESET_AI_VALUE(GuidPosition, "rpg target");
+        return false;
+    }
+
     if (couldMove)
         WaitForReach(std::max<float>(movePos.distance(bot), 1.0f));
 
@@ -222,6 +292,14 @@ bool MoveToRpgTargetAction::Execute(Event& event)
 
 bool MoveToRpgTargetAction::isUseful()
 {
+    // POST-FLEE HOLD (same as travel): resuming rpg movement right after a flee walked the bot back
+    // through the mob it escaped -> re-aggro ping-pong. Wait out the leash + recover first.
+    {
+        const time_t lastFlee = AI_VALUE(LastMovement&, "last movement").lastFlee;
+        if (lastFlee && time(0) - lastFlee < 10 && bot->GetHealthPercent() < 90.0f)
+            return false;
+    }
+
     GuidPosition guidP = AI_VALUE(GuidPosition, "rpg target");
     WorldPosition oldPosition = guidP;
 
@@ -244,8 +322,15 @@ bool MoveToRpgTargetAction::isUseful()
         if (bot->IsMoving() && bot->GetMotionMaster() && bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
             return false;
 
-    if (AI_VALUE(bool, "travel target traveling"))
+    TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+    if (ShouldYieldRpgMovement(bot, travelTarget))
+    {
+        if (guidP)
+            AI_VALUE(std::set<ObjectGuid>&, "ignore rpg target").insert(guidP);
+        RESET_AI_VALUE(GuidPosition, "rpg target");
+        LogRpgTargetDroppedForProgression(ai, guidP, travelTarget, "isUseful");
         return false;
+    }
 
     if (AI_VALUE2(float, "distance", "rpg target") < INTERACTION_DISTANCE)
         return false;

@@ -7,6 +7,9 @@
 #include "Database/DatabaseEnv.h"
 #include "SharedDefines.h"
 
+#include <mutex>
+#include <vector>
+
 
 class WorldPacket;
 class Player;
@@ -27,6 +30,11 @@ public:
 	void HandlePlayerBotLoginCallback(QueryResult * dummy, SqlQueryHolder * holder);
 
     void LogoutPlayerBot(uint32 guid, bool allowInstant = true, bool forDelete = false);
+    // Thread-safe logout request for map-worker contexts. LogoutPlayerBot tears the Player down
+    // and must only run on the world thread (it races the unlocked playerBots iteration there);
+    // queued guids are drained at the top of UpdateAIInternal.
+    void QueueBotLogout(uint32 guid);
+    void DrainQueuedBotLogouts();
     void DisablePlayerBot(uint32 guid, bool logOutPlayer = true);
     Player* GetPlayerBot (uint32 guid) const;
 
@@ -135,6 +143,8 @@ private:
     std::string HandleBotRandom(Player* bot, Player* master, const std::string param);
 
     PlayerBotMap playerBots;
+    std::mutex m_pendingLogoutsLock;
+    std::vector<uint32> m_pendingBotLogouts;
     std::map<std::string, HolderCommandHandler> m_holderHandlers;
     std::map<std::string, BotCommandHandler> m_botCommandHandlers;
     ObjectGuid m_spoofGuid;

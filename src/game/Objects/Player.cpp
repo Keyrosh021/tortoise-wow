@@ -23,6 +23,8 @@
 #include <cmath>
 #include <iostream>
 #include <ctime>
+#include <atomic>
+#include <cstdint>
 
 #include "Player.h"
 #include "Language.h"
@@ -15847,6 +15849,16 @@ void Player::ItemRemovedQuestCheck(uint32 entry, uint32 count)
     UpdateForQuestWorldObjects();
 }
 
+// Bot quest-kill-credit instrumentation (diagnostics).
+// g_botKillCredits   = total times a BOT's kill-quest objective actually incremented.
+// g_botSharedCredits = subset of those where the bot was NOT the tapper/killer, i.e. it
+//                      received the credit purely via group-sharing (the grouping payoff).
+// g_killCreditTapper = set by Group::RewardGroupAtKill to the tapper for the duration of the
+//                      group credit loop; null on solo/script/spell credit paths.
+std::atomic<uint64_t> g_botKillCredits{0};
+std::atomic<uint64_t> g_botSharedCredits{0};
+thread_local Player* g_killCreditTapper = nullptr;
+
 void Player::KilledMonster(CreatureInfo const* cInfo, ObjectGuid guid)
 {
     if (cInfo->entry)
@@ -15914,6 +15926,14 @@ void Player::KilledMonsterCredit(uint32 entry, ObjectGuid guid)
                                 q_status.uState = QUEST_CHANGED;
 
                             SendQuestUpdateAddCreatureOrGo(qInfo, guid, j, q_status.m_creatureOrGOcount[j]);
+
+                            // diagnostics: count real bot kill-quest progress, split killer vs group-shared
+                            if (GetPlayerbotAI())
+                            {
+                                g_botKillCredits.fetch_add(1, std::memory_order_relaxed);
+                                if (g_killCreditTapper && g_killCreditTapper != this)
+                                    g_botSharedCredits.fetch_add(1, std::memory_order_relaxed);
+                            }
                         }
 
                         if (CanCompleteQuest(questid))
@@ -22084,6 +22104,16 @@ void Player::UpdateAreaDependentAuras()
 
 uint32 Player::GetCorpseReclaimDelay(bool pvp) const
 {
+    // Playerbots reclaim their corpse instantly. This delay (30/60/120s, stacking
+    // on repeated deaths) is the gate enforced by HandleReclaimCorpseOpcode, and
+    // was the dominant reason the bot fleet sat ~40% dead at any moment: a bot
+    // reaches its body but the core rejects the reclaim for up to 2 minutes, so it
+    // just stands there dead. There is no human at the keyboard to wait out a res
+    // timer, and reclaiming AT the corpse applies no resurrection sickness, so this
+    // is safe. (Only a forward-declared pointer is needed here, no module header.)
+    if (GetPlayerbotAI())
+        return 0;
+
     if ((pvp && !sWorld.getConfig(CONFIG_BOOL_DEATH_CORPSE_RECLAIM_DELAY_PVP)) ||
             (!pvp && !sWorld.getConfig(CONFIG_BOOL_DEATH_CORPSE_RECLAIM_DELAY_PVE)))
         return copseReclaimDelay[0];

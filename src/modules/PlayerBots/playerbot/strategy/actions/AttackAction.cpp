@@ -177,6 +177,29 @@ bool AttackAction::Attack(Player* requester, Unit* target)
     if (IsCastingSelfHeal(bot))
         return false;
 
+    // RE-ENGAGE after a cast/heal. A melee bot that just finished a cast (Holy Light,
+    // Seal, etc.) has stopped auto-attacking; if it is in melee range of a live target
+    // but no longer swinging, force the swing to resume immediately. Without this the
+    // bot healed itself then STOOD STILL eating auto-attacks while its HP drained -
+    // every tick `melee` returned FAILED because the range/ranged/chase branches below
+    // could bail and never restart the attack (observed: paladin heals, idles, dies).
+    // Paladins count as melee here even when IsRanged() (holy heuristic) says otherwise.
+    if (target && target->IsInWorld() && target->GetMapId() == bot->GetMapId() &&
+        bot->IsInCombat() &&
+        !(ai->IsRanged(bot) && bot->getClass() != CLASS_PALADIN) &&
+        bot->CanReachWithMeleeAutoAttack(target) &&
+        !(bot->GetVictim() == target && bot->HasUnitState(UNIT_STAT_MELEE_ATTACKING)))
+    {
+        bot->SetSelectionGuid(target->GetObjectGuid());
+        bot->SetTarget(target);
+        bot->Attack(target, true);
+        if (sServerFacade.isMoving(bot) || !bot->IsStopped())
+            ai->StopMoving();
+        if (ai->CanMove() && !sServerFacade.IsInFront(bot, target, sPlayerbotAIConfig.sightDistance, CAST_ANGLE_IN_FRONT))
+            sServerFacade.SetFacingTo(bot, target);
+        return true;
+    }
+
     auto logAttackYield = [this, target](char const* eventName, char const* reason, float distance)
     {
         if (!target || !sPlayerbotAIConfig.hasLog("bot_events.csv"))
@@ -255,8 +278,32 @@ bool AttackAction::Attack(Player* requester, Unit* target)
 
     auto ensureMeleeChase = [this, target]()
     {
-        if (!target || ai->IsRanged(bot))
+        if (!target)
             return false;
+
+        // Out-of-mana caster fallback: when a caster bot OOMs MID-FIGHT it must keep dealing
+        // damage to finish the mob -- close to melee and auto-attack. Otherwise it stands idle
+        // at range (can't cast, won't melee, won't chase), its combat timer expires, the bot is
+        // dropped from the creature's threat list, and a NEUTRAL creature (no faction reason to
+        // stay engaged) evades and heals back to full -- the "bot fireballs a boar, OOMs, boar
+        // resets to full, bot drinks" loop. Hostile creatures re-aggro by faction so they never
+        // show this; neutral wildlife (the entire new starter zones) resets every time. A real
+        // player melees the mob down when OOM. Hunters are excluded (they auto-shot at range).
+        if (ai->IsRanged(bot))
+        {
+            const bool oomCaster =
+                bot->getClass() != CLASS_HUNTER &&
+                AI_VALUE2(bool, "has mana", "self target") &&
+                AI_VALUE2(uint8, "mana", "self target") <= sPlayerbotAIConfig.lowMana;
+            // Also allow ranged bots to chase into melee when the target creature literally
+            // cannot path to us (unreachable-evade) -- we must get on its ground or it evades
+            // and heals to full. See the unreachable-relocate branch below.
+            Creature* meleeChaseCreature = target->ToCreature();
+            const bool targetUnreachable =
+                meleeChaseCreature && meleeChaseCreature->IsEvadeBecauseTargetNotReachable();
+            if (!oomCaster && !targetUnreachable)
+                return false;
+        }
 
         MotionMaster* mm = bot->GetMotionMaster();
         if (!mm)
@@ -450,6 +497,52 @@ bool AttackAction::Attack(Player* requester, Unit* target)
         const bool hasManaBar = AI_VALUE2(bool, "has mana", "self target");
         const uint8 manaPct = hasManaBar ? AI_VALUE2(uint8, "mana", "self target") : 0;
         const bool canFallbackToMelee = !isCasterRanged || !hasManaBar || manaPct <= sPlayerbotAIConfig.lowMana;
+
+        // HIGHEST-PRIORITY combat positioning: if the target creature literally cannot path to
+        // us (it is in unreachable-evade, m_TargetNotReachableTimer > 3s), walk to it and get on
+        // its ground NOW -- before casting or holding at range. Otherwise it evades and heals to
+        // full while the bot plinks it from an elevated / unreachable spot (root cause confirmed
+        // via core trace: bot standing up to ~80y above the creature). ensureMeleeChase is
+        // allowed to chase ranged bots in this case (see its gate). Ground creatures only.
+        if (Creature* unreachableCreature = target->ToCreature())
+        {
+            // Catch the FULL evade/reset state too, not just the narrow soft-evade window
+            // (m_TargetNotReachableTimer>3s): by the time a bolt resolves, the mob has often
+            // already passed into IsInEvadeMode (running home / resetting), so the narrow
+            // check missed it (measured: stuck mobs show evade=1 but evadeUnreach=0).
+            const bool targetUnreachable = unreachableCreature->IsEvadeBecauseTargetNotReachable()
+                || unreachableCreature->IsInEvadeMode();
+            const bool botCasting = bot->IsNonMeleeSpellCasted(true, false, true);
+            // Floating-bot guard: if the bot is well ABOVE the creature (vertical gap), the
+            // creature is PERPETUALLY unreachable -- relocating horizontally can't help and
+            // interrupting the cast would just self-loop ("stuck in the decision"). Only the
+            // same-ground case (the measured one: caster bolts a mob from ~26y, mob can't
+            // path-close, evades, mage keeps casting into the reset) is fixable by closing in.
+            const float vDelta = std::fabs(bot->GetPositionZ() - unreachableCreature->GetPositionZ());
+            const bool sameGround = vDelta <= 5.0f;
+
+            if (targetUnreachable && (sameGround || !botCasting))
+            {
+                // A bolt landing on an unreachable/evading creature deals ZERO damage
+                // (SPELL_MISS_EVADE) -- the mob heals to full and resets every cast. So the
+                // in-progress cast is WASTED; on same ground, interrupt it and walk in so the
+                // mob can reach us. Relocating shrinks the gap each pass -> it converges (the
+                // floating case is excluded above, so no infinite self-interrupt).
+                if (botCasting && sameGround)
+                    ai->InterruptSpell(false);
+                bot->SetSelectionGuid(target->GetObjectGuid());
+                bot->SetTarget(target);
+                bot->Attack(target, true);
+                const bool relocated = ensureMeleeChase();
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                    sPlayerbotAIConfig.logEvent(ai, "ReachCloseUnreachable",
+                        std::to_string(target->GetGUIDLow()),
+                        std::string("relocated=") + (relocated ? "1" : "0"));
+                if (relocated)
+                    return true;
+            }
+        }
+
         const bool alreadyEngaged = bot->GetVictim() == target && bot->IsInCombat() &&
             (isRangedBot || bot->HasUnitState(UNIT_STAT_MELEE_ATTACKING));
 
@@ -640,7 +733,11 @@ bool AttackAction::Attack(Player* requester, Unit* target)
         {
             suspendTravelForCombat();
             ai->PlayAttackEmote(1);
-            result = bot->Attack(target, !isRangedBot || (canFallbackToMelee && targetDistance < 5.0f));
+            // An OOM caster enables melee at ANY distance (ensureMeleeChase closes the gap),
+            // so it finishes the mob instead of idling at range until combat expires and the
+            // creature evade-resets. Hunters keep their existing close-range-only fallback.
+            const bool oomCasterMelee = isCasterRanged && hasManaBar && manaPct <= sPlayerbotAIConfig.lowMana;
+            result = bot->Attack(target, !isRangedBot || (canFallbackToMelee && targetDistance < 5.0f) || oomCasterMelee);
             const bool chaseForced = ensureMeleeChase();
             SC_LOG("attack-cmd bot->Attack bot=%s tgt=%s result=%d",
                    bot ? bot->GetName() : "(null)",

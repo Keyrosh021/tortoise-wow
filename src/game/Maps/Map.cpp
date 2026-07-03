@@ -855,7 +855,30 @@ void Map::UpdatePlayers()
             !plr->GetSession()->HasRecentPacket(PACKET_PROCESS_SPELLS) && !plr->HasScheduledEvent() &&
             !plr->GetLootGuid() && !plr->IsTaxiFlying() && !plr->IsBeingTeleported() &&
             !plr->IsNonMeleeSpellCasted(true) && !plr->isMovingOrTurning();
-        const bool overContinentBotBudget = IsContinent() && lowUrgencyBot &&
+        // Adaptive fairness floor. The per-frame continent budget rations idle-bot
+        // CPU, but the player list is iterated from begin() every frame with no
+        // rotation, so the SAME tail of idle bots was skipped frame after frame —
+        // they never got a brain tick to stop being idle (the dominant "bot looks
+        // AFK / stands still forever" cause; measured ~80% of bot updates skipped).
+        // We bound idle-bot starvation by force-servicing a bot that has waited too
+        // long, BUT scale that threshold with live server load: when the tick has
+        // headroom (NORMAL) we service idle bots aggressively for high activity;
+        // when the world is drowning (PRESSURE/CRITICAL) we back off so we never
+        // reintroduce the frame-overrun freezes the budget exists to prevent. This
+        // self-balances toward "as many active bots as the frame can afford".
+        // A bot that has already PICKED a hostile target (creature selected) but isn't yet flagged
+        // in-combat/moving is about to act -- it decided, it just hasn't executed. Under load the
+        // normal idle floor (2.5-5s) delays that execution by seconds = the visible "stands there
+        // with a mob targeted, not attacking yet / freezes when a 2nd mob joins" reaction lag. Give
+        // such combat-intent bots a much shorter floor so they're serviced promptly. The per-frame
+        // budget still caps total work (they just get priority over genuinely-idle bots), so this
+        // sharpens reaction time without reintroducing tick overrun.
+        const bool botCombatIntent = isBot && !plr->isRealPlayer() && plr->GetSelectionGuid().IsCreature();
+        const uint32 starvationFloorMs = botCombatIntent ? 250u
+                                       : (pressure >= PerfStats::BOT_PRESSURE_CRITICAL ? 5000u
+                                       : (pressure >= PerfStats::BOT_PRESSURE_PRESSURE ? 2500u : 1200u));
+        const bool starvedTooLong = plr->GetSkippedUpdateTime() >= starvationFloorMs;
+        const bool overContinentBotBudget = IsContinent() && lowUrgencyBot && !starvedTooLong &&
             WorldTimer::getMSTimeDiffToNow(updateStart) >= continentBotBudgetMs;
         if ((!updateInactivePlayers && (!plr->IsInCombat() && !plr->GetSession()->HasRecentPacket(PACKET_PROCESS_SPELLS) && !plr->HasScheduledEvent())) ||
             overContinentBotBudget)

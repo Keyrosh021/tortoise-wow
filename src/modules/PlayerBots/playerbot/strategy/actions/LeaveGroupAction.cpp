@@ -1,9 +1,40 @@
 
 #include "playerbot/playerbot.h"
 #include "LeaveGroupAction.h"
+#include <set>
 
 namespace ai
 {
+    namespace
+    {
+        // Set of creature entries this player still needs to KILL for incomplete quests.
+        std::set<uint32> NeededKillEntries(Player* p)
+        {
+            std::set<uint32> entries;
+            if (!p)
+                return entries;
+
+            QuestStatusMap& questStatusMap = p->getQuestStatusMap();
+            for (auto const& kv : questStatusMap)
+            {
+                const QuestStatusData& qs = kv.second;
+                if (qs.m_status != QUEST_STATUS_INCOMPLETE)
+                    continue;
+
+                Quest const* quest = sObjectMgr.GetQuestTemplate(kv.first);
+                if (!quest)
+                    continue;
+
+                for (uint32 o = 0; o < QUEST_OBJECTIVES_COUNT; ++o)
+                    if (quest->ReqCreatureOrGOId[o] > 0 &&
+                        qs.m_creatureOrGOcount[o] < quest->ReqCreatureOrGOCount[o])
+                        entries.insert(uint32(quest->ReqCreatureOrGOId[o]));
+            }
+
+            return entries;
+        }
+    }
+
 	bool LeaveGroupAction::Leave(Player* player) 
     {
         if (!player)
@@ -71,6 +102,33 @@ namespace ai
             Player* member = gref->getSource();
             if (!ai->IsSafe(member))
                 return false;
+        }
+
+        // SEAT EFFICIENCY (random/free bots only, never a real player's group): free the
+        // group seat the instant this member stops benefiting the pack, so it goes to a
+        // co-located same-objective bot instead. Two fast cases:
+        //   (1) drifted out of the 74yd group-credit radius (+buffer) from the leader -> it
+        //       receives no shared kill credit there, the seat is wasted.
+        //   (2) it and the leader are BOTH on kill quests but share NO target mob -> they no
+        //       longer help each other; drop so the leader's kills credit a same-goal bot.
+        if (!ai->HasRealPlayerMaster() && groupMaster != bot)
+        {
+            // 90yd: just beyond the 75yd camp-group clustering radius, so co-located members aren't
+            // evicted, but a genuinely-departed member frees its seat.
+            if (groupMaster->GetMapId() == bot->GetMapId() &&
+                sServerFacade.GetDistance2d(bot, groupMaster) > 90.0f)
+                return true;
+
+            std::set<uint32> myGoals = NeededKillEntries(bot);
+            std::set<uint32> leaderGoals = NeededKillEntries(groupMaster);
+            if (!myGoals.empty() && !leaderGoals.empty())
+            {
+                bool shares = false;
+                for (uint32 e : myGoals)
+                    if (leaderGoals.count(e)) { shares = true; break; }
+                if (!shares)
+                    return true;
+            }
         }
 
         if (!sPlayerbotAIConfig.randomBotGroupNearby)

@@ -8,6 +8,10 @@ namespace ai
     bool IsLootGuidSkippedForBot(Player* bot, ObjectGuid guid);
     void DeferLootGuidForBot(Player* bot, ObjectGuid guid, time_t delaySeconds);
     void DeferForeignLootGuidForBot(Player* bot, ObjectGuid guid);
+    // Clears BOTH skip layers (per-bot defer + global suppression) for a guid. Needed because
+    // respawned creatures REUSE guids: a skip recorded against a previous corpse (foreign kill /
+    // empty loot) poisons the bot's OWN later kill of the same guid.
+    void ClearLootGuidSkipForBot(Player* bot, ObjectGuid guid);
 
     class ItemQualifier;
 
@@ -29,6 +33,11 @@ namespace ai
         uint32 reqSkillValue;
         uint32 reqItem;
     };
+
+    // 4.5y (was 2.0): the core accepts CMSG_LOOT within INTERACTION_DISTANCE (5y); at 2y the "open
+    // loot" trigger never fired while MoveNear orbited the corpse at 3-5y, so killers paced around
+    // their own kills until the loot target timed out (the never-loots-quest-drops chain, final gate).
+    bool IsLootObjectCloseEnoughToOpen(Player* bot, LootObject& lootObject, float creatureRange = 4.5f);
 
     class LootTarget
     {

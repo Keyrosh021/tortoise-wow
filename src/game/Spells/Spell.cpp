@@ -1539,6 +1539,27 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
         m_damage += target->damage;
     }
 
+    // CASTERTRACE-HIT: ground truth for "bolt lands but does nothing". Logs the FINAL
+    // outcome as a bot caster's damaging spell resolves on a creature: miss result
+    // (0=HIT, 1=MISS, 2=RESIST, 6=EVADE, 7=IMMUNE...), the damage, whether the target/bot
+    // are already in combat, and how many things are attacking the bot (the "bear" the
+    // mage ignores). If a bolt reaches here it was NOT interrupted; if it never appears
+    // here but CASTERTRACE-CANCEL does, it was interrupted before landing.
+    if (m_casterUnit && m_casterUnit->GetTypeId() == TYPEID_PLAYER &&
+        static_cast<Player*>(m_casterUnit)->GetPlayerbotAI() && unit->GetTypeId() == TYPEID_UNIT)
+    {
+        bool dmgSpell = false;
+        for (int i = 0; i < MAX_EFFECT_INDEX; ++i)
+            if (m_spellInfo->Effect[i] == SPELL_EFFECT_SCHOOL_DAMAGE) { dmgSpell = true; break; }
+        if (dmgSpell)
+            sLog.outError("CASTERTRACE-HIT bot=%s cls=%u spell=%u(%s) tgt=%s(e%u) hp=%u miss=%u dmg=%d delayed=%u tgtCombat=%d botCombat=%d botAttackers=%u dist=%.1f",
+                m_casterUnit->GetName(), m_casterUnit->getClass(), m_spellInfo->Id, m_spellInfo->SpellName[0],
+                unit->GetName(), unit->GetEntry(), (uint32)unit->GetHealthPercent(),
+                (uint32)missInfo, (int)m_damage, (uint32)m_delayed,
+                unit->IsInCombat() ? 1 : 0, m_casterUnit->IsInCombat() ? 1 : 0,
+                (uint32)m_casterUnit->getAttackers().size(), m_casterUnit->GetDistance(unit));
+    }
+
     if (missInfo == SPELL_MISS_NONE)                        // In case spell hit target, do all effect on that target
         DoSpellHitOnUnit(unit, mask);
     if (missInfo == SPELL_MISS_REFLECT && target->reflectResult == SPELL_MISS_NONE)
@@ -4189,6 +4210,24 @@ void Spell::cancel()
     if (m_spellState == SPELL_STATE_FINISHED)
         return;
 
+    // CASTERTRACE-CANCEL: a bot caster's damaging spell is being killed before it can
+    // land. state=1 PREPARING (interrupted during the cast bar -> never launched),
+    // state=5 DELAYED (launched, killed in flight). timer = ms left on the bar. If a bolt
+    // shows CANCEL and never a HIT, the cast was interrupted -> that's why "it does nothing".
+    if (m_casterUnit && m_casterUnit->GetTypeId() == TYPEID_PLAYER &&
+        static_cast<Player*>(m_casterUnit)->GetPlayerbotAI())
+    {
+        Unit* ut = m_targets.getUnitTarget();
+        bool dmg = false;
+        for (int i = 0; i < MAX_EFFECT_INDEX; ++i)
+            if (m_spellInfo->Effect[i] == SPELL_EFFECT_SCHOOL_DAMAGE) { dmg = true; break; }
+        if (dmg && ut && ut->GetTypeId() == TYPEID_UNIT)
+            sLog.outError("CASTERTRACE-CANCEL bot=%s cls=%u spell=%u(%s) tgt=%s state=%u timer=%u botCombat=%d botAttackers=%u",
+                m_casterUnit->GetName(), m_casterUnit->getClass(), m_spellInfo->Id, m_spellInfo->SpellName[0],
+                ut->GetName(), (uint32)m_spellState, m_timer, m_casterUnit->IsInCombat() ? 1 : 0,
+                (uint32)m_casterUnit->getAttackers().size());
+    }
+
     if (m_bIsBeingCancelled)
     {
         return;
@@ -4855,7 +4894,35 @@ void Spell::update(uint32 difftime)
         }
         // don't cancel for melee, autorepeat, triggered and instant spells
         else if (!IsNextMeleeSwingSpell() && !IsAutoRepeat() && !m_IsTriggeredSpell && (m_spellInfo->InterruptFlags & SPELL_INTERRUPT_FLAG_MOVEMENT))
-            cancel();
+        {
+            // Playerbots are server-controlled and lack a real client's precise position
+            // control: they exhibit sub-yard positional jitter (float/gravity settling,
+            // residual velocity after StopMoving) that a human player never produces. That
+            // spurious drift was tripping this >0.5y movement-interrupt cancel mid-cast, so
+            // a bot's Frostbolt/Fireball never finished casting -> never launched -> never
+            // dealt damage. Against NEUTRAL mobs (which can ONLY enter combat from the bot's
+            // own damage) this was fatal: measured bots cast a projectile 40+ times in a row
+            // with ZERO deliveries, the mob stayed at full HP, the bot OOM'd and gave up.
+            // Melee (instant, no cast bar) was unaffected -> 99% combat-start success.
+            // Fix: for a bot caster, only honor the movement cancel when it is GENUINELY
+            // moving -- an active (non-idle) movement generator, or a large (>=2y) drift.
+            // Real players keep the original tight 0.5y behaviour.
+            bool skipBotJitter = false;
+            if (m_caster->GetTypeId() == TYPEID_PLAYER && static_cast<Player*>(m_caster)->GetPlayerbotAI())
+            {
+                float dx = fabs(m_castPositionX - nowPosX);
+                float dy = fabs(m_castPositionY - nowPosY);
+                float dz = fabs(m_castPositionZ - nowPosZ);
+                int genType = (m_casterUnit && m_casterUnit->GetMotionMaster()) ?
+                    (int)m_casterUnit->GetMotionMaster()->GetCurrentMovementGeneratorType() : -1;
+                bool genuinelyMoving =
+                    genType != -1 && genType != (int)IDLE_MOTION_TYPE && genType != (int)HOME_MOTION_TYPE;
+                if (!genuinelyMoving && dx < 2.0f && dy < 2.0f && dz < 2.0f)
+                    skipBotJitter = true;
+            }
+            if (!skipBotJitter)
+                cancel();
+        }
     }
 
     // summoning ritual

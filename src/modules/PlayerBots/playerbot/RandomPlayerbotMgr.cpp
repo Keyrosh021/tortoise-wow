@@ -1,4 +1,5 @@
 #include "Config/Config.h"
+#include <atomic>
 
 #include "playerbot/playerbot.h"
 #include "playerbot/PlayerbotAIConfig.h"
@@ -39,11 +40,24 @@
 #endif
 
 #include "playerbot/TravelMgr.h"
+#include "playerbot/strategy/values/PossibleAttackTargetsValue.h"
+#include "playerbot/strategy/values/SharedValueContext.h"
+#include "playerbot/strategy/values/TravelValues.h"
+#include "playerbot/GuidPosition.h"
+#include "Maps/MapManager.h"
+#include "Group/Group.h"
 #include <iomanip>
+#include <unordered_map>
+#include <algorithm>
 #include <float.h>
 #include <chrono>
 #include <sstream>
 #include <thread>
+#include <cstdio>
+#include <ctime>
+#include <map>
+#include <vector>
+#include <set>
 
 #if PLATFORM == PLATFORM_WINDOWS
 #include "windows.h"
@@ -504,7 +518,9 @@ void RandomPlayerbotMgr::LogPlayerLocation()
     if (sPlayerbotAIConfig.randomBotAutologin)
     {
         ForEachPlayerbot([&](Player* bot) {
-            if (bot->GetPlayerbotAI())
+            // Guard against bots that are mid-teardown / not in world: dereferencing their
+            // PlayerbotAI here raced/segv'd in AllowActivity (crash#3). IsInWorld gates that.
+            if (bot && bot->IsInWorld() && bot->GetPlayerbotAI())
             {
 
                 botCount++;
@@ -516,10 +532,10 @@ void RandomPlayerbotMgr::LogPlayerLocation()
         });
     }
 
-    for (auto i : GetPlayers())
+    for (auto i : GetPlayersCopy())
     {
         Player* bot = i.second;
-        if (!bot)
+        if (!bot || !bot->IsInWorld())
             continue;
         if (bot->GetPlayerbotAI())
         {
@@ -781,12 +797,754 @@ namespace
     }
 }
 
+void RandomPlayerbotMgr::LogNearbyCensus()
+{
+    // NOTE: RandomPlayerbotMgr::GetPlayers() holds the BOTS this manager owns, not
+    // real players. Enumerate the global in-world player map instead and split it
+    // into real observers (no PlayerbotAI) and bots (have a PlayerbotAI).
+    std::vector<Player*> observers, bots;
+    for (auto& it : sObjectAccessor.GetPlayers())
+    {
+        Player* p = it.second;
+        if (!p || !p->IsInWorld())
+            continue;
+        if (p->GetPlayerbotAI())
+            bots.push_back(p);
+        else
+            observers.push_back(p);
+    }
+    if (observers.empty() || bots.empty())
+        return;
+
+    static const char* CN[] = { "", "War", "Pal", "Hun", "Rog", "Pri", "", "Sha", "Mag", "Lock", "", "Dru" };
+    time_t now = time(nullptr);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
+
+    FILE* f = nullptr;    // aggregate census -> logs/nearby_census.csv
+    FILE* fb = nullptr;   // per-bot list     -> logs/nearby_bots.csv
+    for (Player* player : observers)
+    {
+        // VARIABLE range = the player's actual render/visibility distance (varies per
+        // map/area, dynamic visibilities), not a fixed 120y.
+        const float range = player->GetVisibilityDistance();
+
+        uint32 total = 0, dead = 0, fighting = 0, moving = 0, idle = 0, casting = 0, looting = 0;
+        // idle breakdown: WHY is an alive, out-of-combat, not-moving bot doing nothing?
+        uint32 idleRest = 0, idleLowHp = 0, idleLowMana = 0, idleStuck = 0;
+        uint32 sumLevel = 0;
+        std::map<uint8, uint32> classCount;
+
+        for (Player* bot : bots)
+        {
+            if (bot == player || bot->GetMapId() != player->GetMapId())
+                continue;
+            const float dist = player->GetDistance(bot);
+            if (dist > range)
+                continue;
+
+            ++total;
+            sumLevel += bot->GetLevel();
+            classCount[bot->getClass()]++;
+
+            // classify into a single activity label (also drives the per-bot list)
+            const char* act;
+            if (!bot->IsAlive())                { ++dead;    act = "dead"; }
+            else if (bot->IsInCombat())         { ++fighting;
+                                                  if (bot->IsNonMeleeSpellCasted(true)) { ++casting; act = "casting"; }
+                                                  else act = "fighting"; }
+            else if (bot->GetLootGuid())        { ++looting; act = "looting"; }
+            else if (bot->isMovingOrTurning())  { ++moving;  act = "moving"; }
+            else
+            {
+                ++idle;
+                uint32 maxMana = bot->GetMaxPower(POWER_MANA);
+                bool lowMana = maxMana > 0 && (bot->GetPower(POWER_MANA) * 100 < maxMana * 50);
+                if (bot->GetStandState() != UNIT_STAND_STATE_STAND) { ++idleRest;    act = "rest"; }
+                else if (bot->GetHealthPercent() < 60.0f)           { ++idleLowHp;   act = "lowHP"; }
+                else if (lowMana)                                   { ++idleLowMana; act = "lowMana"; }
+                else                                                { ++idleStuck;   act = "STUCK"; }
+            }
+
+            // per-bot list row: ts,observer,bot,level,class,activity,distance
+            if (!fb)
+            {
+                fb = fopen("logs/nearby_bots.csv", "a");
+                if (!fb) fb = fopen("../logs/nearby_bots.csv", "a");
+            }
+            if (fb)
+                fprintf(fb, "%s,%s,%s,%u,%s,%s,%.0f\n",
+                    ts, player->GetName(), bot->GetName(), bot->GetLevel(),
+                    (bot->getClass() < 12 ? CN[bot->getClass()] : "?"), act, dist);
+        }
+
+        if (!total)
+            continue;
+
+        if (!f)
+        {
+            f = fopen("logs/nearby_census.csv", "a");
+            if (!f) f = fopen("../logs/nearby_census.csv", "a");
+            if (!f) { if (fb) fclose(fb); return; }
+        }
+
+        std::ostringstream classes;
+        for (auto& c : classCount)
+            classes << (c.first < 12 ? CN[c.first] : "?") << ":" << c.second << " ";
+
+        fprintf(f, "%s,%s,map%u,%u,%u,%u,%u,%u,%u,%u,%.0f,%s,rest=%u,lowhp=%u,lowmana=%u,stuck=%u,range=%.0f\n",
+            ts, player->GetName(), player->GetMapId(),
+            total, fighting, moving, idle, dead, casting, looting,
+            (float)sumLevel / total, classes.str().c_str(),
+            idleRest, idleLowHp, idleLowMana, idleStuck, range);
+    }
+    if (f)
+        fclose(f);
+    if (fb)
+        fclose(fb);
+}
+
+// Fleet-wide per-bot diagnostics. Runs on the main thread (UpdateAIInternal) every ~60s.
+// Writes a per-bot detail row to logs/bot_diag.csv and one aggregate row to
+// logs/bot_fleet.csv. READ-ONLY and race-tolerant: only reads atomic-ish unit fields
+// (level/class/health/power/flags/standstate/movement) and the long-lived TravelTarget
+// status/destination pointers (never the std::string lastAction, which would race with
+// the bot's own map-thread update). Built to answer "why are bots stuck and dying?".
+// Needed kill-quest creature entries for a bot (incomplete kill objectives only — cheap
+// quest-log read; skips item objectives). Used by the diagnostic's "is this bot fighting
+// its quest target?" success metric.
+static void CollectNeededKillEntries(Player* bot, std::set<uint32>& out)
+{
+    if (!bot)
+        return;
+    for (auto const& kv : bot->getQuestStatusMap())
+    {
+        if (kv.second.m_status != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* quest = sObjectMgr.GetQuestTemplate(kv.first);
+        if (!quest)
+            continue;
+        for (uint32 o = 0; o < QUEST_OBJECTIVES_COUNT; ++o)
+            if (quest->ReqCreatureOrGOCount[o] &&
+                kv.second.m_creatureOrGOcount[o] < quest->ReqCreatureOrGOCount[o] &&
+                quest->ReqCreatureOrGOId[o] > 0)
+                out.insert(uint32(quest->ReqCreatureOrGOId[o]));
+    }
+}
+
+void RandomPlayerbotMgr::LogBotDiagSample()
+{
+    std::vector<Player*> bots;
+    for (auto& it : sObjectAccessor.GetPlayers())
+    {
+        Player* p = it.second;
+        if (p && p->IsInWorld() && p->GetPlayerbotAI())
+            bots.push_back(p);
+    }
+    if (bots.empty())
+        return;
+
+    FILE* fd = fopen("logs/bot_diag.csv", "a");
+    if (!fd) fd = fopen("../logs/bot_diag.csv", "a");
+    if (!fd) return;
+
+    time_t now = time(nullptr);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
+
+    // aggregate buckets
+    uint32 nDead=0, nCombat=0, nMoving=0, nRest=0;
+    uint32 nNoGoal=0, nTravelStuck=0, nWork=0, nCooldown=0, nExpired=0, nPrepareReady=0, nOtherIdle=0;
+    uint32 nLowHp=0; uint64 sumLevel=0;
+    // OUTCOME scorecard (ROSTER-IMMUNE): fleet-average level was confounded by RandomPlayerbotMgr
+    // rotating bots in/out. Instead sum each PRESENT bot's POSITIVE gain in (level + fraction into
+    // level) and money since the previous diag, via a persistent per-GUID map -> true questing/xp/
+    // gold throughput that bot turnover can't fake. These + credits_min become the learning reward.
+    static std::unordered_map<uint32,double> s_lastProg;
+    static std::unordered_map<uint32,uint64> s_lastMoney;
+    double gainedProgress = 0.0, gainedMoney = 0.0;
+    // HESITATION snapshot: melee bot in combat with an intended current target IN MELEE RANGE
+    // but NOT actually swinging it = "stands there with a target, not attacking" (the user's #1
+    // visible complaint). nCombatMelee = denominator (such bots in melee range of their target).
+    uint32 nHesitate=0, nCombatMelee=0;
+    // success metric: of bots that have a kill-quest, how many are actually fighting that
+    // quest's target creature (vs idling / fighting something else)?
+    uint32 nHasKillQuest=0, nFightQuestTarget=0;
+    // PROOF of target availability: for a sample of NON-combat kill-quest bots, is a LIVE
+    // instance of their target creature actually near them (that they fail to engage)?
+    uint32 targetSearchSamples=0, nIdleKQ=0, nTgtNone=0, nTgtLe60=0, nTgtLe200=0, nTgtLe500=0;
+    FILE* fts = fopen("logs/target_search.csv", "a");
+    if (!fts) fts = fopen("../logs/target_search.csv", "a");
+    // UNDILUTED engagement: of bots whose quest mob is actually ALIVE within 80yd (i.e. they are
+    // at their quest spot), how many are engaged with it? + group cohesion: are grouped members
+    // staying near their leader (follow working) or scattered?
+    uint32 nNearMob=0, nEngagedNearMob=0;
+    uint32 nGrpMember=0, nGrpFollowing=0; uint64 sumLeaderDist=0;
+    uint32 nGrpLeaders=0, nFullGroups=0; uint64 sumGroupSize=0;
+    uint32 nQuestBots=0; uint64 sumLogQuests=0, sumIncompleteQuests=0;   // quest-starvation tracking
+    uint32 nTargetIdle=0;   // bots with a creature TARGETED but NOT attacking it = reaction-lag state
+
+    for (Player* bot : bots)
+    {
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        uint8 cls = bot->getClass();
+        uint32 lvl = bot->GetLevel();
+        sumLevel += lvl;
+        {
+            const uint32 xp = bot->GetUInt32Value(PLAYER_XP);
+            const uint32 nextXp = bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP);
+            const double prog = (double)lvl + (nextXp ? (double)xp / (double)nextXp : 0.0);
+            const uint64 money = bot->GetMoney();
+            const uint32 g = bot->GetGUIDLow();
+            auto itp = s_lastProg.find(g);
+            if (itp != s_lastProg.end())
+            {
+                const double d = prog - itp->second;
+                if (d > 0.0 && d < 5.0) gainedProgress += d;   // <5 guards level-reset/relog artifacts
+            }
+            s_lastProg[g] = prog;
+            auto itm = s_lastMoney.find(g);
+            if (itm != s_lastMoney.end())
+            {
+                const int64 d = (int64)money - (int64)itm->second;
+                if (d > 0) gainedMoney += (double)d;
+            }
+            s_lastMoney[g] = money;
+        }
+        bool alive  = bot->IsAlive();
+        bool combat = bot->IsInCombat();
+        bool moving = bot->isMovingOrTurning();
+        bool sit    = bot->GetStandState() != UNIT_STAND_STATE_STAND;
+        float hpPct = bot->GetHealthPercent();
+        uint32 maxMana = bot->GetMaxPower(POWER_MANA);
+        float manaPct = maxMana ? (bot->GetPower(POWER_MANA) * 100.0f / maxMana) : -1.0f;
+
+        // travel target (long-lived ManualSetValue pointer; status/dest are race-tolerant)
+        TravelTarget* tt = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+        bool hasDest = tt && tt->GetDestination();
+        uint8 status = tt ? (uint8)tt->GetStatus() : 0;
+        uint32 moveRetry = tt ? tt->GetRetryCount(true) : 0;
+        uint32 extRetry  = tt ? tt->GetRetryCount(false) : 0;
+        float tdist = (tt && hasDest && tt->GetPosition()) ? tt->Distance(bot) : -1.0f;
+
+        // HESITATION: a melee bot in combat whose intended "current target" is in melee range
+        // but it isn't actually swinging that target. Runs on the main thread after map updates
+        // (no concurrent bot update), same as the GetVictim()/travel reads below.
+        if (combat && alive && ai && !ai->IsRanged(bot))
+        {
+            Unit* curTgt = ai->GetAiObjectContext()->GetValue<Unit*>("current target")->Get();
+            if (curTgt && bot->CanReachWithMeleeAttack(curTgt))
+            {
+                ++nCombatMelee;
+                const bool swinging = (bot->GetVictim() == curTgt) && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+                if (!swinging)
+                    ++nHesitate;
+            }
+        }
+
+        // classification (for the aggregate)
+        const char* cat;
+        if (!alive)            { ++nDead;   cat = "dead"; }
+        else if (combat)       { ++nCombat; cat = "combat"; }
+        else if (moving)       { ++nMoving; cat = "moving"; }
+        else if (sit)          { ++nRest;   cat = "rest"; }
+        else
+        {
+            // alive, out of combat, standing still — WHY? use travel status
+            switch ((TravelStatus)status)
+            {
+                case TravelStatus::TRAVEL_STATUS_TRAVEL:   ++nTravelStuck;  cat = "travel_notmoving"; break;
+                case TravelStatus::TRAVEL_STATUS_WORK:     ++nWork;         cat = "work"; break;
+                case TravelStatus::TRAVEL_STATUS_COOLDOWN: ++nCooldown;     cat = "cooldown"; break;
+                case TravelStatus::TRAVEL_STATUS_EXPIRED:  ++nExpired;      cat = "expired"; break;
+                case TravelStatus::TRAVEL_STATUS_PREPARE:
+                case TravelStatus::TRAVEL_STATUS_READY:    ++nPrepareReady; cat = "prepare"; break;
+                default:
+                    if (!hasDest) { ++nNoGoal;    cat = "no_goal"; }
+                    else          { ++nOtherIdle; cat = "idle_other"; }
+                    break;
+            }
+        }
+        if (alive && hpPct < 35.0f) ++nLowHp;
+
+        // success metric + PROOF of target availability.
+        if (alive)
+        {
+            // reaction-lag: bot has a CREATURE targeted but isn't in combat with it -> it decided
+            // to fight but hasn't executed yet (the decision->action gap).
+            if (bot->GetSelectionGuid().IsCreature() && !combat)
+                ++nTargetIdle;
+
+            // quest-starvation tracking: how many quests does the bot ACTUALLY hold in its live log?
+            {
+                ++nQuestBots;
+                for (uint8 qslot = 0; qslot < MAX_QUEST_LOG_SIZE; ++qslot)
+                {
+                    uint32 lq = bot->GetQuestSlotQuestId(qslot);
+                    if (!lq) continue;
+                    ++sumLogQuests;
+                    if (bot->GetQuestStatus(lq) == QUEST_STATUS_INCOMPLETE)
+                        ++sumIncompleteQuests;
+                }
+            }
+
+            std::set<uint32> needed;
+            CollectNeededKillEntries(bot, needed);
+            if (!needed.empty())
+            {
+                ++nHasKillQuest;
+                // UNDILUTED engagement: is the bot actually AT its quest mob (one alive within
+                // 80yd)? and if so, is it engaged with it (in combat, within ~15yd)?
+                {
+                    float nd = 1e9f;
+                    for (uint32 e : needed)
+                    {
+                        std::list<Creature*> fnd;
+                        bot->GetCreatureListWithEntryInGrid(fnd, e, 80.0f);
+                        for (Creature* c : fnd)
+                            if (c && c->IsAlive())
+                            {
+                                float d = bot->GetDistance(c);
+                                if (d < nd) nd = d;
+                            }
+                    }
+                    if (nd < 1e8f)
+                    {
+                        ++nNearMob;
+                        if (combat && nd <= 15.0f) ++nEngagedNearMob;
+                    }
+                }
+                if (combat)
+                {
+                    if (Unit* victim = bot->GetVictim())
+                        if (needed.count(victim->GetEntry()))
+                            ++nFightQuestTarget;
+                }
+                else if (targetSearchSamples < 120)
+                {
+                    // PROVE it: is a LIVE instance of this bot's target creature actually within
+                    // grid range (that it's failing to engage)? Searches loaded grids around the
+                    // bot for each needed entry and records the nearest ALIVE one.
+                    ++targetSearchSamples;
+                    ++nIdleKQ;
+                    float nearest = -1.0f;      // nearest ALIVE target (any, incl tapped)
+                    float nearestEng = -1.0f;   // nearest ENGAGEABLE (bot's own IsPossibleTarget: free/valid)
+                    for (uint32 e : needed)
+                    {
+                        std::list<Creature*> found;
+                        bot->GetCreatureListWithEntryInGrid(found, e, 500.0f);
+                        for (Creature* c : found)
+                            if (c && c->IsAlive())
+                            {
+                                float dd = bot->GetDistance(c);
+                                if (nearest < 0.0f || dd < nearest) nearest = dd;
+                                if (ai::PossibleAttackTargetsValue::IsPossibleTarget(c, bot, 500.0f, false))
+                                    if (nearestEng < 0.0f || dd < nearestEng) nearestEng = dd;
+                            }
+                    }
+                    // bucket on the ENGAGEABLE distance: a free, valid target the bot SHOULD fight
+                    if (nearestEng < 0.0f)         ++nTgtNone;   // no engageable target (alive ones are tapped/unreachable)
+                    else if (nearestEng <= 60.0f)  ++nTgtLe60;   // free target <60yd but bot idle = BUG
+                    else if (nearestEng <= 200.0f) ++nTgtLe200;
+                    else                           ++nTgtLe500;
+                    if (fts)
+                        fprintf(fts, "%s,%s,%u,%u,%s,zone%u,nearest_alive=%.0f,nearest_engageable=%.0f\n",
+                            ts, bot->GetName(), lvl, cls, cat, bot->GetZoneId(), nearest, nearestEng);
+                }
+            }
+
+            // group cohesion: are grouped NON-leader bots staying near their leader (follow
+            // working) or scattered? Measures whether the cohesion fix actually keeps them together.
+            if (Group* g = bot->GetGroup())
+            {
+                ObjectGuid leaderGuid = g->GetLeaderGuid();
+                if (leaderGuid != bot->GetObjectGuid())
+                {
+                    ++nGrpMember;
+                    if (Player* leader = sObjectMgr.GetPlayer(leaderGuid))
+                        if (leader->IsInWorld() && leader->GetMapId() == bot->GetMapId())
+                        {
+                            float ld = bot->GetDistance(leader);
+                            sumLeaderDist += (uint64)ld;
+                            if (ld <= 40.0f) ++nGrpFollowing;
+                        }
+                }
+                else
+                {
+                    // bot IS the leader -> measure group sizes (are camp groups reaching 5?)
+                    ++nGrpLeaders;
+                    uint32 sz = g->GetMembersCount();
+                    sumGroupSize += sz;
+                    if (sz >= 5) ++nFullGroups;
+                }
+            }
+        }
+
+        // per-bot detail row
+        fprintf(fd, "%s,%s,%u,%u,%u,%u,%u,%d,%d,%d,%d,%.0f,%.0f,%s,%u,%u,%u,%.0f\n",
+            ts, bot->GetName(), bot->GetGUIDLow(), lvl, cls, bot->GetMapId(), bot->GetZoneId(),
+            alive?1:0, combat?1:0, moving?1:0, sit?1:0, hpPct, manaPct,
+            cat, status, moveRetry, extRetry, tdist);
+    }
+    fclose(fd);
+    if (fts) fclose(fts);
+
+    // aggregate row
+    FILE* fa = fopen("logs/bot_fleet.csv", "a");
+    if (!fa) fa = fopen("../logs/bot_fleet.csv", "a");
+    if (fa)
+    {
+        uint32 n = (uint32)bots.size();
+        fprintf(fa, "%s,%u,%.1f,combat=%u,moving=%u,rest=%u,travel_notmoving=%u,work=%u,cooldown=%u,expired=%u,prepare=%u,no_goal=%u,idle_other=%u,dead=%u,lowhp=%u,has_killquest=%u,fight_questtarget=%u,idle_kq_sampled=%u,tgt_none=%u,tgt_le60=%u,tgt_le200=%u,tgt_le500=%u\n",
+            ts, n, n ? (double)sumLevel / n : 0.0,
+            nCombat, nMoving, nRest, nTravelStuck, nWork, nCooldown, nExpired, nPrepareReady, nNoGoal, nOtherIdle, nDead, nLowHp,
+            nHasKillQuest, nFightQuestTarget,
+            nIdleKQ, nTgtNone, nTgtLe60, nTgtLe200, nTgtLe500);
+        // undiluted engagement + cohesion (separate line, prefixed COH, same timestamp)
+        // credits/shared = real bot kill-quest objective increments since last sample;
+        // shared = subset received purely via group-sharing (member, not the killer) -> the grouping payoff.
+        extern std::atomic<uint64_t> g_botKillCredits;
+        extern std::atomic<uint64_t> g_botSharedCredits;
+        static uint64_t lastCredits = 0, lastShared = 0;
+        static uint32 lastCreditMs = 0;
+        uint64_t curCredits = g_botKillCredits.load(std::memory_order_relaxed);
+        uint64_t curShared  = g_botSharedCredits.load(std::memory_order_relaxed);
+        uint32 nowMs = WorldTimer::getMSTime();
+        uint32 dtMs = lastCreditMs ? (nowMs - lastCreditMs) : 0;
+        uint64_t dCredits = curCredits - lastCredits;
+        uint64_t dShared  = curShared  - lastShared;
+        double perMin = dtMs ? 60000.0 / (double)dtMs : 0.0;
+        lastCredits = curCredits; lastShared = curShared; lastCreditMs = nowMs;
+        fprintf(fa, "%s,COH,near_mob=%u,engaged_near_mob=%u,grp_members=%u,grp_following40y=%u,avg_leader_dist=%.0f,"
+                    "credits=%llu,shared=%llu,credits_min=%.0f,shared_min=%.0f,shared_pct=%.0f,"
+                    "groups=%u,avg_grp_size=%.1f,full5_groups=%u,avg_log_quests=%.1f,avg_incomplete=%.1f,"
+                    "target_idle=%u\n",
+            ts, nNearMob, nEngagedNearMob, nGrpMember, nGrpFollowing,
+            nGrpMember ? (double)sumLeaderDist / nGrpMember : 0.0,
+            (unsigned long long)dCredits, (unsigned long long)dShared,
+            (double)dCredits * perMin, (double)dShared * perMin,
+            dCredits ? (100.0 * (double)dShared / (double)dCredits) : 0.0,
+            nGrpLeaders, nGrpLeaders ? (double)sumGroupSize / nGrpLeaders : 0.0, nFullGroups,
+            nQuestBots ? (double)sumLogQuests / nQuestBots : 0.0,
+            nQuestBots ? (double)sumIncompleteQuests / nQuestBots : 0.0,
+            nTargetIdle);
+
+        // THRASH line (same timestamp): self-interruption + heal-recast RATES. This is the
+        // baseline-before-fix instrument for the decision-thrash work -- interrupt_pct =
+        // % of casts that abandoned an in-progress cast; recast_pct = % of heals re-cast within
+        // 4s. Watch these fall when the commitment arbiter ships. Per-min from deltas like credits.
+        extern std::atomic<uint64_t> g_botCasts;
+        extern std::atomic<uint64_t> g_botCastInterrupts;
+        extern std::atomic<uint64_t> g_botHealCasts;
+        extern std::atomic<uint64_t> g_botHealRecasts;
+        extern std::atomic<uint64_t> g_botHealRecastTight;
+        extern std::atomic<uint64_t> g_botSelectNewTarget;
+        extern std::atomic<uint64_t> g_botSelectNewTargetAlive;
+        static uint64_t lastCasts = 0, lastInt = 0, lastHeal = 0, lastRecast = 0, lastTight = 0, lastSnt = 0, lastSntA = 0;
+        static uint32 lastThrashMs = 0;
+        uint64_t cCasts = g_botCasts.load(std::memory_order_relaxed);
+        uint64_t cInt   = g_botCastInterrupts.load(std::memory_order_relaxed);
+        uint64_t cHeal  = g_botHealCasts.load(std::memory_order_relaxed);
+        uint64_t cRecast= g_botHealRecasts.load(std::memory_order_relaxed);
+        uint64_t cTight = g_botHealRecastTight.load(std::memory_order_relaxed);
+        uint64_t cSnt   = g_botSelectNewTarget.load(std::memory_order_relaxed);
+        uint64_t cSntA  = g_botSelectNewTargetAlive.load(std::memory_order_relaxed);
+        uint32 tNowMs = WorldTimer::getMSTime();
+        uint32 tDt = lastThrashMs ? (tNowMs - lastThrashMs) : 0;
+        uint64_t dCasts = cCasts - lastCasts, dInt = cInt - lastInt, dHeal = cHeal - lastHeal, dRecast = cRecast - lastRecast, dTight = cTight - lastTight;
+        uint64_t dSnt = cSnt - lastSnt, dSntA = cSntA - lastSntA;
+        double tPerMin = tDt ? 60000.0 / (double)tDt : 0.0;
+        lastCasts = cCasts; lastInt = cInt; lastHeal = cHeal; lastRecast = cRecast; lastTight = cTight; lastSnt = cSnt; lastSntA = cSntA; lastThrashMs = tNowMs;
+        fprintf(fa, "%s,THRASH,casts_min=%.0f,interrupts_min=%.0f,interrupt_pct=%.1f,heals_min=%.0f,recasts_min=%.0f,recast_pct=%.1f,tight_pct=%.1f,selectnew_min=%.0f,selectnew_alive_pct=%.1f,hesitate_pct=%.1f,hesitate_n=%u\n",
+            ts,
+            (double)dCasts * tPerMin, (double)dInt * tPerMin,
+            dCasts ? (100.0 * (double)dInt / (double)dCasts) : 0.0,
+            (double)dHeal * tPerMin, (double)dRecast * tPerMin,
+            dHeal ? (100.0 * (double)dRecast / (double)dHeal) : 0.0,
+            dHeal ? (100.0 * (double)dTight / (double)dHeal) : 0.0,
+            (double)dSnt * tPerMin,
+            dSnt ? (100.0 * (double)dSntA / (double)dSnt) : 0.0,
+            nCombatMelee ? (100.0 * (double)nHesitate / (double)nCombatMelee) : 0.0,
+            nCombatMelee);
+
+        // OUTCOME line (same timestamp): the user's real KPIs as fleet RATES, robust over long
+        // windows. levels_min = sum-of-(level+xp%) gained per minute across the fleet; xp_min_per_bot
+        // = levels/min/bot (throughput); gold_min = copper gained per minute; dead = bots currently
+        // dead (death pressure). This is the scorecard we drive UP every run and the learning reward.
+        {
+            static uint32 lastOutMs = 0;
+            uint32 oNowMs = WorldTimer::getMSTime();
+            uint32 oDt = lastOutMs ? (oNowMs - lastOutMs) : 0;
+            double oPerMin = oDt ? 60000.0 / (double)oDt : 0.0;
+            uint32 n2 = (uint32)bots.size();
+            const bool warm = lastOutMs != 0;   // first diag only seeds the per-GUID map
+            lastOutMs = oNowMs;
+            fprintf(fa, "%s,OUTCOME,bots=%u,levels_min=%.3f,levels_min_per_bot=%.4f,gold_min=%.1f,gold_min_per_bot=%.2f,dead=%u,avg_level=%.2f\n",
+                ts, n2,
+                warm ? gainedProgress * oPerMin : 0.0, (warm && n2) ? gainedProgress * oPerMin / n2 : 0.0,
+                warm ? gainedMoney * oPerMin / 10000.0 : 0.0, (warm && n2) ? gainedMoney * oPerMin / 10000.0 / n2 : 0.0,
+                nDead, n2 ? (double)sumLevel / n2 : 0.0);
+        }
+        fclose(fa);
+    }
+}
+
+// The quest kill entry this bot is CAMPING (a needed kill mob with an alive instance within
+// sight). 0 if not parked at a quest mob. Used by FormQuestCampGroups to cluster co-located
+// bots who need the SAME mob. Bounded + short-circuits to keep the grid cost small.
+static uint32 BotCampKillEntry(Player* bot)
+{
+    if (!bot)
+        return 0;
+
+    std::set<uint32> needed;
+    CollectNeededKillEntries(bot, needed);
+    if (needed.empty())
+        return 0;
+
+    uint32 checked = 0;
+    for (uint32 e : needed)
+    {
+        if (++checked > 8)
+            break;
+
+        std::list<Creature*> insts;
+        bot->GetCreatureListWithEntryInGrid(insts, e, sPlayerbotAIConfig.sightDistance);
+        for (Creature* c : insts)
+            if (c && c->IsAlive())
+                return e;
+    }
+    return 0;
+}
+
+// CAMP-GROUPING MANAGER (~every 12s, main thread alongside the other diagnostics). Real fix for
+// "waiting bots aren't grouped": a central pass that finds ungrouped (or under-full-leader) random
+// bots parked at the SAME quest kill mob and within 75yd of each other, and force-forms them into
+// groups of up to 5 (GROUP_LOOT). Because they're already co-located inside the 74yd shared-credit
+// radius, the group pays off immediately (one member's kill credits all 5) and each bot's own
+// group-camp logic keeps them together -- no cross-thread AI mutation needed. This drives
+// avg_grp_size toward 5 far faster/harder than the distributed per-bot invite dance.
+// File-local (not a member) so it needs no header change / wide recompile.
+static void FormQuestCampGroups()
+{
+    // Cluster inside the 74yd group-credit radius so grouped members get the leader's kill credit
+    // immediately (no convergence window). Wider clustering (110yd) was tried and did NOT raise
+    // avg group size -- same-mob bots sit ~2-3 per camp area, so 5 are rarely within reach either
+    // way -- while making bots wait to group dropped total throughput. 75yd is the safe sweet spot.
+    const float CLUSTER = 75.0f;
+
+    // 1) gather camping, groupable random bots keyed by the quest mob they're parked at
+    std::unordered_map<uint32, std::vector<Player*>> campers;
+    for (auto& it : sObjectAccessor.GetPlayers())
+    {
+        Player* bot = it.second;
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsBeingTeleported())
+            continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster() || !sRandomPlayerbotMgr.IsRandomBot(bot))
+            continue;
+        if (bot->InBattleGround() || bot->InBattleGroundQueue())
+            continue;
+
+        if (Group* g = bot->GetGroup())
+        {
+            if (g->IsRaidGroup() || g->GetMembersCount() >= 5)
+                continue;                                   // full / raid -> not a recruiter
+            if (!g->IsLeader(bot->GetObjectGuid()))
+                continue;                                   // only leaders top up their group
+        }
+
+        uint32 entry = BotCampKillEntry(bot);
+        if (!entry)
+            continue;
+
+        campers[entry].push_back(bot);
+    }
+
+    // 2) per quest mob, greedily build groups of up to 5 from co-located campers
+    uint32 groupsFormed = 0, botsGrouped = 0;
+    for (auto& kv : campers)
+    {
+        std::vector<Player*>& list = kv.second;
+        if (list.size() < 2)
+            continue;
+
+        std::vector<bool> used(list.size(), false);
+        for (size_t i = 0; i < list.size(); ++i)
+        {
+            if (used[i])
+                continue;
+
+            Player* seed = list[i];
+            Group* group = seed->GetGroup();               // null, or an under-full group seed leads
+            uint32 size = group ? group->GetMembersCount() : 1;
+            used[i] = true;
+            if (size >= 5)
+                continue;
+
+            bool createdHere = false;
+            for (size_t j = 0; j < list.size() && size < 5; ++j)
+            {
+                if (used[j])
+                    continue;
+
+                Player* cand = list[j];
+                if (cand->GetGroup())
+                    continue;                               // only pull ungrouped bots in
+                if (cand->GetMapId() != seed->GetMapId())
+                    continue;
+                if (seed->GetDistance(cand) > CLUSTER)
+                    continue;
+                if (abs(int32(cand->GetLevel()) - int32(seed->GetLevel())) > 4)
+                    continue;                               // keep them within the leave/level gate
+
+                if (!group)
+                {
+                    group = new Group();
+                    if (!group->Create(seed->GetObjectGuid(), seed->GetName()))
+                    {
+                        delete group;
+                        group = nullptr;
+                        break;
+                    }
+                    sObjectMgr.AddGroup(group);
+                    group->SetLootMethod(GROUP_LOOT);
+                    createdHere = true;
+                }
+
+                if (group->AddMember(cand->GetObjectGuid(), cand->GetName()))
+                {
+                    used[j] = true;
+                    ++size;
+                    ++botsGrouped;
+                }
+            }
+
+            if (group)
+            {
+                group->BroadcastGroupUpdate();
+                if (createdHere)
+                    ++groupsFormed;
+            }
+        }
+    }
+
+    // Write directly (like the COH line) -- bot_fleet.csv isn't in the hasLog allowlist.
+    if (groupsFormed || botsGrouped)
+    {
+        FILE* fa = fopen("logs/bot_fleet.csv", "a");
+        if (!fa) fa = fopen("../logs/bot_fleet.csv", "a");
+        if (fa)
+        {
+            time_t t = time(nullptr); struct tm* lt = localtime(&t);
+            char ts[16]; strftime(ts, sizeof(ts), "%H:%M:%S", lt);
+            fprintf(fa, "%s,CAMPGROUP,new_groups=%u,bots_grouped=%u,camp_mobs=%u\n",
+                ts, groupsFormed, botsGrouped, (uint32)campers.size());
+            fclose(fa);
+        }
+    }
+}
+
+// PROOF report (every ~5min): which quest mobs are idle kill-quest bots starving on the most,
+// and for each: total spawn locations vs how many are ALIVE right now MAP-WIDE, plus how
+// clustered the demanding bots are. Answers "is there a live target anywhere, and are bots
+// spread across the spawns?". Writes logs/stuck_mobs.csv. The EntryGuidps copy is heavy, so this
+// runs infrequently.
+void RandomPlayerbotMgr::LogStuckMobReport()
+{
+    // 1. demand: which quest creatures do idle (alive, non-combat) kill-quest bots need?
+    std::unordered_map<uint32, uint32> demand;
+    std::unordered_map<uint32, std::vector<std::pair<float, float>>> botPos;
+    std::unordered_map<uint32, std::vector<Player*>> botSample;   // a few demanding bots per entry (for grid search)
+    for (auto& it : sObjectAccessor.GetPlayers())
+    {
+        Player* b = it.second;
+        if (!b || !b->IsInWorld() || !b->GetPlayerbotAI() || !b->IsAlive() || b->IsInCombat())
+            continue;
+        std::set<uint32> needed;
+        CollectNeededKillEntries(b, needed);
+        for (uint32 e : needed)
+        {
+            ++demand[e];
+            auto& v = botPos[e];
+            if (v.size() < 4000) v.emplace_back(b->GetPositionX(), b->GetPositionY());
+            auto& s = botSample[e];
+            if (s.size() < 25) s.push_back(b);   // grid-search from these to find ALIVE instances near the starving bots
+        }
+    }
+    if (demand.empty())
+        return;
+
+    std::vector<std::pair<uint32, uint32>> ranked(demand.begin(), demand.end());
+    std::sort(ranked.begin(), ranked.end(), [](auto const& a, auto const& b) { return a.second > b.second; });
+
+    // 2. global entry->spawns map (one heavy copy; cached value)
+    EntryGuidps guidps = GAI_VALUE(EntryGuidps, "entry guidps");
+
+    FILE* f = fopen("logs/stuck_mobs.csv", "a");
+    if (!f) f = fopen("../logs/stuck_mobs.csv", "a");
+    if (!f) return;
+    time_t now = time(nullptr);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
+
+    int reported = 0;
+    for (auto const& pr : ranked)
+    {
+        if (reported++ >= 20) break;
+        const uint32 entry = pr.first;
+        const uint32 dem = pr.second;
+        CreatureInfo const* ci = sObjectMgr.GetCreatureTemplate(entry);
+        std::string name = ci ? ci->name : "?";
+        for (char& c : name) if (c == ',') c = ' ';
+
+        uint32 totalSpawns = 0, aliveGuidLookup = 0;
+        auto git = guidps.find(entry);
+        if (git != guidps.end())
+            for (AsyncGuidPosition& gp : git->second)
+            {
+                ++totalSpawns;
+                Map* m = sMapMgr.FindMap(gp.getMapId(), 0);
+                if (m)
+                {
+                    Creature* c = m->GetCreature(gp);
+                    if (c && c->IsAlive())
+                        ++aliveGuidLookup;
+                }
+            }
+
+        // ALIVE near the starving bots, via the PROVEN grid method: search 500yd around a sample
+        // of demanding bots and union the live instances found. This is the trustworthy count.
+        std::set<uint32> aliveGuids;
+        for (Player* sb : botSample[entry])
+        {
+            if (!sb || !sb->IsInWorld()) continue;
+            std::list<Creature*> found;
+            sb->GetCreatureListWithEntryInGrid(found, entry, 500.0f);
+            for (Creature* c : found)
+                if (c && c->IsAlive())
+                    aliveGuids.insert(c->GetGUIDLow());
+        }
+
+        // how clustered are the demanding bots? count distinct ~100yd cells they occupy.
+        std::set<uint64> cells;
+        for (auto const& p : botPos[entry])
+            cells.insert(((uint64)(uint32)(int32)(p.first / 100.0f) << 32) ^ (uint32)(int32)(p.second / 100.0f));
+
+        fprintf(f, "%s,%u,%s,demand_bots=%u,total_spawns=%u,alive_near_bots=%u,alive_guidlookup=%u,bot_clusters=%u\n",
+            ts, entry, name.c_str(), dem, totalSpawns, (uint32)aliveGuids.size(), aliveGuidLookup, (uint32)cells.size());
+    }
+    fclose(f);
+}
+
 void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
 #ifdef MEMORY_MONITOR
     sMemoryMonitor.Print();
     sMemoryMonitor.LogCount(sConfig.GetStringDefault("LogsDir") + "/" + "memory.csv");
 #endif
+
+    DrainQueuedBotLogouts(); // map-worker logout requests run here, on the world thread
 
     const uint32 totalUpdateStart = WorldTimer::getMSTime();
     uint32 updateSessionsTime = 0;
@@ -810,6 +1568,32 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     uint32 updateBotsProcessed = 0;
     uint32 loginQueueInspected = 0;
     uint32 loginAttemptsStarted = 0;
+
+    // Live "what are the bots near me doing" census (~every 3s) -> logs/nearby_census.csv.
+    {
+        const uint32 nowMs = WorldTimer::getMSTime();
+        if (!m_nextCensusMs || nowMs >= m_nextCensusMs)
+        {
+            m_nextCensusMs = nowMs + 3000;
+            LogNearbyCensus();
+        }
+        if (!m_nextDiagMs || nowMs >= m_nextDiagMs)
+        {
+            m_nextDiagMs = nowMs + 60000;   // fleet-wide diagnostics every 60s
+            LogBotDiagSample();
+        }
+        if (!m_nextStuckMs || nowMs >= m_nextStuckMs)
+        {
+            m_nextStuckMs = nowMs + 300000;   // stuck-mob proof report every 5min (heavy)
+            LogStuckMobReport();
+        }
+        static uint32 s_nextCampGroupMs = 0;   // static-local: no header change needed
+        if (!s_nextCampGroupMs || nowMs >= s_nextCampGroupMs)
+        {
+            s_nextCampGroupMs = nowMs + 12000;   // proactively group co-located same-quest bots
+            FormQuestCampGroups();
+        }
+    }
 
     // tick random bots' sessions so
     // teleport ACKs (HandleTeleportAck) and queued packets get processed.
@@ -2199,9 +2983,15 @@ void RandomPlayerbotMgr::AddOfflineGroupBots()
     OfflineGroupBotsTimer = now;
 
     uint32 totalCounter = 0;
-    for (const auto& i : players)
+    // Iterate a snapshot and re-look-up each player LIVE by guid. The `players` map can retain a
+    // STALE Player* (freed without being erased) -> dereferencing the stored pointer here
+    // (IsInWorld/GetGroup/GetObjectGuid -> Object::GetUInt64Value on freed memory) crashed with
+    // SIGSEGV and SIGABRT. GetPlayer() returns null for an offline/gone guid, so we never touch
+    // freed memory. The snapshot also keeps iteration valid while the loop body calls
+    // AddRandomBot/AddPlayerBot/MovePlayerBot, which can mutate `players`.
+    for (const auto& entry : GetPlayersCopy())
     {
-        Player* player = i.second;
+        Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, entry.first));
 
         if (!player || !player->IsInWorld() || !player->GetGroup())
             continue;
@@ -2450,7 +3240,10 @@ void RandomPlayerbotMgr::MovePlayerBot(uint32 guid, PlayerbotHolder* newHolder)
     if (!sPlayerbotAIConfig.enabled)
         return;
 
-    players[guid] = this->GetPlayerBot(guid);
+    {
+        std::lock_guard<std::mutex> lock(playersMutex);
+        players[guid] = this->GetPlayerBot(guid);
+    }
     PlayerbotHolder::MovePlayerBot(guid, newHolder);
 }
 
@@ -2532,6 +3325,32 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
 
     if(GetEventValue(bot, "login"))
         SetEventValue(bot, "login", 0, 0); //Bot is no longer loggin in.
+
+    // SPELL-KIT CATCH-UP: a large slice of the fleet was online with ZERO (or a handful of)
+    // class spells -- they only white-attacked, never used abilities. Root cause: the class
+    // kit is only learned inside the heavy factory Randomize (first login / long-interval
+    // schedule), so any bot whose Randomize never ran (or ran before it had a kit) stayed
+    // spell-less for hours. LearnClassTrainerSpells is idempotent (only learns GREEN ranks)
+    // and now cache-backed (cheap), so run it ONCE per bot per server session here. This block
+    // sits on the hot ProcessBot(uint32) sweep path (every online bot, ~1024/interval, with NO
+    // player-proximity gate -- unlike ProcessBot(Player*)), so it heals the whole fleet within
+    // a couple of intervals without waiting for a re-login or a scheduled randomize, and tops
+    // up under-ranked kits too.
+    if (ai && sRandomPlayerbotMgr.IsRandomBot(player))
+    {
+        static std::set<uint32> s_spellKitFixed;
+        static std::mutex s_spellKitFixedMutex;
+        bool needsFix = false;
+        {
+            std::lock_guard<std::mutex> guard(s_spellKitFixedMutex);
+            needsFix = s_spellKitFixed.insert(bot).second;
+        }
+        if (needsFix)
+        {
+            PlayerbotFactory factory(player, player->GetLevel());
+            factory.LearnClassTrainerSpells();
+        }
+    }
 
     uint32 update = GetEventValue(bot, "update");
     //Update the bot
@@ -2790,10 +3609,14 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
         AreaTableEntry const* area = GetAreaEntryByAreaID(areaId);
         if (bot->GetLevel() < 30)
         {
+            // Thalassian Highlands (Turtle-WoW high-elf starter): high elves start here,
+            // but any ALLIANCE race may travel/quest here. Only keep out the Horde.
             if ((zoneId == 5225 || areaId == 5225 || zoneId == 2040 || areaId == 2040 || zoneId == 1220 || areaId == 1220) &&
-                bot->getRace() != RACE_HIGH_ELF)
+                bot->GetTeam() != ALLIANCE)
                 return true;
-            if ((zoneId == 5536 || areaId == 5536) && bot->getRace() != RACE_GOBLIN)
+            // Blackstone Island (Turtle-WoW goblin starter, HORDE): goblins start here,
+            // other Horde may quest here, but Alliance must never be routed into it.
+            if ((zoneId == 5536 || areaId == 5536) && bot->GetTeam() != HORDE)
                 return true;
         }
 
@@ -3931,7 +4754,10 @@ void RandomPlayerbotMgr::OnPlayerLogout(Player* player)
         }
     });
 
-    players.erase(player->GetGUIDLow());
+    {
+        std::lock_guard<std::mutex> lock(playersMutex);
+        players.erase(player->GetGUIDLow());
+    }
 }
 
 void RandomPlayerbotMgr::OnBotLoginInternal(Player * const bot)
@@ -3984,8 +4810,12 @@ void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
     }
     else
     {
-        players[player->GetGUIDLow()] = player;
-        sLog.outDebug("Including non-random bot player %s into random bot update", player->GetName());
+        {
+            std::lock_guard<std::mutex> lock(playersMutex);
+            players[player->GetGUIDLow()] = player;
+        }
+        sLog.outError("COLDDBG OnPlayerLogin added real player %s map=%u players=%u (bots will wake near them)",
+            player->GetName(), player->GetMapId(), (uint32)players.size());
     }
 }
 

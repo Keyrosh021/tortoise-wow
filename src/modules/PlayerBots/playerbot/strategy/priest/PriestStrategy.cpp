@@ -604,6 +604,24 @@ void PriestOffdpsStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
         "smite",
         NextAction::array(0, new NextAction("smite", ACTION_NORMAL + 1), NULL)));
 
+    // WAND at LOW mana (<15%), not just at empty (<5%). Watched Eliney (L15) die vs a wolf while
+    // standing completely passive between emergency heals: mana hovered 5-27% -- too low to afford
+    // smites alongside the heals, but above the old "no mana" gate, so she output ZERO damage for the
+    // whole fight. A real priest wands in that band and banks mana for heals. Priority above smite so
+    // low-mana priests wand instead of dumping their heal reserve into offense.
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
+
+    // WAND at LOW mana (<15%), not just empty (<5%). Watched Eliney (L15) die standing passive
+    // between emergency heals: mana hovered 5-27% -- too low to afford smites alongside heals, above
+    // the old "no mana" gate -> ZERO damage output all fight. A real priest wands in that band and
+    // banks mana for heals. Priority above smite so low-mana priests wand instead of dumping the
+    // heal reserve into offense.
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
+
     triggers.push_back(new TriggerNode(
         "no mana",
         NextAction::array(0, new NextAction("shoot", ACTION_NORMAL), NULL)));
@@ -1177,6 +1195,15 @@ void PriestOffdpsStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
         "smite",
         NextAction::array(0, new NextAction("smite", ACTION_NORMAL + 1), NULL)));
 
+    // WAND at LOW mana (<15%), not just empty (<5%). Watched Eliney (L15) die standing passive
+    // between emergency heals: mana hovered 5-27% -- too low to afford smites alongside heals, above
+    // the old "no mana" gate -> ZERO damage output all fight. A real priest wands in that band and
+    // banks mana for heals. Priority above smite so low-mana priests wand instead of dumping the
+    // heal reserve into offense.
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
+
     triggers.push_back(new TriggerNode(
         "no mana",
         NextAction::array(0, new NextAction("shoot", ACTION_NORMAL), NULL)));
@@ -1741,6 +1768,15 @@ void PriestOffdpsStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "smite",
         NextAction::array(0, new NextAction("smite", ACTION_NORMAL + 1), NULL)));
+
+    // WAND at LOW mana (<15%), not just empty (<5%). Watched Eliney (L15) die standing passive
+    // between emergency heals: mana hovered 5-27% -- too low to afford smites alongside heals, above
+    // the old "no mana" gate -> ZERO damage output all fight. A real priest wands in that band and
+    // banks mana for heals. Priority above smite so low-mana priests wand instead of dumping the
+    // heal reserve into offense.
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
 
     triggers.push_back(new TriggerNode(
         "no mana",

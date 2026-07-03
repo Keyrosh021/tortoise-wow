@@ -30,7 +30,13 @@ namespace ai
         virtual bool Execute(Event& event) override;
         virtual bool isUsefulWhenStunned() override { return true; }
 
-        virtual bool isUseful() override { return ai->HasStrategy("rpg quest", BotState::BOT_STATE_NON_COMBAT); }
+        virtual bool isUseful() override
+        {
+            // Also fire for autonomous random bots (no active player master) so grey-quest cleanup
+            // always runs for them, not only bots carrying the "rpg quest" sub-strategy.
+            return ai->HasStrategy("rpg quest", BotState::BOT_STATE_NON_COMBAT) ||
+                   (!ai->HasActivePlayerMaster() && sRandomPlayerbotMgr.IsRandomBot(bot));
+        }
 
 #ifdef GenerateBotHelp
         virtual std::string GetHelpName() { return "clean quest log"; }
@@ -43,7 +49,7 @@ namespace ai
         virtual std::vector<std::string> GetUsedValues() { return {"can fight equal"}; }
 #endif 
 
-        void DropQuestType(Player* requester, uint8& numQuest, uint8 wantNum = 100, bool isGreen = false, bool hasProgress = false, bool isComplete = false);
+        void DropQuestType(Player* requester, uint8& numQuest, uint8 wantNum = 100, bool isGreen = false, bool hasProgress = false, bool isComplete = false, bool grayOnly = false);
 
         static bool HasProgress(Player* bot, Quest const* quest);
     };

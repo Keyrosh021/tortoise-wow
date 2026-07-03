@@ -23,6 +23,24 @@ namespace
     {
         return "quest objective guid skip::" + std::to_string(guid.GetRawValue());
     }
+
+    // Zero-crash travel: run a travel-destination computation SYNCHRONOUSLY on the calling
+    // (bot-AI) thread and hand back an ALREADY-READY future, so the existing valid()/
+    // wait_for(0)/get() consumer is unchanged -- but NO background thread is spawned. This
+    // replaces the unbounded std::async(std::launch::async)-per-travel-request that (a) spawned
+    // an OS thread per request -> thread exhaustion (SIGABRT std::system_error) and (b) ran
+    // sTravelMgr.GetPartitions (terrain/vmap lazy-load = not thread-safe) concurrently with bot
+    // AI -> heap corruption (SIGSEGV). With map updates serialized (MapUpdate.Continents.
+    // SingleThread=1) ALL bot AI -- travel included -- now runs single-threaded = zero
+    // concurrency = zero concurrency crashes, by construction.
+    template<typename Fn>
+    FutureDestinations RunDestinationsSync(Fn&& fn)
+    {
+        std::promise<PartitionedTravelList> p;
+        try { p.set_value(fn()); }
+        catch (...) { p.set_exception(std::current_exception()); }
+        return p.get_future();
+    }
 }
 
 inline std::string GetTravelPurposeName(std::string purpose)
@@ -150,7 +168,7 @@ bool ChooseTravelTargetAction::Execute(Event& event)
         {
             // Do not strand starter-zone bots in a 5-minute null-travel penalty:
             // let them broaden their quest giver search and retry quickly.
-            travelTarget->SetExpireIn(15000);
+            travelTarget->SetExpireIn(5000);
             context->ClearValues("no active travel destinations");
 
             std::ostringstream out;
@@ -163,7 +181,7 @@ bool ChooseTravelTargetAction::Execute(Event& event)
         {
             if (autonomousRandomBot)
             {
-                travelTarget->SetExpireIn(15000);
+                travelTarget->SetExpireIn(5000);
                 context->ClearValues("no active travel destinations");
 
                 std::ostringstream out;
@@ -520,28 +538,40 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
     {
         ai->TellDebug(requester, "Found " + std::to_string(travelPointList.size()) + " points at range " + PrintPartion(partition), "debug travel");
 
-        if (sBotLearningMgr.HasData())
+        // Order candidate points nearest-first, BUT give each bot a small per-bot, per-point
+        // spread bias so the fleet fans out across ALL of the objective's spawn points instead
+        // of every bot piling onto the single closest one (then sitting idle when it's
+        // depleted). The bias is deterministic per (bot, point) and bounded to ~SPREAD_BAND
+        // yards, so bots still stay near — they just settle on DIFFERENT nearby spawn points.
+        // (The objective already carries every spawn point; this is the missing distribution.)
+        // Learned penalty still biases the order when available.
         {
+            const bool hasLearning = sBotLearningMgr.HasData();
+            const uint32 botSeed = bot ? bot->GetGUIDLow() : 0;
+            auto spreadBias = [botSeed](WorldPosition* p) -> float
+            {
+                if (!p) return 0.0f;
+                // hash the point's ~4yd cell with the bot's guid -> stable pseudo-random [0,1)
+                uint64 h = ((uint64)(int32)(p->getX() * 0.25f) * 73856093ULL)
+                         ^ ((uint64)(int32)(p->getY() * 0.25f) * 19349663ULL)
+                         ^ ((uint64)botSeed * 0x9E3779B97F4A7C15ULL);
+                h ^= h >> 30; h *= 0xBF58476D1CE4E5B9ULL; h ^= h >> 27;
+                const float SPREAD_BAND = 90.0f;
+                return (float)(h % 1000) / 1000.0f * SPREAD_BAND;
+            };
             std::stable_sort(travelPointList.begin(), travelPointList.end(),
-                [this](TravelPoint const& left, TravelPoint const& right)
+                [this, hasLearning, &spreadBias](TravelPoint const& left, TravelPoint const& right)
                 {
-                    TravelDestination* leftDest = std::get<TravelDestination*>(left);
-                    WorldPosition* leftPos = std::get<WorldPosition*>(left);
-                    float leftDistance = std::get<float>(left);
+                    float leftKey  = std::get<float>(left)  + spreadBias(std::get<WorldPosition*>(left));
+                    float rightKey = std::get<float>(right) + spreadBias(std::get<WorldPosition*>(right));
 
-                    TravelDestination* rightDest = std::get<TravelDestination*>(right);
-                    WorldPosition* rightPos = std::get<WorldPosition*>(right);
-                    float rightDistance = std::get<float>(right);
+                    if (hasLearning)
+                    {
+                        leftKey  += sBotLearningMgr.GetTravelPenalty(bot, std::get<TravelDestination*>(left),  std::get<WorldPosition*>(left))  * 500.0f;
+                        rightKey += sBotLearningMgr.GetTravelPenalty(bot, std::get<TravelDestination*>(right), std::get<WorldPosition*>(right)) * 500.0f;
+                    }
 
-                    const float leftPenalty = sBotLearningMgr.GetTravelPenalty(bot, leftDest, leftPos);
-                    const float rightPenalty = sBotLearningMgr.GetTravelPenalty(bot, rightDest, rightPos);
-                    const float leftAdjustedDistance = leftDistance + leftPenalty * 500.0f;
-                    const float rightAdjustedDistance = rightDistance + rightPenalty * 500.0f;
-
-                    if (leftAdjustedDistance != rightAdjustedDistance)
-                        return leftAdjustedDistance < rightAdjustedDistance;
-
-                    return leftDistance < rightDistance;
+                    return leftKey < rightKey;
                 });
         }
 
@@ -621,12 +651,10 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
 
             if (destinationActive)
             {
-                if (partition != std::prev(partitionedList.end())->first && !urand(0, 10)) //10% chance to skip to a longer partition.
-                {
-                    ai->TellDebug(requester, "Skipping range " + PrintPartion(partition), "debug travel");
-                    ++partitionSkipBreaks;
-                    break;
-                }
+                // (removed) the old 9% "skip to a longer partition" jump deliberately sent bots
+                // to a farther target even when a good near one was found — the user observed bots
+                // running past a mob in front of them to a far one (more travel time + snagging).
+                // With nearest-first ordering we now commit to the closest active target.
 
 #ifdef MANGOSBOT_TWO
                 if (GuidPosition* guidP = static_cast<GuidPosition*>(position))
@@ -1747,6 +1775,16 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
             Quest const* questTemplate = sObjectMgr.GetQuestTemplate(questId);
 
             if (!questTemplate)
+                continue;
+
+            // Outleveled-zone escape: don't route travel toward OBJECTIVES of trivial quests
+            // (4+ levels below the bot). Any queued quest work suppresses the hub director below,
+            // so bots holding leftover green quests farmed low zones forever (measured: Durotar
+            // L10-19 population grew to 33, XP pinned ~500). Turn-ins are still fetched — they
+            // clear the log and pay quest XP; class quests are exempt.
+            const bool trivialQuest = !questTemplate->GetRequiredClasses() &&
+                player->GetLevel() > player->GetQuestLevelForPlayer(questTemplate) + 4;
+            if (trivialQuest && !player->CanRewardQuest(questTemplate, false))
                 continue;
 
             if (player->CanRewardQuest(questTemplate, false))

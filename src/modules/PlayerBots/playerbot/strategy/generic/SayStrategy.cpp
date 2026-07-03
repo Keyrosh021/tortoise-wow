@@ -6,23 +6,12 @@ using namespace ai;
 
 void SayStrategy::InitCombatTriggers(std::list<TriggerNode*> &triggers)
 {
-    triggers.push_back(new TriggerNode(
-        "critical health",
-        NextAction::array(0, new NextAction("say::critical health", 99.0f), NULL)));
-
-    triggers.push_back(new TriggerNode(
-        "low health",
-        NextAction::array(0, new NextAction("say::low health", 99.0f), NULL)));
-
-    triggers.push_back(new TriggerNode(
-        "low mana",
-        NextAction::array(0, new NextAction("say::low mana", 99.0f), NULL)));
-
-    triggers.push_back(new TriggerNode(
-        "tank aoe",
-        NextAction::array(0, new NextAction("say::taunt", 99.0f), NULL)));
-
-    triggers.push_back(new TriggerNode(
-        "ranged medium aoe",
-        NextAction::array(0, new NextAction("say::aoe", 99.0f), NULL)));
+    // DISABLED 2026-06-30 (user request): these all pushed a "say::*" chat/emote action at
+    // relevance 99 -- HIGHER than every combat ability (10-90) -- and the low-health/low-mana
+    // triggers stay active for as long as the bot is hurt, so the bot would STOP attacking,
+    // emote "call for help", and stand there spamming chat every tick instead of fighting or
+    // healing. That is the "bot drops to 50% hp, calls for help, stands still" bug. We do not
+    // want in-combat health/mana chatter at all. Left empty so bots just keep fighting.
+    // (To restore flavor later: re-add at a LOW relevance, e.g. < ACTION_IDLE, plus a cooldown
+    // so it can never preempt combat and can't spam.)
 }

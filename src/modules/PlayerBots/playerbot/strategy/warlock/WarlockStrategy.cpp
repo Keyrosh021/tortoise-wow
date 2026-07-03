@@ -61,6 +61,18 @@ void WarlockStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "no mana",
         NextAction::array(0, new NextAction("shoot", ACTION_NORMAL), NULL)));
+
+    // Wand at LOW mana (<15%) too, not just empty -- casters in the 5-15% band stood fully passive
+    // in combat and died with zero output (see PriestStrategy note; same fleet-wide pattern).
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
+
+    // Wand at LOW mana (<15%) too, not just empty -- casters in the 5-15% band were standing fully
+    // passive in combat (see PriestStrategy note; same fleet-wide zero-output death pattern).
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
 }
 
 void WarlockStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
@@ -521,6 +533,18 @@ void WarlockStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "no mana",
         NextAction::array(0, new NextAction("shoot", ACTION_NORMAL), NULL)));
+
+    // Wand at LOW mana (<15%) too, not just empty -- casters in the 5-15% band stood fully passive
+    // in combat and died with zero output (see PriestStrategy note; same fleet-wide pattern).
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
+
+    // Wand at LOW mana (<15%) too, not just empty -- casters in the 5-15% band were standing fully
+    // passive in combat (see PriestStrategy note; same fleet-wide zero-output death pattern).
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
 }
 
 void WarlockStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
@@ -987,6 +1011,18 @@ void WarlockStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "no mana",
         NextAction::array(0, new NextAction("shoot", ACTION_NORMAL), NULL)));
+
+    // Wand at LOW mana (<15%) too, not just empty -- casters in the 5-15% band stood fully passive
+    // in combat and died with zero output (see PriestStrategy note; same fleet-wide pattern).
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
+
+    // Wand at LOW mana (<15%) too, not just empty -- casters in the 5-15% band were standing fully
+    // passive in combat (see PriestStrategy note; same fleet-wide zero-output death pattern).
+    triggers.push_back(new TriggerNode(
+        "low mana",
+        NextAction::array(0, new NextAction("shoot", ACTION_NORMAL + 2), NULL)));
 }
 
 void WarlockStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)

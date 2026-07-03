@@ -9,8 +9,10 @@
 #include "PerfStats.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <sstream>
+#include <thread>
 
 using namespace ai;
 
@@ -327,9 +329,38 @@ void BotLearningMgr::EnsureTelemetryTables()
         "`level_delta` INT NOT NULL DEFAULT 0,"
         "`xp_delta` INT NOT NULL DEFAULT 0,"
         "`money_delta` INT NOT NULL DEFAULT 0,"
+        "`reward` FLOAT NOT NULL DEFAULT 0,"
+        "`cohort` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "`fight_id` INT UNSIGNED NOT NULL DEFAULT 0,"
         "PRIMARY KEY (`id`),"
+        "KEY `idx_combat_sample_fight` (`fight_id`),"
         "KEY `idx_combat_sample_context` (`combat_context`, `class`, `spec_tab`, `level`, `map_id`, `zone_id`),"
         "KEY `idx_combat_sample_target` (`target_entry`, `class`, `spec_tab`, `level`)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8");
+
+    // Per-decision (state, action) rows. Join to ai_playerbot_combat_sample on
+    // fight_id to attach that fight's reward -> (state, action, reward) tuples for
+    // learning a per-class rotation POLICY (best action per state).
+    WorldDatabase.PExecute(
+        "CREATE TABLE IF NOT EXISTS `ai_playerbot_decision_sample` ("
+        "`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+        "`logged_at` DATETIME NOT NULL,"
+        "`fight_id` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`bot_guid` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`class` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "`spec_tab` TINYINT NOT NULL DEFAULT -1,"
+        "`level` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "`cohort` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "`health_pct` TINYINT UNSIGNED NOT NULL DEFAULT 100,"
+        "`power_pct` TINYINT UNSIGNED NOT NULL DEFAULT 100,"
+        "`target_health_pct` TINYINT UNSIGNED NOT NULL DEFAULT 100,"
+        "`attacker_count` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "`in_melee` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "`level_delta` TINYINT NOT NULL DEFAULT 0,"
+        "`action` VARCHAR(48) NOT NULL DEFAULT '',"
+        "PRIMARY KEY (`id`),"
+        "KEY `idx_decision_fight` (`fight_id`),"
+        "KEY `idx_decision_policy` (`class`, `spec_tab`, `action`)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8");
 
     WorldDatabase.PExecute(
@@ -427,6 +458,8 @@ void BotLearningMgr::RecordBotTelemetry(PlayerbotAI* ai, uint32 /*elapsed*/)
         {
             state.combatActive = true;
             state.combatStartMs = now;
+            state.fightId = nextFightId++;   // links this fight's decisions <-> reward
+            state.lastDecisionMs = 0;
             state.combatStartLevel = level;
             state.combatStartXp = xp;
             state.combatStartMoney = money;
@@ -491,6 +524,37 @@ void BotLearningMgr::RecordBotTelemetry(PlayerbotAI* ai, uint32 /*elapsed*/)
             sample.levelDelta = int32(level) - int32(state.combatStartLevel);
             sample.xpDelta = SignedDelta(xp, state.combatStartXp);
             sample.moneyDelta = SignedDelta(money, state.combatStartMoney);
+
+            // REWARD (the learning signal). A "good fight" = survived, killed
+            // something worthwhile, kept HP, finished fast, vs a comparable-or-harder
+            // target, without thrashing between targets. Tunable; this is the fitness
+            // every offline learner / cohort comparison optimizes against.
+            {
+                float reward = 0.0f;
+                if (sample.deathObserved)
+                    reward -= 100.0f;                       // dying is the worst outcome
+                else if (sample.endedAlive)
+                    reward += 30.0f;                        // survived
+                if (sample.xpDelta > 0)
+                    reward += 40.0f;                        // actually killed something worthwhile
+                reward += 0.30f * sample.minHealthPct;      // health kept (0..+30)
+                const float secs = sample.durationMs / 1000.0f;
+                if (secs <= 5.0f)
+                    reward += 10.0f;                        // fast kill
+                else if (secs >= 30.0f)
+                    reward -= 20.0f;                        // drawn-out = struggling
+                else
+                    reward += 10.0f - 30.0f * ((secs - 5.0f) / 25.0f);
+                const int levelGap = int32(sample.targetLevel) - int32(sample.level);
+                if (sample.xpDelta > 0 && levelGap > 0)
+                    reward += 5.0f * float(std::min(levelGap, 5));  // beat a higher-level mob
+                if (sample.targetSwitches > 3)
+                    reward -= 2.0f * float(sample.targetSwitches - 3); // target thrash
+                sample.reward = reward;
+            }
+            sample.cohort = uint8(BotExperiment::Cohort(guid));
+            sample.fightId = state.fightId;
+
             QueueCombatSample(sample);
         }
 
@@ -583,6 +647,197 @@ void BotLearningMgr::QueueCombatSample(CombatSample const& sample)
     combatSampleQueue.push_back(sample);
 }
 
+void BotLearningMgr::QueueDecisionSample(DecisionSample const& sample)
+{
+    // Decisions are higher-volume than fights (~1/sec/bot) -> allow a larger buffer.
+    const uint32 maxQueue = std::max<uint32>(100, sPlayerbotAIConfig.learningMaxQueue) * 4;
+    if (decisionSampleQueue.size() >= maxQueue)
+    {
+        ++droppedDecisionSamples;
+        return;
+    }
+    decisionSampleQueue.push_back(sample);
+}
+
+void BotLearningMgr::RecordCombatDecision(PlayerbotAI* ai, std::string const& action)
+{
+    if (!sPlayerbotAIConfig.learningTelemetryEnabled || !ai || action.empty())
+        return;
+    Player* bot = ai->GetBot();
+    if (!bot || !bot->IsInWorld() || !bot->IsAlive() || !bot->IsInCombat())
+        return;
+
+    const uint32 guid = bot->GetGUIDLow();
+    const uint32 now = WorldTimer::getMSTime();
+
+    // Throttle to ~1 decision/sec/bot and grab the current fightId (under the lock).
+    uint32 fightId = 0;
+    {
+        std::lock_guard<std::mutex> guard(telemetryMutex);
+        auto it = telemetryStates.find(guid);
+        if (it == telemetryStates.end() || !it->second.combatActive || !it->second.fightId)
+            return;
+        BotTelemetryState& state = it->second;
+        if (state.lastDecisionMs && WorldTimer::getMSTimeDiff(state.lastDecisionMs, now) < 1000)
+            return;
+        state.lastDecisionMs = now;
+        fightId = state.fightId;
+    }
+
+    Unit* target = ai->GetAiObjectContext()->GetValue<Unit*>("current target")->Get();
+
+    DecisionSample s;
+    s.fightId = fightId;
+    s.botGuid = guid;
+    s.clazz = bot->getClass();
+    s.specTab = int8(AiFactory::GetPlayerSpecTab(bot));
+    s.level = bot->GetLevel();
+    s.cohort = uint8(BotExperiment::Cohort(guid));
+    s.healthPct = uint8(bot->GetHealthPercent());
+    s.powerPct = uint8(bot->GetPowerPercent());
+    s.targetHealthPct = target ? uint8(target->GetHealthPercent()) : uint8(0);
+    s.attackerCount = ai->GetAiObjectContext()->GetValue<uint8>("attackers count")->Get();
+    s.inMelee = target && bot->CanReachWithMeleeAutoAttack(target);
+    s.levelDelta = target ? int8(int32(target->GetLevel()) - int32(bot->GetLevel())) : int8(0);
+    s.action = action;
+
+    {
+        std::lock_guard<std::mutex> guard(telemetryMutex);
+        QueueDecisionSample(s);
+    }
+}
+
+void BotLearningMgr::ComputeAndLoadPolicy()
+{
+    if (!sPlayerbotAIConfig.learnedPolicyEnabled)
+        return;
+
+    // Per (class, HP bucket, MANA bucket, action): average fight reward when that
+    // action was used, and how many times. Buckets = 0 (<34%), 1 (34-66%), 2 (>=67%).
+    // Mana state lets the policy learn e.g. "OOM caster -> melee/wand, stop casting".
+    // NOTE: attacker_count is an UNSIGNED column; the old expression "attacker_count - 1" UNDERFLOWED
+    // for 0 and made MariaDB abort the whole query (ERROR 1690) -> Query() returned null -> the policy
+    // was NEVER computed even once, despite 24M+ recorded samples ("recording but not learning").
+    // IF(>1,1,0) is the same bucket without the unsigned arithmetic.
+    std::unique_ptr<QueryResult> result(WorldDatabase.Query(
+        "SELECT d.class, LEAST(2, FLOOR(d.health_pct/34)) AS hpb, "
+        "LEAST(2, FLOOR(d.power_pct/34)) AS mpb, IF(d.attacker_count > 1, 1, 0) AS atkb, "
+        "d.action, AVG(c.reward) AS avg_reward, COUNT(*) AS n "
+        "FROM ai_playerbot_decision_sample d "
+        "JOIN ai_playerbot_combat_sample c ON c.fight_id = d.fight_id "
+        "GROUP BY d.class, hpb, mpb, atkb, d.action HAVING n >= 8"));
+    if (!result)
+    {
+        sLog.outError("BotLearningMgr: policy query returned no result (SQL error or no data)");
+        return;
+    }
+
+    auto bucketKey = [](uint32 cls, uint32 hpb, uint32 mpb, uint32 atkb)
+    { return std::to_string(cls) + "|" + std::to_string(hpb) + "|" + std::to_string(mpb) + "|" + std::to_string(atkb); };
+
+    struct Row { uint32 cls; uint32 hpb; uint32 mpb; uint32 atkb; std::string action; double avg; uint32 n; };
+    std::vector<Row> rows;
+    std::map<std::string, std::pair<double, double>> bucketAcc; // bucketKey -> (sum avg*n, sum n)
+    do
+    {
+        Field* f = result->Fetch();
+        Row r;
+        r.cls = f[0].GetUInt32();
+        r.hpb = f[1].GetUInt32();
+        r.mpb = f[2].GetUInt32();
+        r.atkb = f[3].GetUInt32();
+        r.action = f[4].GetCppString();
+        r.avg = f[5].GetFloat();
+        r.n = f[6].GetUInt32();
+        rows.push_back(r);
+        auto& acc = bucketAcc[bucketKey(r.cls, r.hpb, r.mpb, r.atkb)];
+        acc.first += r.avg * r.n;
+        acc.second += r.n;
+    } while (result->NextRow());
+
+    // Bonus = how far this action's avg reward is from the bucket's mean reward,
+    // scaled and clamped so it nudges (not overrides) the hand-coded relevances.
+    std::unordered_map<std::string, float> fresh;
+    const float SCALE = 0.12f, MAXB = 8.0f;
+    for (Row const& r : rows)
+    {
+        auto& acc = bucketAcc[bucketKey(r.cls, r.hpb, r.mpb, r.atkb)];
+        const double mean = acc.second > 0 ? acc.first / acc.second : 0.0;
+        float bonus = float((r.avg - mean) * SCALE);
+        bonus = std::max(-MAXB, std::min(MAXB, bonus));
+        fresh[bucketKey(r.cls, r.hpb, r.mpb, r.atkb) + "|" + r.action] = bonus;
+    }
+
+    // LEARNED SPEC (theorycrafting from the fleet's own outcomes): avg fight reward per class+spec
+    // over the newest samples. Feeds InitTalentsTree so new spec rolls bias toward what actually
+    // wins fights, while exploration keeps the other specs generating data. Same bounded-id trick.
+    std::array<int, 16> bestSpec;
+    bestSpec.fill(-1);
+    {
+        std::array<double, 16 * 3> bestAvg;
+        bestAvg.fill(-1e9);
+        std::unique_ptr<QueryResult> specRes(WorldDatabase.Query(
+            "SELECT class, spec_tab, AVG(reward) AS r, COUNT(*) AS n "
+            "FROM ai_playerbot_combat_sample "
+            "WHERE id > (SELECT MAX(id) FROM ai_playerbot_combat_sample) - 100000 "
+            "GROUP BY class, spec_tab HAVING n >= 300"));
+        if (specRes)
+        {
+            do
+            {
+                Field* f = specRes->Fetch();
+                const uint32 cls = f[0].GetUInt32();
+                const uint32 tab = f[1].GetUInt32();
+                const double avg = f[2].GetFloat();
+                if (cls < 16 && tab < 3 && avg > bestAvg[cls * 3])
+                {
+                    bestAvg[cls * 3] = avg;
+                    bestSpec[cls] = (int)tab;
+                }
+            } while (specRes->NextRow());
+        }
+    }
+
+    const size_t entries = fresh.size();
+    {
+        std::lock_guard<std::mutex> guard(policyMutex);
+        policyBonus.swap(fresh);
+        learnedBestSpec = bestSpec;
+        learnedSpecReady = true;
+    }
+    // Provable heartbeat: this line in the server log is the evidence the fleet is actually LEARNING
+    // (recompute ran + N state/action bonuses now steer action relevance).
+    sLog.outString("BotLearningMgr: learned policy loaded, %zu state/action bonuses from %zu aggregate rows"
+        " (learned specs: w=%d p=%d h=%d m=%d l=%d)",
+        entries, rows.size(), bestSpec[1], bestSpec[5], bestSpec[3], bestSpec[8], bestSpec[9]);
+}
+
+int BotLearningMgr::GetLearnedBestSpec(uint8 cls)
+{
+    if (!sPlayerbotAIConfig.learnedPolicyEnabled || cls >= 16)
+        return -1;
+    std::lock_guard<std::mutex> guard(policyMutex);
+    if (!learnedSpecReady)
+        return -1;
+    return learnedBestSpec[cls];
+}
+
+float BotLearningMgr::GetActionRelevanceBonus(Player* bot, uint8 attackerBucket, std::string const& action)
+{
+    if (!sPlayerbotAIConfig.learnedPolicyEnabled || !bot || action.empty())
+        return 0.0f;
+    uint32 hpb = uint32(bot->GetHealthPercent()) / 34u;
+    if (hpb > 2u) hpb = 2u;
+    uint32 mpb = uint32(bot->GetPowerPercent()) / 34u;
+    if (mpb > 2u) mpb = 2u;
+    const uint32 atkb = attackerBucket > 1u ? 1u : attackerBucket;
+    const std::string key = std::to_string(bot->getClass()) + "|" + std::to_string(hpb) + "|" +
+                            std::to_string(mpb) + "|" + std::to_string(atkb) + "|" + action;
+    std::lock_guard<std::mutex> guard(policyMutex);
+    auto it = policyBonus.find(key);
+    return it != policyBonus.end() ? it->second : 0.0f;
+}
+
 void BotLearningMgr::FlushTelemetry()
 {
     if (!sPlayerbotAIConfig.learningTelemetryEnabled)
@@ -595,6 +850,7 @@ void BotLearningMgr::FlushTelemetry()
 
     std::vector<TaskSample> taskSamples;
     std::vector<CombatSample> combatSamples;
+    std::vector<DecisionSample> decisionSamples;
     const uint32 maxRows = std::max<uint32>(1, sPlayerbotAIConfig.learningFlushMaxRows);
     uint32 droppedTasks = 0;
     uint32 droppedCombats = 0;
@@ -621,6 +877,15 @@ void BotLearningMgr::FlushTelemetry()
             taskSampleQueue.pop_front();
         }
 
+        // Decisions are higher-volume; drain up to 4x maxRows per flush.
+        const uint32 decisionTake = std::min<uint32>(maxRows * 4, decisionSampleQueue.size());
+        decisionSamples.reserve(decisionTake);
+        for (uint32 i = 0; i < decisionTake; ++i)
+        {
+            decisionSamples.push_back(decisionSampleQueue.front());
+            decisionSampleQueue.pop_front();
+        }
+
         droppedTasks = droppedTaskSamples;
         droppedCombats = droppedCombatSamples;
         droppedTaskSamples = 0;
@@ -629,13 +894,14 @@ void BotLearningMgr::FlushTelemetry()
         queuedCombats = combatSampleQueue.size();
     }
 
-    if (taskSamples.empty() && combatSamples.empty())
+    if (taskSamples.empty() && combatSamples.empty() && decisionSamples.empty())
         return;
 
     EnsureTelemetryTables();
     const uint32 start = WorldTimer::getMSTime();
     const uint32 combatFlushed = FlushCombatSamples(combatSamples);
     const uint32 taskFlushed = FlushTaskSamples(taskSamples);
+    FlushDecisionSamples(decisionSamples);
     const uint32 elapsed = WorldTimer::getMSTimeDiffToNow(start);
     PerfStats::RecordLearningTelemetryFlush(elapsed, taskFlushed, combatFlushed, droppedTasks, droppedCombats, queuedTasks, queuedCombats);
 
@@ -651,6 +917,34 @@ void BotLearningMgr::FlushTelemetry()
                 " ms=" + std::to_string(elapsed) + " queuedTasks=" + std::to_string(queuedTasks) +
                 " queuedCombats=" + std::to_string(queuedCombats)).c_str());
     }
+
+    // Rebuild the learned policy from the accumulated data every ~5 min, so bots get
+    // smarter DURING the run as more fights are logged (online-ish learning).
+    // OFF-THREAD: even bounded, the aggregation takes minutes on 24M+ rows -- running it inline
+    // here would hard-freeze the world thread every cycle. The DB layer is already used from the
+    // parallel continent-update threads, so a detached worker is safe; the result swaps in under
+    // policyMutex. A guard flag prevents overlapping recomputes.
+    // BOOT-TIME ONLY. The DB layer serializes on ONE connection, so even an off-thread policy query
+    // BLOCKS every world-thread DB call while it runs -- the 2M-row version ran 4+ minutes and
+    // hard-froze the world mid-run (caught live at 01:03: world logs stopped, query at 274s "Sending
+    // data", the user felt it as a stall+crash on login). Even bounded to 150k rows it takes ~46s on
+    // cold cache. So: compute the policy ONCE, shortly after startup (world barely ticking, nobody
+    // online) and keep it static for the run. Samples accumulate all run and feed the NEXT boot --
+    // still per-run refinement, zero runtime freeze risk.
+    if (sPlayerbotAIConfig.learnedPolicyEnabled && !lastPolicyComputeMs)
+    {
+        lastPolicyComputeMs = now;
+        static std::atomic<bool> policyComputeRunning{false};
+        bool expected = false;
+        if (policyComputeRunning.compare_exchange_strong(expected, true))
+        {
+            std::thread([this]()
+            {
+                ComputeAndLoadPolicy();
+                policyComputeRunning.store(false);
+            }).detach();
+        }
+    }
 }
 
 uint32 BotLearningMgr::FlushCombatSamples(std::vector<CombatSample> const& samples)
@@ -662,7 +956,7 @@ uint32 BotLearningMgr::FlushCombatSamples(std::vector<CombatSample> const& sampl
     sql << "INSERT INTO `ai_playerbot_combat_sample` "
         << "(`ended_at`,`bot_guid`,`race`,`class`,`spec_tab`,`level`,`map_id`,`instance_id`,`zone_id`,`area_id`,`bucket_x`,`bucket_y`,"
         << "`combat_context`,`group_size`,`is_dungeon`,`is_raid`,`is_battleground`,`duration_ms`,`target_entry`,`target_level`,"
-        << "`target_is_player`,`target_switches`,`min_health_pct`,`min_power_pct`,`ended_alive`,`death_observed`,`level_delta`,`xp_delta`,`money_delta`) VALUES ";
+        << "`target_is_player`,`target_switches`,`min_health_pct`,`min_power_pct`,`ended_alive`,`death_observed`,`level_delta`,`xp_delta`,`money_delta`,`reward`,`cohort`,`fight_id`) VALUES ";
 
     for (size_t i = 0; i < samples.size(); ++i)
     {
@@ -676,7 +970,37 @@ uint32 BotLearningMgr::FlushCombatSamples(std::vector<CombatSample> const& sampl
             << (s.isDungeon ? 1 : 0) << ',' << (s.isRaid ? 1 : 0) << ',' << (s.isBattleground ? 1 : 0) << ','
             << s.durationMs << ',' << s.targetEntry << ',' << uint32(s.targetLevel) << ',' << (s.targetIsPlayer ? 1 : 0) << ','
             << s.targetSwitches << ',' << s.minHealthPct << ',' << s.minPowerPct << ',' << (s.endedAlive ? 1 : 0) << ','
-            << (s.deathObserved ? 1 : 0) << ',' << s.levelDelta << ',' << s.xpDelta << ',' << s.moneyDelta << ')';
+            << (s.deathObserved ? 1 : 0) << ',' << s.levelDelta << ',' << s.xpDelta << ',' << s.moneyDelta << ',' << s.reward << ',' << uint32(s.cohort) << ',' << s.fightId << ')';
+    }
+
+    WorldDatabase.Execute(sql.str().c_str());
+    return samples.size();
+}
+
+uint32 BotLearningMgr::FlushDecisionSamples(std::vector<DecisionSample> const& samples)
+{
+    if (samples.empty())
+        return 0;
+
+    std::ostringstream sql;
+    sql << "INSERT INTO `ai_playerbot_decision_sample` "
+        << "(`logged_at`,`fight_id`,`bot_guid`,`class`,`spec_tab`,`level`,`cohort`,`health_pct`,`power_pct`,"
+        << "`target_health_pct`,`attacker_count`,`in_melee`,`level_delta`,`action`) VALUES ";
+
+    for (size_t i = 0; i < samples.size(); ++i)
+    {
+        DecisionSample const& s = samples[i];
+        if (i)
+            sql << ',';
+
+        std::string action = s.action;        // internal name; strip any quote/backslash just in case
+        for (char& c : action)
+            if (c == '\'' || c == '\\') c = ' ';
+
+        sql << "(NOW()," << s.fightId << ',' << s.botGuid << ',' << uint32(s.clazz) << ',' << int32(s.specTab) << ','
+            << uint32(s.level) << ',' << uint32(s.cohort) << ',' << uint32(s.healthPct) << ',' << uint32(s.powerPct) << ','
+            << uint32(s.targetHealthPct) << ',' << uint32(s.attackerCount) << ',' << (s.inMelee ? 1 : 0) << ','
+            << int32(s.levelDelta) << ",'" << action << "')";
     }
 
     WorldDatabase.Execute(sql.str().c_str());

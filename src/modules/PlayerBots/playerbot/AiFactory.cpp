@@ -939,16 +939,15 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
         PlayerbotAI* ai = player->GetPlayerbotAI();
         Player* master = ai ? ai->GetMaster() : nullptr;
 
-        if (master && !master->GetPlayerbotAI())
-        {
-            const char* wanderFollow = sPlayerbotAIConfig.useWanderAsDefaultFollowStrategy ? "wander" : "follow";
-            nonCombatEngine->addStrategies("racials", "nc", "food", wanderFollow, "default", "quest", "loot", "gather", "duel", "emote", "buff", "mount", NULL);
-        }
-        else
-        {
-            const char* wanderFollow = sPlayerbotAIConfig.useWanderAsDefaultFollowStrategy ? "wander" : "follow";
-            nonCombatEngine->addStrategies("racials", "nc", "food", wanderFollow, "default", "quest", "loot", "gather", "duel", "emote", "buff", "mount", NULL);
-        }
+        // A bot in a group that is NOT the leader FOLLOWS the leader so the group sticks together
+        // and gangs the same mobs (shared tag -> shared quest credit + group loot), instead of
+        // wandering off to its own quest (which wastes the group seat). Solo bots and group leaders
+        // keep the configured default (wander). This is the core of transactional grouping.
+        const bool groupedFollower = ai && player->GetGroup() && !ai->IsGroupLeader();
+        const char* wanderFollow = groupedFollower ? "follow"
+            : (sPlayerbotAIConfig.useWanderAsDefaultFollowStrategy ? "wander" : "follow");
+        (void)master;
+        nonCombatEngine->addStrategies("racials", "nc", "food", wanderFollow, "default", "quest", "loot", "gather", "duel", "emote", "buff", "mount", NULL);
     }
 
     if ((facade->HasRealPlayerMaster() && sPlayerbotAIConfig.jumpWithPlayer) ||

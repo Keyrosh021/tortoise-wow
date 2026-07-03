@@ -3,11 +3,13 @@
 #include "playerbot/PerformanceMonitor.h"
 #include "PerfStats.h"
 #include "MapManager.h"
+#include <algorithm>
 #include <stdarg.h>
 #include <cmath>
 #include <iomanip>
 #include <map>
 #include <mutex>
+#include <unordered_map>
 
 #include "playerbot/AiFactory.h"
 
@@ -20,12 +22,15 @@
 #include "strategy/actions/LogLevelAction.h"
 #include "strategy/actions/SayAction.h"
 #include "strategy/actions/EmoteAction.h"
+#include "strategy/actions/MoveToTravelTargetAction.h"
+#include "strategy/actions/ReviveFromCorpseAction.h"
 #include "strategy/values/LastSpellCastValue.h"
 #include "LootObjectStack.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "PlayerbotAI.h"
 #include "BotLearningMgr.h"
 #include "BotDiagnostics.h"
+#include "BotActionLog.h"
 #include "playerbot/PlayerbotFactory.h"
 #include "PlayerbotSecurity.h"
 #include "Group/Group.h"
@@ -46,6 +51,7 @@
 #include "strategy/ItemVisitors.h"
 #include "strategy/values/LootValues.h"
 #include "strategy/values/AttackersValue.h"
+#include "strategy/values/PossibleTargetsValue.h"
 #include "Transports/Transport.h"
 #include "Guild/GuildMgr.h"
 #include "Chat/ChannelMgr.h"
@@ -68,6 +74,1086 @@ using namespace ai;
 
 namespace
 {
+    // Per-bot short-lived target blacklist (anti re-acquire thrash). Reimplemented 2026-07-03
+    // after a git reset lost the original definition; signature matches the existing call sites.
+    std::mutex s_targetDeferMx;
+    std::unordered_map<uint32, std::unordered_map<uint64, time_t>> s_targetDefers;
+
+    void DeferTargetGuidForBot(Player* bot, ObjectGuid guid, uint32 ticks)
+    {
+        if (!bot || !guid)
+            return;
+        std::lock_guard<std::mutex> lk(s_targetDeferMx);
+        auto& m = s_targetDefers[bot->GetGUIDLow()];
+        m[guid.GetRawValue()] = time(nullptr) + (time_t)ticks;
+        if (m.size() > 64)
+        {
+            const time_t now = time(nullptr);
+            for (auto it = m.begin(); it != m.end();)
+                it = (it->second < now) ? m.erase(it) : std::next(it);
+        }
+    }
+}
+
+
+// DECISION-THRASH INSTRUMENTATION (phase 1, baseline-before-fix). Global, lock-free counters
+// incremented from PlayerbotAI::CastSpell (runs on bot map-update worker threads). The fleet
+// diagnostic (RandomPlayerbotMgr bot_fleet.csv) externs these and emits per-minute rates +
+// percentages on a THRASH line so we can PROVE the commitment layer reduces self-interruption.
+//   g_botCasts            - total spell-cast attempts that reached the cast point
+//   g_botCastInterrupts   - casts started while a DIFFERENT generic cast was still in progress
+//                           (the bot abandoning its own cast = "constantly interrupting")
+//   g_botHealCasts        - heal-spell casts (denominator for recast rate)
+//   g_botHealRecasts      - same heal re-cast within 4s (the "recasts its own heal" symptom)
+std::atomic<uint64_t> g_botCasts{0};
+std::atomic<uint64_t> g_botCastInterrupts{0};
+std::atomic<uint64_t> g_botHealCasts{0};
+std::atomic<uint64_t> g_botHealRecasts{0};
+// Disambiguator: a heal re-cast FASTER than a heal could possibly complete (< ~1.8s, less than
+// a typical heal cast time) means the previous heal was CANCELED, not completed -> the recast is
+// interruption. A high tight_pct => cancellation (chase/movement mid-cast); a low tight_pct with
+// high recast_pct => sustained healing / weak heals / losing fights (heal lands, HP still low).
+std::atomic<uint64_t> g_botHealRecastTight{0};
+// TARGET-CHURN instrumentation: how often the combat target is torn down + re-picked, and how
+// often that happens while the OLD target was still ALIVE (= switching off a live mob = potential
+// oscillation/thrash, vs. healthy retarget-after-kill). Incremented in SelectNewTargetAction.
+std::atomic<uint64_t> g_botSelectNewTarget{0};
+std::atomic<uint64_t> g_botSelectNewTargetAlive{0};
+
+// ===== BOT-CAM: my "eyes". A COMPLETE per-second snapshot of one bot so I can see exactly what it
+// is doing every moment, like watching the screen: position, hp/mana, in-combat, moving/casting,
+// what it's targeting (+ that target's hp / distance / whether it's hitting the bot back),
+// how many things are attacking it, what it's auto-attacking, how many corpses it has left
+// unlooted, and the actual action it just executed. One row per bot per second -> logs/botcam.csv.
+// Gated by EnableActionLog so it's only on for the small watched fleet. This is the ground truth
+// the learning loop reads (and that I read to ask: what is it doing, why, what SHOULD it do).
+static void WriteBotCam(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld())
+        return;
+    AiObjectContext* ctx = ai->GetAiObjectContext();
+    if (!ctx)
+        return;
+
+    static std::mutex camMx;
+    static std::unordered_map<uint32, uint32> lastMs;
+    const uint32 nowMs = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(camMx);
+        uint32& t = lastMs[bot->GetGUIDLow()];
+        if (t && nowMs - t < 1000)
+            return;               // throttle: 1 row / bot / second
+        t = nowMs;
+    }
+
+    Unit* tgt = ctx->GetValue<Unit*>("current target")->Get();
+    Unit* victim = bot->GetVictim();
+    uint8 atkN = ctx->GetValue<uint8>("attackers count")->Get();
+
+    std::string castName = "-";
+    if (Spell* s = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL))
+        if (s->m_spellInfo)
+            castName = s->m_spellInfo->SpellName[0];
+
+    int lootN = 0;
+    if (LootObjectStack* ls = ctx->GetValue<LootObjectStack*>("available loot")->Get())
+        lootN = ls->CanLoot(sPlayerbotAIConfig.lootDistance) ? 1 : 0;   // 1 = has a corpse to loot in range
+
+    const Action* la = ai->GetLastExecutedAction(ai->GetState());
+    std::string doing = la ? const_cast<Action*>(la)->getName() : "-";
+
+    const uint32 maxMana = bot->GetMaxPower(POWER_MANA);
+    const int manaPct = maxMana ? (int)(bot->GetPower(POWER_MANA) * 100 / maxMana) : -1;
+
+    FILE* f = fopen("logs/botcam.csv", "a");
+    if (!f) f = fopen("../logs/botcam.csv", "a");
+    if (!f)
+        return;
+    fprintf(f,
+        "%s,%s,L%u,m%u,%.0f|%.0f,hp%u,mana%d,combat%d,move%d,cast=%s,tgt=%s,tgtHp%d,tgtDist%.0f,onMe%d,atk%u,auto=%s,loot%d,do=%s\n",
+        sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), bot->GetLevel(), bot->GetMapId(),
+        bot->GetPositionX(), bot->GetPositionY(),
+        (uint32)bot->GetHealthPercent(), manaPct,
+        bot->IsInCombat() ? 1 : 0,
+        (sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0,
+        castName.c_str(),
+        tgt ? tgt->GetName() : "-",
+        tgt ? (int)tgt->GetHealthPercent() : -1,
+        tgt ? (double)bot->GetDistance(tgt) : -1.0,
+        (tgt && tgt->GetVictim() == bot) ? 1 : 0,
+        (uint32)atkN,
+        victim ? victim->GetName() : "-",
+        lootN,
+        doing.c_str());
+    fclose(f);
+}
+
+// UNREACHABLE-LOOT GIVE-UP. With the metric stall-rescues disabled (ENABLE_METRIC_RESCUES=false),
+// a bot that targets a loot corpse it can't path to (e.g. behind the Brackwell pumpkin-patch fence)
+// runs IN PLACE against the obstacle indefinitely -- watched Cariani do "move to loot" for 55s with
+// her position frozen. The old !movementProgress stall checks miss this because she wiggles
+// >0.03yd/tick, so per-tick movement reads as progress. Track NET displacement over a window: if a
+// bot has barely moved while chasing the SAME corpse, it's unreachable -> caller defers it so the bot
+// abandons it and gets back to productive work. File-static per-bot state (watched-fleet scale).
+static bool LootPursuitStuck(Player* bot, ObjectGuid lootGuid)
+{
+    struct St { float x; float y; uint32 sinceMs; uint64 g; };
+    constexpr uint32 WINDOW_MS = 7000;   // must net-progress within 7s...
+    constexpr float MIN_DISP = 6.0f;     // ...by at least 6 yards
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const uint32 now = WorldTimer::getMSTime();
+    const uint64 g = lootGuid.GetRawValue();
+    std::lock_guard<std::mutex> lk(mx);
+    St& s = track[bot->GetGUIDLow()];
+    if (s.g != g || !s.sinceMs)
+    {
+        s.x = bot->GetPositionX(); s.y = bot->GetPositionY(); s.sinceMs = now; s.g = g;
+        return false;
+    }
+    const float dx = bot->GetPositionX() - s.x, dy = bot->GetPositionY() - s.y;
+    if (dx * dx + dy * dy >= MIN_DISP * MIN_DISP)   // made real progress -> slide window forward
+    {
+        s.x = bot->GetPositionX(); s.y = bot->GetPositionY(); s.sinceMs = now;
+        return false;
+    }
+    return (now - s.sinceMs) >= WINDOW_MS;          // barely moved the whole window -> stuck
+}
+
+// Z-SANITY CORRECTION (band-aid, NOT a physics engine). Bots sometimes end up UNDER the terrain --
+// e.g. resurrected onto a tree/WMO model below ground -- and, because they don't simulate gravity and
+// the navmesh has gaps, the bad Z just persists. WoW collision is VMAP/MMAP data, not runtime physics;
+// the proper fix is regenerating/repairing that data, but this safety net removes the visible bug.
+// SAFETY: only act when the bot is BOTH underground (existing purpose-built WorldPosition::isUnderground)
+// AND frozen there for several seconds. A bot legitimately in a cave/mine is moving/questing; a bot
+// bugged under the terrain is stuck -- so the freeze gate avoids ripping bots out of legit indoor areas.
+// Snaps up to the terrain heightmap (no models, so it clears the tree it's stuck under) and LOGS every
+// correction to logs/botz_fix.csv so we can confirm it only catches real bugs. Gated to the watched
+// fleet for now (perf + validation) via the caller.
+static void CorrectBotZ(Player* bot)
+{
+    if (!bot || !bot->IsInWorld() || !bot->GetMap())
+        return;
+    if (bot->IsTaxiFlying() || bot->IsFlying() || bot->IsBeingTeleported() || bot->IsFalling() ||
+        bot->IsInWater() || bot->HasMovementFlag(MOVEFLAG_SWIMMING) || bot->GetTransport())
+        return;
+
+    struct ZTrack { float x; float y; uint32 sinceMs; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, ZTrack> track;
+    static std::unordered_map<uint32, uint32> lastCheck;
+
+    const uint32 now = WorldTimer::getMSTime();
+    const float x = bot->GetPositionX(), y = bot->GetPositionY(), z = bot->GetPositionZ();
+    const uint32 key = bot->GetGUIDLow();
+
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& lc = lastCheck[key];
+        if (lc && now - lc < 1000) return;   // ~1 check / sec / bot
+        lc = now;
+    }
+
+    // NOTE: the FLOATING case ("bots hover slightly above ground when idle") is now fixed at its ROOT
+    // in Unit::UpdateSplineMovement -- a bot is settled onto the walkable surface the moment its
+    // movement spline ends (no client => no gravity, so the navmesh endpoint's +0.5f pad used to
+    // persist forever). This function only handles UNDERGROUND, a genuinely different bug: navmesh /
+    // collision DATA holes let a bot path BELOW the terrain, where no arrival-settle can help.
+    if (!WorldPosition(bot).isUnderground())
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        track[key] = { x, y, now };           // reset the freeze window whenever we're above ground
+        return;
+    }
+
+    bool frozenUnderground = false;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        ZTrack& t = track[key];
+        if (!t.sinceMs) t = { x, y, now };
+        const float dx = x - t.x, dy = y - t.y;
+        if (dx * dx + dy * dy >= 3.0f * 3.0f) t = { x, y, now };           // moved -> reset window
+        else if (now - t.sinceMs >= 4000) frozenUnderground = true;       // stuck underground >=4s
+    }
+    if (!frozenUnderground)
+        return;
+
+    // terrain heightmap surface above us (vmap=false so models/the tree are ignored)
+    const float terrainZ = bot->GetMap()->GetHeight(x, y, z + 60.0f, false, 120.0f);
+    if (terrainZ <= INVALID_HEIGHT || terrainZ - z < 1.0f)
+        return;
+
+    bot->NearTeleportTo(x, y, terrainZ + 0.5f, bot->GetOrientation());
+    { std::lock_guard<std::mutex> lk(mx); track[key] = { x, y, now }; }
+
+    FILE* f = fopen("logs/botz_fix.csv", "a");
+    if (!f) f = fopen("../logs/botz_fix.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,from_z=%.1f,to_z=%.1f,map=%u,%.0f|%.0f\n",
+            sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), z, terrainZ + 0.5f,
+            bot->GetMapId(), x, y);
+        fclose(f);
+    }
+}
+
+// PHYSICAL UNSTUCK (runtime; navmesh/mmap regen is off-limits -- it crashes the host). Bots regularly
+// end up in spots where pathfinding fails for EVERYTHING: they can't travel (freeze), flee (then die),
+// reach a combat target (idle in combat), or run to their corpse (long DEAD). All the same root. When
+// a bot is genuinely FROZEN -- net displacement <8y for >12s -- while ALIVE, out of combat, and not
+// doing a legit stationary action (cast / loot / sit-to-eat), dislodge it: expire its thrashing
+// travel/rpg targets and NearTeleportTo a nearby valid ground point (the same crash-safe call
+// CorrectBotZ uses). Rotates escape direction across nudges to get out of corners. Every nudge is
+// logged to logs/freeze_fix.csv (ALWAYS-ON, unlike the hasLog-gated events) so we can PROVE it fires.
+static void FreezeNudge(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->GetMap() || !bot->IsAlive())
+        return;
+    if (bot->IsInCombat() || !bot->getAttackers().empty())
+        return;                                               // fighting legitimately holds position
+    if (bot->IsTaxiFlying() || bot->IsBeingTeleported() || bot->IsFalling() || bot->GetTransport())
+        return;
+    if (bot->IsNonMeleeSpellCasted(true, false, true) || !bot->IsStandState())
+        return;                                               // mid-cast or sitting (eat/drink) = ok
+    if (bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING) || !ai->CanMove())
+        return;
+    // IMMERSION: NEVER teleport where a real player can see it -- a blinking bot is unmistakably a bot,
+    // which defeats the whole goal. Near a player a stuck bot instead relies on the natural walking
+    // paths (anti-idle roam / flee) or just stands (reads as a player pausing). Teleport-unstick is
+    // only for the far fleet nobody is watching.
+    if (ai->HasPlayerNearby())
+        return;
+
+    struct St { float x; float y; uint32 sinceMs; uint32 lastNudgeMs; uint8 dir; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const uint32 now = WorldTimer::getMSTime();
+    const float x = bot->GetPositionX(), y = bot->GetPositionY(), z = bot->GetPositionZ();
+
+    uint8 dir;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        if (!s.sinceMs) { s.x = x; s.y = y; s.sinceMs = now; return; }
+        const float dx = x - s.x, dy = y - s.y;
+        if (dx * dx + dy * dy >= 8.0f * 8.0f) { s.x = x; s.y = y; s.sinceMs = now; return; }  // moving fine
+        if (now - s.sinceMs < 12000) return;                       // not frozen long enough yet
+        if (s.lastNudgeMs && now - s.lastNudgeMs < 5000) return;   // don't spam nudges
+        s.dir = (s.dir + 3) & 7;                                   // rotate escape direction each nudge
+        dir = s.dir;
+        s.lastNudgeMs = now; s.sinceMs = now; s.x = x; s.y = y;    // tentatively reset (avoid re-entry)
+    }
+
+    // find a nearby VALID walkable point (vmap surface, not a cliff/hole) to hop onto
+    Map* map = bot->GetMap();
+    float bestX = 0, bestY = 0, bestZ = 0; bool found = false;
+    for (uint8 k = 0; k < 8 && !found; ++k)
+    {
+        const float ang = (((dir + k) & 7)) * (M_PI_F / 4.0f);
+        const float nx = x + cosf(ang) * 12.0f, ny = y + sinf(ang) * 12.0f;
+        const float nz = map->GetHeight(nx, ny, z + 5.0f, true);
+        if (nz > INVALID_HEIGHT && fabs(nz - z) < 8.0f)
+        { bestX = nx; bestY = ny; bestZ = nz; found = true; }
+    }
+    if (!found)
+        return;
+
+    if (AiObjectContext* ctx = ai->GetAiObjectContext())
+    {
+        if (TravelTarget* tt = ctx->GetValue<TravelTarget*>("travel target")->Get())
+            tt->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+        ctx->GetValue<bool>("travel target active")->Reset();
+        ctx->GetValue<GuidPosition>("rpg target")->Reset();
+    }
+
+    bot->NearTeleportTo(bestX, bestY, bestZ + 0.5f, bot->GetOrientation());
+    { std::lock_guard<std::mutex> lk(mx); St& s = track[bot->GetGUIDLow()]; s.x = bestX; s.y = bestY; s.sinceMs = now; }
+
+    FILE* f = fopen("logs/freeze_fix.csv", "a");
+    if (!f) f = fopen("../logs/freeze_fix.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,map%u,from=%.0f|%.0f,to=%.0f|%.0f\n",
+            sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), bot->GetMapId(), x, y, bestX, bestY);
+        fclose(f);
+    }
+}
+
+// ANTI-IDLE: the dominant remaining waste is bots STANDING with no active travel goal (travelStatus
+// COOLDOWN/EXPIRED, 95 of ~142 idle bots) -- they loop "choose travel target"/"request quest travel"
+// and never actually move or fight. When a bot has been genuinely idle (net displacement <3y for >5s)
+// while alive, out of combat, and NOT doing a legit stationary thing (cast/loot/eat), force it to be
+// productive: engage the nearest grind mob ("attack anything"), or if none is claimable, roam ("move
+// random") so it travels toward content instead of standing. This converts IDLE seconds into
+// MOVE/MELEE/CAST -- the machine-gun-activity goal. Logged to logs/antiidle.csv (always-on) with what
+// it did, so its effect is measurable and it can't silently inflate anything.
+static void AntiIdleAction(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive())
+        return;
+    if (bot->IsInCombat() || !bot->getAttackers().empty())
+        return;
+    if (bot->IsTaxiFlying() || bot->IsBeingTeleported() || bot->IsFalling() || bot->GetTransport())
+        return;
+    if (bot->IsNonMeleeSpellCasted(true, false, true) || !bot->IsStandState())
+        return;                                    // casting or sitting (eat/drink) is fine
+    if (bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING) || !ai->CanMove())
+        return;
+    // Never poke a bot that is ACTIVELY MOVING. The net-displacement gate below (<3y over 5s) is
+    // satisfied by a ZIGZAGGING bot, so anti-idle kept injecting "move random" into an already
+    // contested movement decision -- one of the owners behind the watched forward-back-forward
+    // ping-pong (Dreligs: 12 direction reversals/min alternating rpg/random/travel moves).
+    if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+        return;
+    // Don't fight the engine when it HAS a live travel goal it's actively working. (Forcing grind/roam
+    // on bots stuck FAR from an objective was tried and reverted -- it pulled unwinnable fights and
+    // raised DEAD. Bots stuck en route to an unreachable objective are handled by the travel-freeze
+    // breaker / FreezeNudge instead.)
+    if (AiObjectContext* ctx = ai->GetAiObjectContext())
+    {
+        if (TravelTarget* tt = ctx->GetValue<TravelTarget*>("travel target")->Get())
+        {
+            const TravelStatus st = tt->GetStatus();
+            if (st == TravelStatus::TRAVEL_STATUS_TRAVEL || st == TravelStatus::TRAVEL_STATUS_READY ||
+                st == TravelStatus::TRAVEL_STATUS_WORK)
+                return;
+        }
+    }
+
+    struct St { float x; float y; uint32 sinceMs; uint32 lastActMs; uint8 dir; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const uint32 now = WorldTimer::getMSTime();
+    const float x = bot->GetPositionX(), y = bot->GetPositionY(), z = bot->GetPositionZ();
+
+    uint8 dir;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        if (!s.sinceMs) { s.x = x; s.y = y; s.sinceMs = now; return; }
+        const float dx = x - s.x, dy = y - s.y;
+        if (dx * dx + dy * dy >= 3.0f * 3.0f) { s.x = x; s.y = y; s.sinceMs = now; return; }   // moving
+        if (now - s.sinceMs < 5000) return;                        // not idle long enough
+        if (s.lastActMs && now - s.lastActMs < 3000) return;       // throttle forced actions
+        s.dir = (s.dir + 3) & 7; dir = s.dir;
+        s.lastActMs = now; s.sinceMs = now; s.x = x; s.y = y;
+    }
+
+    // grind the nearest claimable mob; if none, roam toward content via the normal (pathfinding)
+    // wander. NOTE: a straight-line WALK fallback for stuck bots was tried and REVERTED -- ignoring
+    // collision walked them into mobs/terrain and raised DEAD 15%->18% for no idle/move gain. Stuck
+    // bots the pathfinder can't move are left to FreezeNudge (far fleet only) or to stand near players.
+    (void)dir;
+    bool acted = ai->DoSpecificAction("attack anything", Event(), true);
+    const char* what = "attack";
+    if (!acted) { acted = ai->DoSpecificAction("move random", Event(), true); if (acted) what = "roam"; }
+
+    FILE* f = fopen("logs/antiidle.csv", "a");
+    if (!f) f = fopen("../logs/antiidle.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,map%u,%.0f|%.0f,%s,acted%d\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+            bot->GetName(), bot->GetMapId(), x, y, what, acted ? 1 : 0);
+        fclose(f);
+    }
+}
+
+// HOPELESS-FIGHT BREAKER. A bot that fights the SAME victim for 60s+ WITHOUT denting its health is in
+// an unwinnable engagement -- watched Rogerolan melee an Apprentice Training Dummy (1.1M HP, level 1,
+// passes every filter) for 20+ minutes with zero XP; also catches evade-mode / unhittable mobs. A real
+// player gives up in seconds. Track (victim, firstHP) per bot; if after 60s the victim is still at
+// >=97% of the HP it had when we started watching, drop the target and walk away. The grind filter
+// (GrindTargetValue: >40x HP pool reject) prevents instant re-pick of dummies.
+static void HopelessFightBreaker(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive() || !bot->IsInCombat())
+        return;
+    Unit* victim = bot->GetVictim();
+    if (!victim || !victim->IsAlive())
+        return;
+    if (!bot->getAttackers().empty() && bot->getAttackers().count(victim))
+        return;                                   // it's actually fighting BACK -> not a dummy-type sink
+
+    struct St { uint64 g; uint32 sinceMs; uint32 firstHp; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const uint32 now = WorldTimer::getMSTime();
+    const uint64 g = victim->GetObjectGuid().GetRawValue();
+
+    bool hopeless = false;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        if (s.g != g || !s.sinceMs)
+        {
+            s.g = g; s.sinceMs = now; s.firstHp = victim->GetHealth();
+            return;
+        }
+        if (victim->GetHealth() < s.firstHp * 0.97f)
+        {
+            s.sinceMs = now; s.firstHp = victim->GetHealth();   // making progress -> slide window
+            return;
+        }
+        if (now - s.sinceMs >= 60000)
+        {
+            hopeless = true;
+            s.g = 0; s.sinceMs = 0;                             // reset so we don't re-fire instantly
+        }
+    }
+    if (!hopeless)
+        return;
+
+    bot->AttackStop();
+    bot->InterruptNonMeleeSpells(false);
+    if (AiObjectContext* ctx = ai->GetAiObjectContext())
+    {
+        ctx->GetValue<Unit*>("current target")->Set(nullptr);
+        ctx->GetValue<ObjectGuid>("attack target")->Set(ObjectGuid());
+    }
+    ai->StopMoving();
+
+    FILE* f = fopen("logs/antiidle.csv", "a");
+    if (!f) f = fopen("../logs/antiidle.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,map%u,%.0f|%.0f,giveup:%s,acted1\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+            bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), victim->GetName());
+        fclose(f);
+    }
+}
+
+// AUTO-AMMO. Same silent-degradation family as durability: the factory stocks ammo at creation and
+// NOTHING refills it, so hunters/throwers/gunners shoot dry and are stuck as weak melee forever
+// (measured: 6 hunters failing "concussive shot", Hurtian failing "throw", a gunner failing "shoot
+// gun" -- all SPELL_FAILED_EQUIPPED_ITEM_CLASS = no ammo). Ammo is invisible to other players;
+// PlayerbotFactory::InitAmmo is idempotent (tops up only when low), so just call it periodically.
+static void AutoAmmo(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+        return;
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> last;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = last[bot->GetGUIDLow()];
+        if (t && now - t < 180000) return;      // every 3 min
+        t = now;
+    }
+    if (!bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED))
+        return;
+    const uint32 beforeEntry = bot->GetUInt32Value(PLAYER_AMMO_ID);
+    const uint32 beforeCount = beforeEntry ? bot->GetItemCount(beforeEntry) : 0;
+    PlayerbotFactory factory(bot, bot->GetLevel());
+    factory.InitAmmo();
+    const uint32 afterEntry = bot->GetUInt32Value(PLAYER_AMMO_ID);
+    const uint32 afterCount = afterEntry ? bot->GetItemCount(afterEntry) : 0;
+    if (afterCount > beforeCount || afterEntry != beforeEntry)
+    {
+        FILE* f = fopen("logs/antiidle.csv", "a");
+        if (!f) f = fopen("../logs/antiidle.csv", "a");
+        if (f)
+        {
+            fprintf(f, "%s,%s,map%u,%.0f|%.0f,ammo:%u->%u,acted1\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+                bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), beforeCount, afterCount);
+            fclose(f);
+        }
+    }
+}
+
+// QUEST-LOOP BREAKER (kill-the-same-mob-forever). At contested camps (Princess), the quest DROP is
+// often unobtainable in practice (crowd taps, group combat never clears) -- the router then re-sends
+// the bot at the same mob forever: watched bots kill Princess 20+ times each with zero collars ever
+// obtained. A real player gives up on a camped objective and does other quests. If a bot kills the
+// SAME creature entry 6+ times within 20 minutes while its travel objective points at that entry,
+// blacklist the objective for 2 hours and expire the travel target so it re-plans elsewhere.
+static uint32 QuestProgressChecksum(Player* bot)
+{
+    // Sum of all kill-credit and item-collection progress across the quest log. If this number moved,
+    // the bot IS progressing and must not be loop-broken.
+    uint32 sum = 0;
+    for (auto const& qs : bot->getQuestStatusMap())
+    {
+        for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+        {
+            sum += qs.second.m_creatureOrGOcount[i];
+            sum += qs.second.m_itemcount[i];
+        }
+    }
+    return sum;
+}
+
+static void QuestLoopBreaker(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive())
+        return;
+    struct St { uint32 entry; uint32 count; uint32 sinceMs; uint32 lastVictimEntry; uint8 prevCombat; uint32 progressSum; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const uint32 now = WorldTimer::getMSTime();
+    const bool inCombat = bot->IsInCombat();
+
+    uint32 loopedEntry = 0;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        if (inCombat)
+        {
+            if (Unit* v = bot->GetVictim())
+                if (v->GetObjectGuid().IsCreature())
+                    s.lastVictimEntry = v->GetObjectGuid().GetEntry();
+        }
+        else if (s.prevCombat == 1 && s.lastVictimEntry)
+        {
+            // combat just ended; count a kill-ish cycle of that entry
+            if (s.entry != s.lastVictimEntry || now - s.sinceMs > 1200000)
+            { s.entry = s.lastVictimEntry; s.count = 0; s.sinceMs = now; s.progressSum = QuestProgressChecksum(bot); }
+            if (++s.count >= 6)
+            {
+                // Only a LOOP if the quest log made NO progress across those kills. v1 fired on ANY
+                // 6 kills of the router's entry -- booting bots off healthy kill-credit camps
+                // (Stonetusk Boar!) and cratering XP. Kill quests advance m_creatureOrGOcount and
+                // collect quests advance m_itemcount; if either moved, this camp is WORKING.
+                const uint32 nowSum = QuestProgressChecksum(bot);
+                if (nowSum == s.progressSum)
+                    loopedEntry = s.entry;
+                s.count = 0; s.sinceMs = now; s.progressSum = nowSum;
+            }
+            s.lastVictimEntry = 0;
+        }
+        s.prevCombat = inCombat ? 1 : 0;
+    }
+    if (!loopedEntry)
+        return;
+
+    AiObjectContext* ctx = ai->GetAiObjectContext();
+    if (!ctx) return;
+    TravelTarget* tt = ctx->GetValue<TravelTarget*>("travel target")->Get();
+    if (!tt || !tt->GetDestination() || tt->GetEntry() != (int32)loopedEntry)
+        return;                                   // only break loops the ROUTER is driving
+    // ...and ONLY for QUEST-objective destinations. v2 still misfired on GRIND destinations: a bot
+    // grinding boars for XP has zero quest-log progress by definition, so the checksum gate passed
+    // and healthy grind camps got blacklisted. Grinding is self-justifying (XP); only a quest
+    // objective that yields neither progress nor its drop across 6 kills is a genuine dead loop.
+    if (!dynamic_cast<QuestTravelDestination*>(tt->GetDestination()))
+        return;
+
+    // OBSERVE-ONLY (v4): three iterations of in-session blacklisting (v1 any-kills, v2 zero-progress,
+    // v3 quest-only) all misfired enough to depress fleet XP -- a single bot's 6-kill window is too
+    // noisy a signal to act on live. The breaker now only RECORDS the verdict; the cross-run quest
+    // manager (failure_count>=20 across many bots/runs -> boot-loaded travel penalty) makes the
+    // actual skip decision with real statistics. In-session, the existing per-guid mechanisms
+    // (travel-freeze breaker, foreign-loot defer) still bound the worst waste.
+
+    // QUEST MANAGER MEMORY: persist the verdict so skips accumulate ACROSS runs. Each loop-break adds
+    // 6 failures to ai_playerbot_objective_stats; at failure_count>=20 with learned_penalty>0 the
+    // next boot loads it as a standing travel penalty (>=2.5 = suppressed destination) -- chronically
+    // broken objectives (contested camps, unobtainable drops) get fleet-wide skipped without code.
+    WorldDatabase.PExecute(
+        "INSERT INTO ai_playerbot_objective_stats "
+        "(objective_type, quest_id, entry, name, attempt_count, failure_count, learned_penalty, last_failure_reason, first_seen_at, last_seen_at) "
+        "SELECT 'interaction', 0, %u, 'questloop', 0, 0, 0, '', NOW(), NOW() FROM DUAL "
+        "WHERE NOT EXISTS (SELECT 1 FROM ai_playerbot_objective_stats WHERE objective_type='interaction' AND entry=%u AND name='questloop')",
+        loopedEntry, loopedEntry);
+    WorldDatabase.PExecute(
+        "UPDATE ai_playerbot_objective_stats SET failure_count=failure_count+6, attempt_count=attempt_count+6, "
+        "learned_penalty=GREATEST(learned_penalty, 3.0), pain_score=pain_score+1, "
+        "last_failure_reason='quest-drop-unobtainable-loop', last_seen_at=NOW() "
+        "WHERE objective_type='interaction' AND entry=%u AND name='questloop'",
+        loopedEntry);
+
+    FILE* f = fopen("logs/antiidle.csv", "a");
+    if (!f) f = fopen("../logs/antiidle.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,map%u,%.0f|%.0f,questloop:entry=%u,acted1\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+            bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), loopedEntry);
+        fclose(f);
+    }
+}
+
+// LOOT UNDER (GROUP) FIRE. At contested camps, grouped bots share the group's combat state -- the
+// combat engine has NO loot actions, so a follower who kills its quest mob stands next to the corpse
+// "in combat" (because the group keeps fighting) until the loot target times out; quest drops are
+// never collected (watched Seranon at the Princess camp: loot1 flag up for a minute, never opened).
+// A real player grabs the loot between swings when nobody is hitting HIM. If the bot is in combat but
+// has NO personal attackers, and a lootable corpse is within reach, poke the loot chain directly.
+static void LootUnderFire(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive())
+        return;
+    if (!bot->IsInCombat() || !bot->getAttackers().empty())
+        return;                                    // only the group-combat-but-personally-safe case
+    if (bot->IsNonMeleeSpellCasted(true, false, true) || bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING))
+        return;
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> last;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = last[bot->GetGUIDLow()];
+        if (t && now - t < 3000) return;
+        t = now;
+    }
+    AiObjectContext* ctx = ai->GetAiObjectContext();
+    if (!ctx || !ctx->GetValue<bool>("has available loot")->Get())
+        return;
+    if (ai->DoSpecificAction("loot", Event(), true))
+    {
+        FILE* f = fopen("logs/antiidle.csv", "a");
+        if (!f) f = fopen("../logs/antiidle.csv", "a");
+        if (f)
+        {
+            fprintf(f, "%s,%s,map%u,%.0f|%.0f,lootfire,acted1\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+                bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY());
+            fclose(f);
+        }
+    }
+}
+
+// GRAVITY SETTLE. Bots have no client, hence no gravity. Navmesh path points sit ABOVE true ground
+// (Recast poly height + 0.5y pad), and while WALKING the bot's Z rides the spline between them --
+// observers' clients smooth moving units so that looks fine. The float appears on STOP: natural
+// spline completion settles (fixed earlier in Unit::UpdateSplineMovement), but bots overwhelmingly
+// stop by INTERRUPT (StopMoving / motion-clear on "close enough" / re-decisions -- 56 callsites),
+// which freezes the server Z at the last mid-spline interpolated height (up to ~1y high) and skips
+// the arrival settle. This helper is the missing gravity: drop a stationary bot to the walkable
+// surface under it (vmap height => bridges/WMO floors respected; water/flying/falling exempt).
+// Called from StopMoving (instant, the dominant stop path) and the 1/sec supervisor sweep (catch-all).
+static void SettleToGround(Player* bot)
+{
+    if (!bot || !bot->IsInWorld() || !bot->GetMap() || !bot->IsAlive())
+        return;
+    if (bot->IsTaxiFlying() || bot->IsFlying() || bot->IsBeingTeleported() || bot->IsFalling() ||
+        bot->IsInWater() || bot->HasMovementFlag(MOVEFLAG_SWIMMING) || bot->GetTransport())
+        return;
+    const float x = bot->GetPositionX(), y = bot->GetPositionY(), z = bot->GetPositionZ();
+    const float ground = bot->GetMap()->GetHeight(x, y, z + 0.5f, true);
+    if (ground > INVALID_HEIGHT && z - ground > 0.05f && z - ground < 5.0f)
+    {
+        // NearTeleportTo, NOT raw Relocate: Relocate skips map/grid relocation bookkeeping and is a
+        // suspect for the "Removing object which is already removed" SIGSEGV. NearTeleportTo does the
+        // full safe path and a sub-yard Z drop renders as the bot simply standing grounded.
+        bot->NearTeleportTo(x, y, ground, bot->GetOrientation());
+    }
+}
+
+// NO-PROGRESS GRIND FALLBACK. The fleet MOVES 54% of the time (more than real players) but is in
+// combat only ~13% (report target 30-47%): bots wander between distant quest objectives that mostly
+// never complete (quest progression ~4%), earning ~1k XP/hr vs the 10-15k target. A real player who
+// notices he's made no progress stops wandering and grinds where he stands. If a bot has gained ZERO
+// xp for 10+ minutes while alive (and isn't currently fighting/eating), dump its travel target and
+// force a grind engagement in the local area -- kills, loot, and chain-pulls all work now, so local
+// farming is productive. XP gain resets the clock naturally.
+static void NoProgressGrindFallback(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+        return;
+    if (bot->IsTaxiFlying() || bot->IsBeingTeleported() || !bot->IsStandState())
+        return;
+    if (ai->HasRealPlayerMaster())
+        return;
+
+    struct St { uint32 lvl; uint32 xp; uint32 sinceMs; uint32 lastActMs; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        const uint32 lvl = bot->GetLevel(), xp = bot->GetUInt32Value(PLAYER_XP);
+        if (!s.sinceMs || s.lvl != lvl || s.xp != xp)
+        {
+            s.lvl = lvl; s.xp = xp; s.sinceMs = now;
+            return;
+        }
+        if (now - s.sinceMs < 600000) return;                    // <10 min without xp -> fine
+        if (s.lastActMs && now - s.lastActMs < 30000) return;    // retry at most every 30s
+        s.lastActMs = now;
+    }
+
+    if (AiObjectContext* ctx = ai->GetAiObjectContext())
+    {
+        if (TravelTarget* tt = ctx->GetValue<TravelTarget*>("travel target")->Get())
+        {
+            tt->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+            tt->SetForced(false);
+        }
+        ctx->GetValue<bool>("travel target active")->Reset();
+    }
+    const bool acted = ai->DoSpecificAction("attack anything", Event(), true);
+
+    FILE* f = fopen("logs/antiidle.csv", "a");
+    if (!f) f = fopen("../logs/antiidle.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,map%u,%.0f|%.0f,noprogress-grind,acted%d\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+            bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), acted ? 1 : 0);
+        fclose(f);
+    }
+}
+
+// CHAIN-PULL. A real efficient player already KNOWS the next mob before the current one dies and
+// transitions kill -> loot -> next pull in seconds; our bots instead re-ran the whole strategy churn
+// (travel/rpg/choose-target) after every kill, leaving multi-second dead-air. On the combat->done
+// transition, immediately poke "attack anything": its own isUseful() correctly declines when loot is
+// pending (loot first) or HP is low (eat first, engage-gate), so this only fires when the right next
+// action IS another pull -- making the decision instant instead of re-thought.
+static void ChainPullNext(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive())
+        return;
+    struct St { uint8 prevCombat; uint32 endedMs; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const bool inCombat = bot->IsInCombat();
+    const uint32 now = WorldTimer::getMSTime();
+    bool readyToChain = false;
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        if (s.prevCombat == 1 && !inCombat)
+            s.endedMs = now;                       // combat just ended -> start the loot grace window
+        s.prevCombat = inCombat ? 1 : 0;
+        if (inCombat)
+            s.endedMs = 0;
+        // Chain 2s AFTER the kill, not instantly: the corpse takes a moment to register in the
+        // "available loot" stack, and the instant poke was outracing it -- watched Duzvurdur kill and
+        // sprint at the next mob 1s later, never looting (fleet LOOT share ~0.1%, weak gold). The 2s
+        // grace lets the loot action (rel 6.0) win first; attack-anything's own isUseful still
+        // declines while loot is pending, so this only delays, never double-fires.
+        if (s.endedMs && now - s.endedMs >= 2000 && now - s.endedMs < 6000)
+        {
+            readyToChain = true;
+            s.endedMs = 0;
+        }
+    }
+    if (!readyToChain || bot->GetHealthPercent() < 55.0f)
+        return;
+
+    if (ai->DoSpecificAction("attack anything", Event(), true))
+    {
+        FILE* f = fopen("logs/antiidle.csv", "a");
+        if (!f) f = fopen("../logs/antiidle.csv", "a");
+        if (f)
+        {
+            fprintf(f, "%s,%s,map%u,%.0f|%.0f,chain,acted1\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+                bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY());
+            fclose(f);
+        }
+    }
+}
+
+// AUTO-REPAIR. Bots almost never visit repair vendors (the only wiring is an RPG-idle flavor action
+// at relevance 1.095), so gear degrades to ZERO over deaths -- verified: Thuskey, 16 deaths in 13 min,
+// EVERY equipped item at durability 0, fighting a level-appropriate mob with fists and losing -- the
+// self-perpetuating death spiral (death -> broken gear -> weaker -> death). Durability has NO visual
+// to other players, so repairing in place is immersion-safe; charge the bot's gold when it can afford
+// it (the vendor-trip gold sink real players pay), free only when broke (a broken bot can't earn).
+static void AutoRepair(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat())
+        return;
+    struct St { uint32 lastMs; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> last;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = last[bot->GetGUIDLow()];
+        if (t && now - t < 120000) return;      // check every 2 min
+        t = now;
+    }
+
+    // worst equipped durability pct
+    float worst = 1.0f;
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item) continue;
+        const uint32 maxDur = item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY);
+        if (!maxDur) continue;
+        const float pct = (float)item->GetUInt32Value(ITEM_FIELD_DURABILITY) / (float)maxDur;
+        if (pct < worst) worst = pct;
+    }
+    if (worst >= 0.35f)
+        return;
+
+    const uint32 moneyBefore = bot->GetMoney();
+    bot->DurabilityRepairAll(true, 1.0f);       // charges gold like a vendor
+    if (bot->GetMoney() == moneyBefore)
+        bot->DurabilityRepairAll(false, 1.0f);  // too broke -> free repair (keep the bot functional)
+
+    FILE* f = fopen("logs/antiidle.csv", "a");
+    if (!f) f = fopen("../logs/antiidle.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,map%u,%.0f|%.0f,repair:worst=%.0f%%,acted1\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+            bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), worst * 100.0f);
+        fclose(f);
+    }
+}
+
+// STUCK-GHOST RESCUE. Dead bots release and run to their corpse; when the ghost's path fails (navmesh
+// hole) it stands at the graveyard FOREVER (watched Tarinari: 100% DEAD for 20+ minutes, position
+// frozen). A ghost is INVISIBLE to living players, so teleporting it to its corpse is immersion-safe
+// even in supervisor mode near players -- observers only ever see the bot pop back up at its corpse,
+// which is exactly what a normal res looks like. Frozen (<8y net) for 30s+ as a ghost -> teleport to
+// corpse so ReviveFromCorpseAction can reclaim.
+static void GhostRescue(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || bot->IsAlive() || !bot->GetMap())
+        return;
+    if (!bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+        return;                                   // not released yet (corpse still held) -> engine handles
+    Corpse* corpse = bot->GetCorpse();
+    if (!corpse || corpse->GetMapId() != bot->GetMapId())
+        return;
+
+    struct St { float x; float y; uint32 sinceMs; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const uint32 now = WorldTimer::getMSTime();
+    const float x = bot->GetPositionX(), y = bot->GetPositionY();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        St& s = track[bot->GetGUIDLow()];
+        if (!s.sinceMs) { s.x = x; s.y = y; s.sinceMs = now; return; }
+        const float dx = x - s.x, dy = y - s.y;
+        if (dx * dx + dy * dy >= 8.0f * 8.0f) { s.x = x; s.y = y; s.sinceMs = now; return; }
+        if (now - s.sinceMs < 30000) return;
+        s.x = corpse->GetPositionX(); s.y = corpse->GetPositionY(); s.sinceMs = now;
+    }
+
+    bot->NearTeleportTo(corpse->GetPositionX(), corpse->GetPositionY(), corpse->GetPositionZ() + 0.5f,
+        bot->GetOrientation());
+
+    FILE* f = fopen("logs/freeze_fix.csv", "a");
+    if (!f) f = fopen("../logs/freeze_fix.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,map%u,from=%.0f|%.0f,to=%.0f|%.0f,GHOST\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+            bot->GetName(), bot->GetMapId(), x, y, corpse->GetPositionX(), corpse->GetPositionY());
+        fclose(f);
+    }
+}
+
+// DEBUG: an idle bot near a real player SAYs what it is thinking/trying (~1/sec) so you can read its
+// "thoughts" in local /say right next to it and see WHY it's standing: its last action, current
+// target, travel destination, and the ms until its NEXT decision (that number counts DOWN during a
+// freeze, so you literally watch the pause). Only fires when the bot is standing still + out of combat
+// (the "sitting idle" state you want to diagnose) and only for bots near a real player (so it's just
+// the ones you're looking at). Gated by the action-log flag -> only the small watched fleet.
+static void DebugSayIdle(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || bot->IsInCombat())
+        return;
+    if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+        return;                                  // only when standing still
+    if (!ai->HasPlayerNearby())
+        return;                                  // only bots near a real player (what you're watching)
+
+    static std::mutex sayMx;
+    static std::unordered_map<uint32, uint32> lastSayMs;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(sayMx);
+        uint32& t = lastSayMs[bot->GetGUIDLow()];
+        if (t && now - t < 1000)
+            return;                              // ~1 line / sec / bot (readable, not spam)
+        t = now;
+    }
+
+    AiObjectContext* ctx = ai->GetAiObjectContext();
+    if (!ctx)
+        return;
+
+    const float bx = bot->GetPositionX(), by = bot->GetPositionY(), bz = bot->GetPositionZ();
+    const Action* la = ai->GetLastExecutedAction(ai->GetState());
+    const std::string actName = la ? const_cast<Action*>(la)->getName() : "idle";
+    Unit* tgt = ctx->GetValue<Unit*>("current target")->Get();
+    TravelTarget* tt = ctx->GetValue<TravelTarget*>("travel target")->Get();
+
+    // Concise line for in-game /say (kept short + now carries the bot's own coordinate).
+    std::ostringstream say;
+    say << "[" << actName << "]";
+    if (tgt)
+        say << " tgt=" << tgt->GetName() << "(" << (int)bot->GetDistance(tgt) << "y)";
+    if (tt && tt->GetDestination())
+        say << " ->" << tt->GetDestination()->GetTitle();
+    say << " next=" << ai->GetAIInternalUpdateDelay() << "ms @" << (int)bx << "," << (int)by;
+    bot->Say(say.str(), LANG_UNIVERSAL);
+
+    // Rich WHY-line to the log: action + coordinate for the bot AND the target/destination, plus the
+    // gates that decide whether it CAN move/act, so a standing-still-but-ticking bot reveals its
+    // blocker (target on another map, no real destination position, movement disallowed, LOS, etc).
+    std::ostringstream log;
+    log << actName
+        << " bot=(" << (int)bx << "," << (int)by << "," << (int)bz << ") map=" << bot->GetMapId()
+        << " mv=" << (sServerFacade.isMoving(bot) ? 1 : 0)
+        << " canMove=" << (ai->CanMove() ? 1 : 0)
+        << " casting=" << (bot->IsNonMeleeSpellCasted(true, false, true) ? 1 : 0);
+    if (tgt)
+        log << " tgt=" << tgt->GetName()
+            << " tgtPos=(" << (int)tgt->GetPositionX() << "," << (int)tgt->GetPositionY() << "," << (int)tgt->GetPositionZ() << ")"
+            << " tgtMap=" << tgt->GetMapId()
+            << " dist=" << (int)bot->GetDistance(tgt)
+            << " los=" << (bot->IsWithinLOSInMap(tgt, true) ? 1 : 0);
+    else
+        log << " tgt=none";
+    if (tt)
+    {
+        log << " travelStatus=" << (int)tt->GetStatus()
+            << " dest=" << (tt->GetDestination() ? tt->GetDestination()->GetTitle() : "null");
+        if (WorldPosition* p = tt->GetPosition())
+            log << " destPos=(" << (int)p->getX() << "," << (int)p->getY() << "," << (int)p->getZ() << ")"
+                << " destMap=" << (int)p->getMapId()
+                << " destDist=" << (int)p->distance(WorldPosition(bot));
+    }
+    else
+        log << " travel=none";
+    log << " next=" << ai->GetAIInternalUpdateDelay() << "ms";
+
+    FILE* f = fopen("logs/bot_thoughts.log", "a");
+    if (!f) f = fopen("../logs/bot_thoughts.log", "a");
+    if (f)
+    {
+        fprintf(f, "%s %s %s\n", sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), log.str().c_str());
+        fclose(f);
+    }
+}
+
+// SUPERVISOR VISIBLE-ACTIVITY TRACKER — the HONEST metric. Classifies each SECOND of a bot's life by
+// what is EXTERNALLY VISIBLE to another player, so we measure ACTION not INTENTION:
+//   DEAD | MOVE (real position change >1.5y) | REGEN (sitting: eat/drink) | CAST (a spell actually in
+//   progress) | MELEE (in combat, victim in reach) | LOOT (loot flag) | else IDLE.
+// Intentions that "execute" but do nothing visible (choose rpg target, rpg work, a filler drink that
+// returns true, target selection) produce NONE of the above -> they fall to IDLE. That is the whole
+// point: the existing apm metric counts any action that returns true (PlayerbotAI.cpp filler bug), so
+// it looks busy while bots stand around; THIS counts only what a bystander would actually see.
+// Writes a per-second row (type S) and a rolling 60s summary (type M, with %s + a true-APM estimate
+// and netMove so "moving flag but not displacing" can't fake movement) to logs/supervisor.csv.
+static void SupervisorTrack(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld())
+        return;
+
+    struct SupState
+    {
+        uint32 lastSampleMs = 0;
+        float lastX = 0, lastY = 0;
+        uint32 winStartSec = 0;
+        float winStartX = 0, winStartY = 0;
+        uint32 secs = 0, moveSec = 0, castSec = 0, meleeSec = 0, lootSec = 0, regenSec = 0, idleSec = 0, combatSec = 0, deadSec = 0;
+        uint32 castStarts = 0, loots = 0;
+        double swingAccum = 0.0;          // fractional auto-attack swings accumulated over melee seconds
+        uint32 lastCastSpellId = 0;
+        bool prevLooting = false;
+    };
+    static std::mutex smx;
+    static std::unordered_map<uint32, SupState> smap;
+
+    const uint32 nowMs = WorldTimer::getMSTime();
+    const uint32 nowSec = (uint32)time(0);
+    const uint32 key = bot->GetGUIDLow();
+
+    std::lock_guard<std::mutex> lk(smx);
+    SupState& s = smap[key];
+    if (s.lastSampleMs && nowMs - s.lastSampleMs < 1000)
+        return;                            // one sample / bot / second
+    const bool firstSample = (s.lastSampleMs == 0);
+    s.lastSampleMs = nowMs;
+
+    const float x = bot->GetPositionX(), y = bot->GetPositionY();
+    if (firstSample) { s.lastX = x; s.lastY = y; s.winStartSec = nowSec; s.winStartX = x; s.winStartY = y; }
+
+    // ---- classify THIS second by externally-visible state ----
+    const bool dead = !bot->IsAlive();
+    const float dx = x - s.lastX, dy = y - s.lastY;
+    const bool moved = (dx * dx + dy * dy) > (1.5f * 1.5f);
+    const bool casting = bot->IsNonMeleeSpellCasted(true, false, true);
+    const bool sitting = !bot->IsStandState();
+    Unit* victim = bot->GetVictim();
+    const bool melee = bot->IsInCombat() && victim && bot->CanReachWithMeleeAutoAttack(victim);
+    const bool looting = bot->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING);
+
+    uint32 curSpellId = 0;
+    if (Spell* sp = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL)) { if (sp->m_spellInfo) curSpellId = sp->m_spellInfo->Id; }
+    if (!curSpellId) { if (Spell* sp = bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL)) { if (sp->m_spellInfo) curSpellId = sp->m_spellInfo->Id; } }
+
+    // discrete visible "press": a spell now in progress that wasn't a second ago
+    if (curSpellId && curSpellId != s.lastCastSpellId)
+        ++s.castStarts;
+    s.lastCastSpellId = curSpellId;
+
+    // discrete loot: rising edge of the looting flag
+    if (looting && !s.prevLooting)
+        ++s.loots;
+    s.prevLooting = looting;
+
+    // bucket the second (movement first: travel is the dominant visible activity; sitting = downtime)
+    const char* vis;
+    if (dead)         { ++s.deadSec;  vis = "DEAD"; }
+    else if (moved)   { ++s.moveSec;  vis = "MOVE"; }
+    else if (sitting) { ++s.regenSec; vis = "REGEN"; }
+    else if (casting) { ++s.castSec;  vis = "CAST"; }
+    else if (melee)   { ++s.meleeSec; vis = "MELEE"; }
+    else if (looting) { ++s.lootSec;  vis = "LOOT"; }
+    else              { ++s.idleSec;  vis = "IDLE"; }
+    if (bot->IsInCombat()) ++s.combatSec;
+    if (melee) { const uint32 at = bot->GetAttackTime(BASE_ATTACK); if (at) s.swingAccum += 1000.0 / at; }
+    ++s.secs;
+    s.lastX = x; s.lastY = y;
+
+    const Action* la = ai->GetLastExecutedAction(ai->GetState());
+    const std::string intend = la ? const_cast<Action*>(la)->getName() : std::string("-");
+    const uint32 maxMana = bot->GetMaxPower(POWER_MANA);
+    const int manaPct = maxMana ? (int)(bot->GetPower(POWER_MANA) * 100 / maxMana) : -1;
+
+    FILE* f = fopen("logs/supervisor.csv", "a");
+    if (!f) f = fopen("../logs/supervisor.csv", "a");
+    if (!f)
+        return;
+
+    fprintf(f, "%s,S,%s,L%u,m%u,%.0f|%.0f,vis=%s,intend=%s,combat%d,mana%d\n",
+        sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), bot->GetLevel(), bot->GetMapId(),
+        x, y, vis, intend.c_str(), bot->IsInCombat() ? 1 : 0, manaPct);
+
+    if (nowSec - s.winStartSec >= 60 && s.secs > 0)
+    {
+        const float netMove = std::sqrt((x - s.winStartX) * (x - s.winStartX) + (y - s.winStartY) * (y - s.winStartY));
+        const uint32 win = s.secs;
+        auto pct = [win](uint32 v) -> uint32 { return (uint32)(100.0 * v / win); };
+        const uint32 castsPM = (uint32)(s.castStarts * 60.0 / win);
+        const uint32 swingsPM = (uint32)(s.swingAccum * 60.0 / win);
+        const uint32 lootsPM = (uint32)(s.loots * 60.0 / win);
+        const uint32 apm = castsPM + swingsPM + lootsPM;
+        const uint32 activePct = pct(s.moveSec + s.castSec + s.meleeSec + s.lootSec);
+        fprintf(f, "%s,M,%s,L%u,m%u,%.0f|%.0f,secs=%u,apm~%u,castsPM=%u,swingsPM~%u,lootsPM=%u,"
+                   "move%%=%u,cast%%=%u,melee%%=%u,loot%%=%u,regen%%=%u,idle%%=%u,active%%=%u,combat%%=%u,netMove=%.0f\n",
+            sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), bot->GetLevel(), bot->GetMapId(),
+            x, y, win, apm, castsPM, swingsPM, lootsPM,
+            pct(s.moveSec), pct(s.castSec), pct(s.meleeSec), pct(s.lootSec), pct(s.regenSec), pct(s.idleSec),
+            activePct, pct(s.combatSec), netMove);
+        s.winStartSec = nowSec; s.winStartX = x; s.winStartY = y;
+        s.secs = s.moveSec = s.castSec = s.meleeSec = s.lootSec = s.regenSec = s.idleSec = s.combatSec = s.deadSec = 0;
+        s.castStarts = s.loots = 0; s.swingAccum = 0.0;
+    }
+    fclose(f);
+}
+
+namespace
+{
+    constexpr uint32 VISIBLE_IDLE_WARN_SECONDS = 5;
+    constexpr uint32 VISIBLE_IDLE_RESCUE_SECONDS = 10;
+
+    // CALCULATED MODE: when false, the metric/snapshot "rescue" cascades that
+    // re-pick the bot's work (clear targets, tear down travel, force moves) are
+    // disabled, leaving TrackActionMetrics / LogVisibleActivitySnapshot to MEASURE
+    // ONLY. The bot is driven solely by its strategy engine. See the matching
+    // kEnableLegacyFastLanes gate in DoNextAction.
+    constexpr bool ENABLE_METRIC_RESCUES = false;
+
     bool IsForegroundPriority(ActivePiorityType type)
     {
         switch (type)
@@ -87,37 +1173,745 @@ namespace
         }
     }
 
-    bool TeleportGhostUnstuck(PlayerbotAI* ai, Player* bot, const WorldPosition& destination, const char* eventName, float radius = 4.0f)
+    // LOD COLD tier: bots with no real player in their zone/map (or an empty server). No
+    // one can see them, so their heavy brain (DoNextAction: travel + decision engine) can
+    // run on a long interval instead of the ~1s background cadence. This is the dominant
+    // CPU saver AND crash-rate reducer (crashes scale with bot-AI execution volume). HOT
+    // (foreground) and WARM (IN_ACTIVE_AREA = a player's own zone) are intentionally NOT
+    // cold, so anything a player could actually see stays responsive.
+    bool IsColdLODPriority(ActivePiorityType type)
     {
-        if (!ai || !bot || !destination)
+        switch (type)
+        {
+        case ActivePiorityType::IN_ACTIVE_MAP:
+        case ActivePiorityType::IN_INACTIVE_MAP:
+        case ActivePiorityType::IN_EMPTY_SERVER:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    uint32 GetSpellInProgressRecheckDelay(uint32 remainingMs)
+    {
+        if (remainingMs > 0)
+            return std::min<uint32>(remainingMs + sPlayerbotAIConfig.reactDelay + sWorld.GetAverageDiff(), 5000);
+
+        // A finished-but-still-current spell should be rechecked quickly so
+        // casters can chain the next spell instead of burning a full reaction delay.
+        return std::max<uint32>(1, std::min<uint32>(sWorld.GetAverageDiff(), 50));
+    }
+
+    bool IsActiveTravelWork(TravelTarget* travelTarget)
+    {
+        if (!travelTarget || !travelTarget->GetDestination() || dynamic_cast<NullTravelDestination*>(travelTarget->GetDestination()))
             return false;
 
-        WorldPosition movePosition = destination;
-        if (radius > 0.0f)
-            movePosition.GetReachableRandomPointOnGround(bot, radius, urand(0, 1));
+        switch (travelTarget->GetStatus())
+        {
+            case TravelStatus::TRAVEL_STATUS_READY:
+            case TravelStatus::TRAVEL_STATUS_TRAVEL:
+            case TravelStatus::TRAVEL_STATUS_WORK:
+                return true;
+            default:
+                return false;
+        }
+    }
 
-        if (!movePosition)
-            movePosition = destination;
+    bool IsPreparedTravelWork(TravelTarget* travelTarget)
+    {
+        return travelTarget && travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_PREPARE;
+    }
 
-        bot->GetMotionMaster()->Clear();
-        const bool teleported = bot->TeleportTo(movePosition.getMapId(), movePosition.getX(), movePosition.getY(), movePosition.getZ(), movePosition.getO(), 0);
-        if (!teleported)
+    bool IsVisibleTargetWork(Player* bot, Unit* target, bool targetMovementProgress)
+    {
+        if (!bot || !target)
             return false;
 
-        if (bot->isRealPlayer())
-            bot->SendHeartBeat();
+        if (bot->IsNonMeleeSpellCasted(true, false, true))
+            return true;
+
+        if (targetMovementProgress)
+            return true;
+
+        return bot->GetVictim() == target &&
+               bot->CanReachWithMeleeAutoAttack(target) &&
+               bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+    }
+
+    bool IsChasingTarget(Player* bot, Unit* target)
+    {
+        if (!bot || !target)
+            return false;
+
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (!mm || mm->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
+            return false;
+
+        Unit* chaseTarget = sServerFacade.GetChaseTarget(bot);
+        return chaseTarget &&
+               chaseTarget->GetObjectGuid() == target->GetObjectGuid() &&
+               (sServerFacade.isMoving(bot) || !bot->IsStopped() || bot->isMovingOrTurning());
+    }
+
+    bool HasUsefulAssignedWork(Player* bot, TravelTarget* travelTarget, Unit* target, LootObject lootTarget,
+        bool movingAfter, bool directMovementIssued = false)
+    {
+        // A queued target/loot/travel object is not useful by itself. It only
+        // counts when the bot is visibly acting on it, otherwise stale plans can
+        // reset the idle clock forever while the bot stands still.
+        const bool movingOnDirectedWork =
+            movingAfter &&
+            (directMovementIssued || IsActiveTravelWork(travelTarget) || IsPreparedTravelWork(travelTarget) ||
+                !lootTarget.IsEmpty());
+
+        return (bot && bot->IsNonMeleeSpellCasted(true, false, true)) ||
+               IsVisibleTargetWork(bot, target, target && IsChasingTarget(bot, target)) ||
+               movingOnDirectedWork;
+    }
+
+    bool HasConcreteRecoveryWork(Player* bot, TravelTarget* travelTarget, Unit* target, LootObject lootTarget,
+        bool movingAfter, bool directTravelMovementIssued = false, bool allowConnectedMelee = true)
+    {
+        if (!bot)
+            return false;
+
+        if (bot->IsNonMeleeSpellCasted(true, false, true))
+            return true;
+
+        if (allowConnectedMelee &&
+            target &&
+            bot->GetVictim() == target &&
+            bot->CanReachWithMeleeAutoAttack(target) &&
+            bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING))
+            return true;
+
+        // Movement requests are only concrete recovery when they are attached to
+        // real travel/loot work. Target/RPG nudges must prove themselves via
+        // actual movement progress on the next metric tick.
+        return movingAfter &&
+               directTravelMovementIssued &&
+               (IsActiveTravelWork(travelTarget) || IsPreparedTravelWork(travelTarget) || !lootTarget.IsEmpty());
+    }
+
+    bool HasDirectedMovementWork(TravelTarget* travelTarget, GuidPosition rpgTarget,
+        bool travelMoved, bool rpgMoved, bool movingAfter)
+    {
+        if (!movingAfter)
+            return false;
+
+        return (travelMoved && (IsActiveTravelWork(travelTarget) || IsPreparedTravelWork(travelTarget))) ||
+               (rpgMoved && rpgTarget);
+    }
+
+    bool HasFallbackMovementWork(bool randomMoved, bool idleNudged, bool movingAfter)
+    {
+        return movingAfter && (randomMoved || idleNudged);
+    }
+
+    bool RequestGrindTravelFallback(PlayerbotAI* ai, AiObjectContext* context, Player* bot, char const* reason);
+    bool ForceIdleRescueNudge(PlayerbotAI* ai, Player* bot, char const* reason);
+    bool ForceConcreteTargetWork(PlayerbotAI* ai, Player* bot, Unit* target, char const* reason);
+    bool ForceCombatConnect(PlayerbotAI* ai, Player* bot, Unit* target, char const* reason);
+
+    struct IdleRescueFailureState
+    {
+        uint32 failures = 0;
+        time_t firstFailure = 0;
+        time_t lastFailure = 0;
+    };
+
+    std::mutex s_idleRescueFailureMutex;
+    std::unordered_map<uint32, IdleRescueFailureState> s_idleRescueFailures;
+
+    void ResetTargetScanCaches(AiObjectContext* context)
+    {
+        if (!context)
+            return;
+
+        context->GetValue<std::list<ObjectGuid>>("possible targets")->Reset();
+        context->GetValue<std::list<ObjectGuid>>("possible targets no los")->Reset();
+        context->GetValue<std::list<ObjectGuid>>("possible attack targets")->Reset();
+        context->GetValue<std::list<ObjectGuid>>("attackers")->Reset();
+        context->GetValue<Unit*>("grind target")->Reset();
+    }
+
+    void ClearCurrentCombatTarget(AiObjectContext* context, Player* bot, Unit* target, bool stopCombat)
+    {
+        if (!context || !bot)
+            return;
+
+        if (target && bot->GetVictim() == target)
+            bot->AttackStop(true);
+
+        context->GetValue<Unit*>("old target")->Reset();
+        context->GetValue<Unit*>("current target")->Reset();
+        context->GetValue<Unit*>("pull target")->Reset();
+        context->GetValue<Unit*>("dps target")->Reset();
+        context->GetValue<ObjectGuid>("attack target")->Reset();
+        bot->SetSelectionGuid(ObjectGuid());
+        bot->SetTargetGuid(ObjectGuid());
+
+        if (stopCombat)
+            bot->CombatStop(false);
+
+        ResetTargetScanCaches(context);
+    }
+
+    uint32 RegisterIdleRescueNudgeFailure(Player* bot)
+    {
+        if (!bot)
+            return 0;
+
+        std::lock_guard<std::mutex> lock(s_idleRescueFailureMutex);
+        const time_t now = time(nullptr);
+        IdleRescueFailureState& state = s_idleRescueFailures[bot->GetGUIDLow()];
+
+        if (!state.lastFailure || now > state.lastFailure + 90)
+        {
+            state.failures = 0;
+            state.firstFailure = now;
+        }
+
+        state.lastFailure = now;
+        return ++state.failures;
+    }
+
+    void ResetIdleRescueNudgeFailures(Player* bot)
+    {
+        if (!bot)
+            return;
+
+        std::lock_guard<std::mutex> lock(s_idleRescueFailureMutex);
+        s_idleRescueFailures.erase(bot->GetGUIDLow());
+    }
+
+    void ClearAutonomousIdleWorkState(PlayerbotAI* ai, Player* bot)
+    {
+        if (!ai || !bot)
+            return;
+
+        AiObjectContext* context = ai->GetAiObjectContext();
+        if (!context)
+            return;
+
+        TravelTarget* travelTarget = context->GetValue<TravelTarget*>("travel target")->Get();
+        if (travelTarget)
+        {
+            travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+            travelTarget->SetForced(false);
+        }
+
+        ClearCurrentCombatTarget(context, bot, context->GetValue<Unit*>("current target")->Get(), false);
+        context->GetValue<LootObject>("loot target")->Reset();
+        context->GetValue<GuidPosition>("rpg target")->Reset();
+        context->GetValue<bool>("travel target active")->Reset();
+        context->GetValue<ObjectGuid>("attack target")->Reset();
+        context->ClearValues("no active travel destinations");
+    }
+
+    bool HardRescueIdleBotToHomebind(PlayerbotAI* ai, Player* bot, char const* reason, char const* source, uint32 failures)
+    {
+        if (!ai || !bot || !bot->IsInWorld() || bot->isRealPlayer() || bot->IsBeingTeleported() ||
+            bot->InBattleGround() || sServerFacade.UnitIsDead(bot) || sServerFacade.IsInCombat(bot) ||
+            ai->HasActivePlayerMaster() || ai->HasRealPlayerMaster())
+            return false;
+
+        const uint32 oldMap = bot->GetMapId();
+        const float oldX = bot->GetPositionX();
+        const float oldY = bot->GetPositionY();
+        const float oldZ = bot->GetPositionZ();
+
+        ClearAutonomousIdleWorkState(ai, bot);
+        bot->InterruptMoving(true);
+
+        const bool teleported = bot->TeleportToHomebind(0, false);
+        if (teleported)
+            ResetIdleRescueNudgeFailures(bot);
 
         if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
         {
             std::ostringstream out;
-            out << "map=" << movePosition.getMapId()
-                << " x=" << movePosition.getX()
-                << " y=" << movePosition.getY()
-                << " z=" << movePosition.getZ();
-            sPlayerbotAIConfig.logEvent(ai, eventName, "", out.str());
+            out << "reason=" << (reason ? reason : "idle-rescue")
+                << " source=" << (source ? source : "unknown")
+                << " failures=" << failures
+                << " teleported=" << (teleported ? 1 : 0)
+                << " oldMap=" << oldMap
+                << " oldX=" << std::fixed << std::setprecision(2) << oldX
+                << " oldY=" << oldY
+                << " oldZ=" << oldZ;
+            sPlayerbotAIConfig.logEvent(ai, "IdleRescueHomebind", "", out.str());
         }
 
+        return teleported;
+    }
+
+    bool MoveAssignedTravelWork(PlayerbotAI* ai, AiObjectContext* context, Player* bot, char const* reason)
+    {
+        if (!ai || !context || !bot)
+            return false;
+
+        TravelTarget* travelTarget = context->GetValue<TravelTarget*>("travel target")->Get();
+        if (!travelTarget)
+            return false;
+
+        if (travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_PREPARE)
+        {
+            ai->DoSpecificAction("choose travel target",
+                Event(reason ? reason : "assigned travel", "resolve assigned travel work", bot), true);
+            travelTarget = context->GetValue<TravelTarget*>("travel target")->Get();
+        }
+
+        if (!IsActiveTravelWork(travelTarget))
+            return false;
+
+        Event moveEvent(reason ? reason : "assigned travel", "move assigned travel work", bot);
+        bool moved = ai->DoSpecificAction("move to travel target", moveEvent, true);
+        if (!moved && ai->CanMove())
+        {
+            // Hard-idle rescue is allowed to bypass isUseful(): a READY/TRAVEL/WORK
+            // destination is concrete work, and stale "already moving" state must not
+            // leave the bot standing still with a valid travel target.
+            MoveToTravelTargetAction forcedMove(ai);
+            moved = forcedMove.Execute(moveEvent);
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason=" << (reason ? reason : "assigned-travel")
+                    << " status=" << static_cast<uint32>(travelTarget->GetStatus())
+                    << " destinationPtr=" << (travelTarget->GetDestination() ? 1 : 0)
+                    << " moved=" << (moved ? 1 : 0)
+                    << " movingAfter=" << ((sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(ai, "ForcedTravelMoveDispatch", "", out.str());
+            }
+        }
+
+        const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        if (!moved && !movingAfter && !bot->IsNonMeleeSpellCasted(true, false, true) &&
+            !sServerFacade.IsInCombat(bot))
+        {
+            if (travelTarget)
+            {
+                travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+                travelTarget->SetExpireIn(1000);
+                travelTarget->SetForced(false);
+            }
+
+            context->GetValue<bool>("travel target active")->Reset();
+            context->GetValue<GuidPosition>("rpg target")->Reset();
+            context->GetValue<ObjectGuid>("attack target")->Reset();
+            context->ClearValues("no active travel destinations");
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason=" << (reason ? reason : "assigned-travel")
+                    << " status=" << (travelTarget ? static_cast<uint32>(travelTarget->GetStatus()) : 0)
+                    << " destinationPtr=" << (travelTarget && travelTarget->GetDestination() ? 1 : 0)
+                    << " movingAfter=0";
+                sPlayerbotAIConfig.logEvent(ai, "AssignedTravelNoMoveExpired", "", out.str());
+            }
+        }
+
+        return moved;
+    }
+
+    bool TryRecoveryWork(PlayerbotAI* ai, AiObjectContext* context, Player* bot, char const* reason)
+    {
+        if (!ai || !context || !bot || sServerFacade.IsInCombat(bot) || sServerFacade.UnitIsDead(bot))
+            return false;
+
+        const bool shouldEat = context->GetValue<bool>("should eat")->Get();
+        const bool shouldDrink = context->GetValue<bool>("should drink")->Get();
+        if (!shouldEat && !shouldDrink)
+            return false;
+
+        context->GetValue<Unit*>("current target")->Reset();
+        context->GetValue<Unit*>("pull target")->Reset();
+        context->GetValue<ObjectGuid>("attack target")->Reset();
+        bot->AttackStop(true);
+        bot->SetSelectionGuid(ObjectGuid());
+        bot->SetTargetGuid(ObjectGuid());
+
+        const bool wasMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        if (wasMoving)
+        {
+            ai->StopMoving();
+            bot->InterruptMoving(true);
+        }
+
+        bool ate = false;
+        bool drank = false;
+        if (!wasMoving)
+        {
+            if (shouldEat)
+                ate = ai->DoSpecificAction("food", Event(reason ? reason : "recovery", "idle recovery", bot), true);
+            if (shouldDrink)
+                drank = ai->DoSpecificAction("drink", Event(reason ? reason : "recovery", "idle recovery", bot), true);
+        }
+
+        const bool recovering = wasMoving || ate || drank || bot->IsNonMeleeSpellCasted(true, false, true);
+        if (recovering && sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 8) == 1)
+        {
+            std::ostringstream out;
+            out << "reason=" << (reason ? reason : "recovery")
+                << " hp=" << static_cast<uint32>(bot->GetHealthPercent())
+                << " mana=" << static_cast<uint32>(bot->GetPowerPercent())
+                << " shouldEat=" << (shouldEat ? 1 : 0)
+                << " shouldDrink=" << (shouldDrink ? 1 : 0)
+                << " stoppedMove=" << (wasMoving ? 1 : 0)
+                << " ate=" << (ate ? 1 : 0)
+                << " drank=" << (drank ? 1 : 0)
+                << " casting=" << (bot->IsNonMeleeSpellCasted(true, false, true) ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "IdleRecoveryWork", "", out.str());
+        }
+
+        return recovering;
+    }
+
+    bool PushVisibleWork(PlayerbotAI* ai, AiObjectContext* context, Player* bot, char const* reason,
+        bool& questRequested, bool& travelChosen, bool& targetSelected, bool& attackAnything,
+        bool& grindRequested, bool& travelMoved, bool& rpgChosen, bool& rpgMoved,
+        bool& randomMoved, bool& idleNudged, bool allowFallbackMovement = true,
+        bool allowLocalTargets = true)
+    {
+        if (!ai || !context || !bot)
+            return false;
+
+        if (TryRecoveryWork(ai, context, bot, reason))
+            return true;
+
+        auto hasImmediateWork = [&]() -> bool
+        {
+            Unit* workTarget = context->GetValue<Unit*>("current target")->Get();
+            LootObject workLoot = context->GetValue<LootObject>("loot target")->Get();
+            GuidPosition workRpgTarget = context->GetValue<GuidPosition>("rpg target")->Get();
+            TravelTarget* workTravel = context->GetValue<TravelTarget*>("travel target")->Get();
+            const bool workMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool directedMovement =
+                HasDirectedMovementWork(workTravel, workRpgTarget, travelMoved, rpgMoved, workMoving);
+            return HasUsefulAssignedWork(bot, workTravel, workTarget, workLoot, workMoving, directedMovement);
+        };
+
+        auto tryAssignedTravelMove = [&]() -> bool
+        {
+            const bool moved = MoveAssignedTravelWork(ai, context, bot, reason);
+            travelMoved = travelMoved || moved;
+            return moved;
+        };
+
+        questRequested = ai->DoSpecificAction("request quest travel target", Event(), true);
+        if (questRequested)
+            tryAssignedTravelMove();
+
+        if (!hasImmediateWork())
+        {
+            travelChosen = ai->DoSpecificAction("choose travel target", Event(), true);
+            if (travelChosen)
+                tryAssignedTravelMove();
+        }
+
+        if (allowLocalTargets && !hasImmediateWork())
+        {
+            ResetTargetScanCaches(context);
+            targetSelected = ai->DoSpecificAction("select new target", Event(), true);
+        }
+
+        if (allowLocalTargets && !hasImmediateWork())
+            attackAnything = ai->DoSpecificAction("attack anything", Event(), true);
+
+        Unit* selectedTarget = context->GetValue<Unit*>("current target")->Get();
+        if (allowLocalTargets && !hasImmediateWork() && selectedTarget)
+        {
+            attackAnything = ForceConcreteTargetWork(ai, bot, selectedTarget, reason) || attackAnything;
+        }
+
+        if (!hasImmediateWork())
+        {
+            grindRequested = RequestGrindTravelFallback(ai, context, bot, reason);
+            if (grindRequested)
+                tryAssignedTravelMove();
+        }
+
+        if (allowFallbackMovement && !hasImmediateWork())
+        {
+            rpgChosen = ai->DoSpecificAction("choose rpg target", Event(), true);
+            rpgMoved = ai->DoSpecificAction("move to rpg target", Event(), true);
+        }
+
+        if (allowFallbackMovement && !hasImmediateWork() && !rpgMoved)
+            randomMoved = ai->DoSpecificAction("move random", Event(reason ? reason : "idle work", "visible work rescue", bot), true);
+
+        if (allowFallbackMovement && !hasImmediateWork() && !randomMoved && !sServerFacade.isMoving(bot) && !bot->isMovingOrTurning())
+            idleNudged = ForceIdleRescueNudge(ai, bot, reason);
+
+        return hasImmediateWork();
+    }
+
+    bool RequestGrindTravelFallback(PlayerbotAI* ai, AiObjectContext* context, Player* bot, char const* reason)
+    {
+        if (!ai || !context || !bot || bot->InBattleGround() ||
+            ai->HasActivePlayerMaster() || ai->HasRealPlayerMaster())
+            return false;
+
+        const std::string grindPurpose = std::to_string(static_cast<uint32>(TravelDestinationPurpose::Grind));
+        const std::string reasonText = reason ? reason : "";
+        const bool forceNoWorkRetry =
+            reasonText.find("idle") != std::string::npos ||
+            reasonText.find("no-work") != std::string::npos ||
+            reasonText.find("hard-idle") != std::string::npos ||
+            reasonText.find("metric") != std::string::npos ||
+            reasonText.find("movement-no-progress") != std::string::npos;
+
+        static std::mutex s_grindFallbackCooldownMutex;
+        static std::unordered_map<uint32, time_t> s_grindFallbackNextAttempt;
+        const time_t now = time(nullptr);
+        const uint32 botGuid = bot->GetGUIDLow();
+        {
+            std::lock_guard<std::mutex> guard(s_grindFallbackCooldownMutex);
+            auto itr = s_grindFallbackNextAttempt.find(botGuid);
+            if (itr != s_grindFallbackNextAttempt.end() && itr->second > now)
+            {
+                if (forceNoWorkRetry && sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 25) == 1)
+                {
+                    std::ostringstream out;
+                    out << "reason=" << (reason ? reason : "no-work")
+                        << " level=" << (uint32)bot->GetLevel()
+                        << " cooldownLeft=" << uint32(itr->second - now);
+                    sPlayerbotAIConfig.logEvent(ai, "NoWorkGrindTravelCooldown", grindPurpose, out.str());
+                }
+                return false;
+            }
+
+            s_grindFallbackNextAttempt[botGuid] = now + (forceNoWorkRetry ? 1 : 8);
+        }
+
+        TravelTarget* currentTravel = context->GetValue<TravelTarget*>("travel target")->Get();
+        const bool hasActiveTravel =
+            IsActiveTravelWork(currentTravel) ||
+            IsPreparedTravelWork(currentTravel);
+        if (forceNoWorkRetry && !hasActiveTravel)
+        {
+            if (currentTravel)
+            {
+                currentTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                currentTravel->SetForced(false);
+            }
+
+            context->GetValue<bool>("travel target active")->Reset();
+            context->ClearValues("no active travel destinations");
+        }
+
+        const bool grindKnownEmpty =
+            context->GetValue<bool>("no active travel destinations", grindPurpose)->Get() ||
+            context->GetValue<bool>("no active travel destinations", "Grind")->Get();
+        if (grindKnownEmpty && forceNoWorkRetry)
+        {
+            context->GetValue<bool>("no active travel destinations", grindPurpose)->Reset();
+            context->GetValue<bool>("no active travel destinations", "Grind")->Reset();
+            context->ClearValues("no active travel destinations");
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 5) == 1)
+            {
+                std::ostringstream out;
+                out << "reason=" << (reason ? reason : "no-work")
+                    << " level=" << (uint32)bot->GetLevel()
+                    << " emptyGrindKnown=1"
+                    << " forcedRetry=1";
+                sPlayerbotAIConfig.logEvent(ai, "NoWorkGrindTravelRetry", grindPurpose, out.str());
+            }
+        }
+        else if (grindKnownEmpty)
+        {
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 25) == 1)
+            {
+                std::ostringstream out;
+                out << "reason=" << (reason ? reason : "no-work")
+                    << " level=" << (uint32)bot->GetLevel()
+                    << " emptyGrindKnown=1";
+                sPlayerbotAIConfig.logEvent(ai, "NoWorkGrindTravelSuppressed", grindPurpose, out.str());
+            }
+
+            return false;
+        }
+
+        const bool requested = ai->DoSpecificAction("request travel target::" + grindPurpose,
+            Event(reason ? reason : "no work", "grind fallback", bot), true);
+
+        if (requested && sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 5) == 1)
+        {
+            std::ostringstream out;
+            out << "reason=" << (reason ? reason : "no-work")
+                << " level=" << (uint32)bot->GetLevel()
+                << " map=" << bot->GetMapId()
+                << " x=" << std::fixed << std::setprecision(2) << bot->GetPositionX()
+                << " y=" << bot->GetPositionY();
+            sPlayerbotAIConfig.logEvent(ai, "NoWorkGrindTravelRequest", grindPurpose, out.str());
+        }
+
+        return requested;
+    }
+
+    bool ForceIdleRescueNudge(PlayerbotAI* ai, Player* bot, char const* reason)
+    {
+        if (!ai || !bot || !bot->IsInWorld() || sServerFacade.UnitIsDead(bot) ||
+            sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+            return false;
+
+        // Pure anti-AFK "look active" nudge — NEVER allowed during a fight or
+        // while the bot has a live target/cast. No fake movement interrupts combat.
+        if (sServerFacade.IsInCombat(bot) ||
+            bot->GetVictim() ||
+            ai->GetAiObjectContext()->GetValue<Unit*>("current target")->Get() ||
+            bot->IsNonMeleeSpellCasted(true, false, true))
+            return false;
+
+        const float botX = bot->GetPositionX();
+        const float botY = bot->GetPositionY();
+        const float botZ = bot->GetPositionZ();
+        if (!bot->GetMap() || !MaNGOS::IsValidMapCoord(botX, botY, botZ))
+        {
+            const uint32 failures = RegisterIdleRescueNudgeFailure(bot);
+            return HardRescueIdleBotToHomebind(ai, bot, reason, "current-position-invalid", failures);
+        }
+
+        const float angle = static_cast<float>((bot->GetGUIDLow() + time(nullptr)) % 6283) / 1000.0f;
+        const float distance = static_cast<float>(urand(8, 22));
+        float x = botX + std::cos(angle) * distance;
+        float y = botY + std::sin(angle) * distance;
+        float z = botZ;
+        if (!bot->GetMap() || !MaNGOS::IsValidMapCoord(x, y, z))
+        {
+            const uint32 failures = RegisterIdleRescueNudgeFailure(bot);
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason=" << (reason ? reason : "idle-rescue")
+                    << " failures=" << failures
+                    << " x=" << std::fixed << std::setprecision(2) << x
+                    << " y=" << y
+                    << " z=" << z;
+                sPlayerbotAIConfig.logEvent(ai, "IdleRescueNudgeRejected", "", out.str());
+            }
+
+            if (failures >= 3)
+                return HardRescueIdleBotToHomebind(ai, bot, reason, "nudge-position-invalid", failures);
+
+            return false;
+        }
+
+        bot->UpdateAllowedPositionZ(x, y, z);
+        if (!MaNGOS::IsValidMapCoord(x, y, z))
+        {
+            const uint32 failures = RegisterIdleRescueNudgeFailure(bot);
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason=" << (reason ? reason : "idle-rescue")
+                    << " failures=" << failures
+                    << " x=" << std::fixed << std::setprecision(2) << x
+                    << " y=" << y
+                    << " z=" << z;
+                sPlayerbotAIConfig.logEvent(ai, "IdleRescueNudgeRejected", "", out.str());
+            }
+
+            if (failures >= 3)
+                return HardRescueIdleBotToHomebind(ai, bot, reason, "nudge-height-invalid", failures);
+
+            return false;
+        }
+
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (!mm)
+            return false;
+
+#ifdef MANGOSBOT_ZERO
+        mm->MovePoint(bot->GetMapId(), x, y, z, MOVE_RUN_MODE, 0.0f, -10.0f);
+#else
+        mm->MovePoint(bot->GetMapId(), Position(x, y, z, 0.0f), MOVE_RUN_MODE, 0.0f, -10.0f);
+#endif
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 8) == 1)
+        {
+            std::ostringstream out;
+            out << "reason=" << (reason ? reason : "idle-rescue")
+                << " x=" << std::fixed << std::setprecision(2) << x
+                << " y=" << y
+                << " z=" << z;
+            sPlayerbotAIConfig.logEvent(ai, "IdleRescueNudgeMove", "", out.str());
+        }
+
+        ResetIdleRescueNudgeFailures(bot);
         return true;
+    }
+
+    bool ForceConcreteTargetWork(PlayerbotAI* ai, Player* bot, Unit* target, char const* reason)
+    {
+        if (!ai || !bot || !target || !target->IsInWorld() || sServerFacade.UnitIsDead(target) ||
+            sServerFacade.IsFriendlyTo(bot, target) || bot->IsNonMeleeSpellCasted(true, false, true))
+            return false;
+
+        bot->SetSelectionGuid(target->GetObjectGuid());
+        bot->SetTarget(target);
+
+        bool acted = ai->DoSpecificAction("attack anything",
+            Event(reason ? reason : "force target work", "concrete target work", bot), true);
+
+        const bool alreadyConcrete =
+            bot->IsNonMeleeSpellCasted(true, false, true) ||
+            IsChasingTarget(bot, target) ||
+            (bot->GetVictim() == target &&
+             bot->CanReachWithMeleeAutoAttack(target) &&
+             bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING));
+
+        if (!alreadyConcrete)
+            acted = ForceCombatConnect(ai, bot, target, reason) || acted;
+
+        if (!bot->IsNonMeleeSpellCasted(true, false, true) &&
+            !bot->CanReachWithMeleeAutoAttack(target) &&
+            !ai->IsRanged(bot))
+        {
+            if (MotionMaster* mm = bot->GetMotionMaster())
+            {
+                bot->InterruptMoving(true);
+                mm->MoveChase(target);
+                acted = true;
+            }
+
+            acted = ai->DoSpecificAction("reach melee",
+                Event(reason ? reason : "force target work", "concrete target reach", bot), true) || acted;
+        }
+
+        if (bot->CanReachWithMeleeAutoAttack(target))
+        {
+            bot->Attack(target, true);
+            bot->MeleeAttackStart(target);
+            acted = true;
+        }
+
+        const bool concrete =
+            bot->IsNonMeleeSpellCasted(true, false, true) ||
+            IsChasingTarget(bot, target) ||
+            (bot->GetVictim() == target && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING));
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && (!concrete || urand(1, 12) == 1))
+        {
+            std::ostringstream out;
+            out << "reason=" << (reason ? reason : "force-target")
+                << " target=" << target->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target)
+                << " ranged=" << (ai->IsRanged(bot) ? 1 : 0)
+                << " meleeReach=" << (bot->CanReachWithMeleeAutoAttack(target) ? 1 : 0)
+                << " acted=" << (acted ? 1 : 0)
+                << " moving=" << ((sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0)
+                << " casting=" << (bot->IsNonMeleeSpellCasted(true, false, true) ? 1 : 0)
+                << " victim=" << ((bot->GetVictim() == target) ? 1 : 0)
+                << " concrete=" << (concrete ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(ai, "ConcreteTargetWork", std::to_string(target->GetGUIDLow()), out.str());
+        }
+
+        return acted || concrete;
     }
 
     bool IsHostileCombatSpellForTarget(Player* bot, Unit* target, SpellEntry const* spellInfo)
@@ -159,6 +1953,379 @@ namespace
         }
 
         return false;
+    }
+
+    bool ForceRangedPrimeChaseFallback(PlayerbotAI* ai, Player* bot, Unit* target, char const* reason)
+    {
+        if (!ai || !bot || !target || !target->IsInWorld() || sServerFacade.UnitIsDead(target))
+            return false;
+
+        if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning() ||
+            bot->IsNonMeleeSpellCasted(true, false, true))
+            return true;
+
+        bot->SetSelectionGuid(target->GetObjectGuid());
+        bot->SetTarget(target);
+        const bool attackStarted = bot->Attack(target, true);
+        const bool meleeReach = bot->CanReachWithMeleeAutoAttack(target);
+        bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        bool meleeSwinging = false;
+
+        if (meleeReach)
+        {
+            bot->MeleeAttackStart(target);
+            meleeSwinging = bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+        }
+        else
+        {
+            if (MotionMaster* mm = bot->GetMotionMaster())
+            {
+                mm->MoveChase(target);
+                moving = true;
+            }
+        }
+
+        const bool productive =
+            moving ||
+            meleeSwinging ||
+            bot->IsNonMeleeSpellCasted(true, false, true) ||
+            (attackStarted && bot->GetVictim() == target && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING));
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && (!productive || urand(1, 25) == 1))
+        {
+            std::ostringstream out;
+            out << "target=" << target->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target)
+                << " meleeReach=" << (meleeReach ? 1 : 0)
+                << " attackStarted=" << (attackStarted ? 1 : 0)
+                << " moving=" << (moving ? 1 : 0)
+                << " meleeSwing=" << (meleeSwinging ? 1 : 0)
+                << " victim=" << ((bot->GetVictim() == target) ? 1 : 0)
+                << " productive=" << (productive ? 1 : 0)
+                << " reason=" << (reason ? reason : "spell-prime-failed");
+            sPlayerbotAIConfig.logEvent(ai, "RangedCombatPrimeFallbackChase", std::to_string(target->GetGUIDLow()), out.str());
+        }
+
+        return productive;
+    }
+
+    bool TryImmediateRangedCombatAction(PlayerbotAI* ai, Player* bot, Unit* target)
+    {
+        if (!ai || !bot || !target || !target->IsInWorld() || sServerFacade.UnitIsDead(target))
+            return false;
+
+        if (!bot->IsWithinLOSInMap(target, true))
+            return false;
+
+        const float combatReach = bot->GetCombinedCombatReach(target, false);
+        const float distance = sServerFacade.GetDistance2d(bot, target);
+        if (bot->getClass() == CLASS_HUNTER)
+        {
+            if (bot->CanReachWithMeleeAutoAttack(target))
+            {
+                if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+                    ai->StopMoving();
+
+                bot->SetSelectionGuid(target->GetObjectGuid());
+                bot->SetTarget(target);
+                bot->Attack(target, true);
+                bot->MeleeAttackStart(target);
+                ai->DoSpecificAction("raptor strike", Event("ranged combat prime", "hunter melee connect", bot), true);
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 10) == 1)
+                {
+                    std::ostringstream out;
+                    out << "target=" << target->GetName()
+                        << " dist=" << std::fixed << std::setprecision(2) << distance
+                        << " meleeSwing=" << (bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING) ? 1 : 0)
+                        << " victim=" << ((bot->GetVictim() == target) ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(ai, "HunterMeleePrime", std::to_string(target->GetGUIDLow()), out.str());
+                }
+
+                return bot->GetVictim() == target && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+            }
+
+            // Classic hunter dead zone: too far to melee but too close to shoot.
+            // The configured "shoot" range is a preferred/max range, not the
+            // minimum range, so keep this anchored near the real 8yd minimum.
+            const float minShootDistance = 8.0f + combatReach;
+            const bool meleeReach = false;
+            const bool deadZone = !meleeReach && distance < minShootDistance;
+            if (deadZone)
+            {
+                if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+                    return true;
+
+                if (MotionMaster* mm = bot->GetMotionMaster())
+                {
+                    if (target->GetVictim() == bot && !target->IsRooted())
+                    {
+                        bot->Attack(target, true);
+                        mm->MoveChase(target);
+                    }
+                    else
+                    {
+                        float dx = bot->GetPositionX() - target->GetPositionX();
+                        float dy = bot->GetPositionY() - target->GetPositionY();
+                        float len = std::sqrt(dx * dx + dy * dy);
+                        if (len < 0.1f)
+                        {
+                            dx = std::cos(bot->GetOrientation());
+                            dy = std::sin(bot->GetOrientation());
+                            len = 1.0f;
+                        }
+
+                        const float step = std::min<float>(12.0f, std::max<float>(4.0f, minShootDistance + 2.0f - distance));
+                        float x = bot->GetPositionX() + (dx / len) * step;
+                        float y = bot->GetPositionY() + (dy / len) * step;
+                        float z = bot->GetPositionZ();
+                        if (!bot->GetMap() || !MaNGOS::IsValidMapCoord(x, y, z))
+                            return false;
+
+                        bot->UpdateAllowedPositionZ(x, y, z);
+                        if (!MaNGOS::IsValidMapCoord(x, y, z))
+                            return false;
+
+#ifdef MANGOSBOT_ZERO
+                        mm->MovePoint(bot->GetMapId(), x, y, z, MOVE_RUN_MODE, 0.0f, -10.0f);
+#else
+                        mm->MovePoint(bot->GetMapId(), Position(x, y, z, 0.0f), MOVE_RUN_MODE, 0.0f, -10.0f);
+#endif
+                    }
+
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                    {
+                        std::ostringstream out;
+                        out << "target=" << target->GetName()
+                            << " dist=" << std::fixed << std::setprecision(2) << distance
+                            << " minShoot=" << minShootDistance
+                            << " meleeReach=" << (meleeReach ? 1 : 0)
+                            << " victim=" << (target->GetVictim() == bot ? 1 : 0);
+                        sPlayerbotAIConfig.logEvent(ai, "HunterDeadZoneReposition", std::to_string(target->GetGUIDLow()), out.str());
+                    }
+
+                    return true;
+                }
+            }
+        }
+
+        const float spellRange = ai->GetRange("spell") + sPlayerbotAIConfig.contactDistance;
+        if (distance > spellRange)
+            return false;
+
+        const bool casterPrime =
+            bot->getClass() == CLASS_MAGE ||
+            bot->getClass() == CLASS_WARLOCK ||
+            bot->getClass() == CLASS_PRIEST ||
+            bot->getClass() == CLASS_DRUID ||
+            bot->getClass() == CLASS_SHAMAN;
+        if (casterPrime)
+        {
+            if (sServerFacade.isMoving(bot) && !bot->IsFalling())
+            {
+                ai->StopMoving();
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "target=" << target->GetName()
+                        << " dist=" << std::fixed << std::setprecision(2) << distance
+                        << " reason=stop-to-cast";
+                    sPlayerbotAIConfig.logEvent(ai, "RangedCombatPrimeSetup", std::to_string(target->GetGUIDLow()), out.str());
+                }
+            }
+
+            if (!sServerFacade.IsInFront(bot, target, sPlayerbotAIConfig.sightDistance, CAST_ANGLE_IN_FRONT))
+            {
+                sServerFacade.SetFacingTo(bot, target, true);
+                bot->SetInFront(target);
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "target=" << target->GetName()
+                        << " dist=" << std::fixed << std::setprecision(2) << distance
+                        << " reason=face-target";
+                    sPlayerbotAIConfig.logEvent(ai, "RangedCombatPrimeSetup", std::to_string(target->GetGUIDLow()), out.str());
+                }
+            }
+        }
+
+        Event event("ranged combat prime", "spell opener", bot);
+        auto tryAction = [&](char const* action) -> bool
+        {
+            return action && *action && ai->DoSpecificAction(action, event, true);
+        };
+
+        bool openerStarted = false;
+        switch (bot->getClass())
+        {
+            case CLASS_MAGE:
+                openerStarted = tryAction("frostbolt") || tryAction("fireball") || tryAction("shoot");
+                break;
+            case CLASS_WARLOCK:
+                openerStarted = tryAction("shadow bolt") || tryAction("shoot");
+                break;
+            case CLASS_PRIEST:
+                openerStarted = tryAction("smite") || tryAction("shoot");
+                break;
+            case CLASS_DRUID:
+                openerStarted = tryAction("wrath") || tryAction("shoot");
+                break;
+            case CLASS_SHAMAN:
+                openerStarted = tryAction("lightning bolt") || tryAction("shoot");
+                break;
+            case CLASS_HUNTER:
+                openerStarted = tryAction("auto shot") || tryAction("arcane shot") || tryAction("shoot");
+                break;
+            default:
+                openerStarted = tryAction("shoot");
+                break;
+        }
+
+        if (openerStarted)
+        {
+            const bool visibleCombatAction =
+                bot->IsNonMeleeSpellCasted(true, false, true) ||
+                sServerFacade.isMoving(bot) ||
+                bot->isMovingOrTurning() ||
+                (bot->GetVictim() == target &&
+                 bot->CanReachWithMeleeAutoAttack(target) &&
+                 bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING));
+
+            if (visibleCombatAction)
+                return true;
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "target=" << target->GetName()
+                    << " dist=" << std::fixed << std::setprecision(2) << distance
+                    << " class=" << static_cast<uint32>(bot->getClass())
+                    << " moving=0 casting=0 meleeSwing=0 combat=" << (sServerFacade.IsInCombat(bot) ? 1 : 0)
+                    << " reason=opener-returned-without-visible-action";
+                sPlayerbotAIConfig.logEvent(ai, "RangedCombatPrimeNoVisibleAction", std::to_string(target->GetGUIDLow()), out.str());
+            }
+        }
+
+        return ForceRangedPrimeChaseFallback(ai, bot, target, "opener-failed");
+    }
+
+    bool ForceCombatConnect(PlayerbotAI* ai, Player* bot, Unit* target, char const* reason)
+    {
+        if (!ai || !bot || !target || !target->IsInWorld() || sServerFacade.UnitIsDead(target))
+            return false;
+
+        const bool rangedBot = ai->IsRanged(bot) && bot->getClass() != CLASS_PALADIN;
+        const bool inLos = bot->IsWithinLOSInMap(target, true);
+        const float distance = sServerFacade.GetDistance2d(bot, target);
+        const float spellRange = ai->GetRange("spell") + sPlayerbotAIConfig.contactDistance;
+        const bool meleeReach = bot->CanReachWithMeleeAutoAttack(target);
+        const bool spellReach = rangedBot && inLos && distance <= spellRange;
+
+        bot->SetSelectionGuid(target->GetObjectGuid());
+        bot->SetTarget(target);
+
+        bool issued = false;
+        if (ai->CanMove() && inLos)
+        {
+            sServerFacade.SetFacingTo(bot, target, true);
+            bot->SetInFront(target);
+        }
+
+        if (meleeReach && (!rangedBot || bot->getClass() == CLASS_HUNTER))
+        {
+            if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+                ai->StopMoving();
+
+            bot->Attack(target, true);
+            bot->MeleeAttackStart(target);
+            if (bot->getClass() == CLASS_HUNTER)
+                ai->DoSpecificAction("raptor strike", Event(reason ? reason : "combat connect", "hunter melee connect", bot), true);
+            issued = bot->GetVictim() == target && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+        }
+        else if (rangedBot && spellReach)
+        {
+            if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+                ai->StopMoving();
+
+            bot->Attack(target, false);
+            issued = TryImmediateRangedCombatAction(ai, bot, target) ||
+                bot->IsNonMeleeSpellCasted(true, false, true);
+        }
+        else if (meleeReach)
+        {
+            if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+                ai->StopMoving();
+
+            bot->Attack(target, true);
+            bot->MeleeAttackStart(target);
+            issued = bot->GetVictim() == target && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+        }
+        else
+        {
+            bot->Attack(target, true);
+            if (MotionMaster* mm = bot->GetMotionMaster())
+            {
+                // Ranged bots close only to keep-away (flee) distance, not melee.
+                if (rangedBot)
+                    mm->MoveChase(target, ai->GetRange("flee"), bot->GetAngle(target));
+                else
+                    mm->MoveChase(target);
+                issued = true;
+            }
+        }
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && (!issued || urand(1, 10) == 1))
+        {
+            std::ostringstream out;
+            out << "target=" << target->GetName()
+                << " dist=" << std::fixed << std::setprecision(2) << distance
+                << " ranged=" << (rangedBot ? 1 : 0)
+                << " los=" << (inLos ? 1 : 0)
+                << " meleeReach=" << (meleeReach ? 1 : 0)
+                << " spellReach=" << (spellReach ? 1 : 0)
+                << " moving=" << ((sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0)
+                << " casting=" << (bot->IsNonMeleeSpellCasted(true, false, true) ? 1 : 0)
+                << " meleeSwing=" << (bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING) ? 1 : 0)
+                << " victim=" << ((bot->GetVictim() == target) ? 1 : 0)
+                << " issued=" << (issued ? 1 : 0)
+                << " reason=" << (reason ? reason : "combat-stall");
+            sPlayerbotAIConfig.logEvent(ai, "CombatConnectKick", std::to_string(target->GetGUIDLow()), out.str());
+        }
+
+        return issued;
+    }
+
+    bool TeleportGhostUnstuck(PlayerbotAI* ai, Player* bot, const WorldPosition& destination, const char* eventName, float radius = 4.0f)
+    {
+        if (!ai || !bot || !destination)
+            return false;
+
+        WorldPosition movePosition = destination;
+        if (radius > 0.0f)
+            movePosition.GetReachableRandomPointOnGround(bot, radius, urand(0, 1));
+
+        if (!movePosition)
+            movePosition = destination;
+
+        bot->GetMotionMaster()->Clear();
+        const bool teleported = bot->TeleportTo(movePosition.getMapId(), movePosition.getX(), movePosition.getY(), movePosition.getZ(), movePosition.getO(), 0);
+        if (!teleported)
+            return false;
+
+        if (bot->isRealPlayer())
+            bot->SendHeartBeat();
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "map=" << movePosition.getMapId()
+                << " x=" << movePosition.getX()
+                << " y=" << movePosition.getY()
+                << " z=" << movePosition.getZ();
+            sPlayerbotAIConfig.logEvent(ai, eventName, "", out.str());
+        }
+
+        return true;
     }
 
     bool ForceHostileSpellCombatPrime(Player* bot, Unit* target, SpellEntry const* spellInfo)
@@ -690,6 +2857,100 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // we never deref the cached `master` pointer in this check.
     RevalidateMasterPointer();
 
+    // DEBUG: idle near-player bots narrate their "thoughts" in /say so you can diagnose pauses in-game.
+    if (ai::botdiag::IsActionLogEnabled())
+        DebugSayIdle(this, bot);
+
+    // SUPERVISOR MODE: honest per-second visible-activity trace for the whole fleet (runs every tick,
+    // throttled to 1/sec internally, so it samples even while a bot sits on a multi-second move-wait).
+    if (sPlayerbotAIConfig.supervisorMode)
+    {
+        SupervisorTrack(this, bot);
+        FreezeNudge(this, bot);   // physically dislodge bots pathfinding can't move (travel/flee/corpse)
+        AntiIdleAction(this, bot);   // force standing bots to grind/roam instead of looping no-op decisions
+        HopelessFightBreaker(this, bot);   // give up on unkillable targets (training dummies, evade mobs)
+        GhostRescue(this, bot);            // stuck ghost -> teleport to corpse (invisible to living players)
+        AutoRepair(this, bot);             // broken gear = death spiral; repair (paid when affordable)
+        AutoAmmo(this, bot);               // hunters shoot dry and never restock; top up (invisible)
+        ChainPullNext(this, bot);          // kill -> loot -> next pull with no re-think dead-air
+        NoProgressGrindFallback(this, bot); // 10 min w/o xp -> stop wandering, grind the local area
+        LootUnderFire(this, bot);          // group-combat but personally safe -> grab the corpse now
+        QuestLoopBreaker(this, bot);       // 6+ kills of the same quest mob w/o the drop -> do other quests
+        // 1/sec gravity sweep for STATIONARY bots: catches every stop path that isn't StopMoving
+        // (motion-clears, chase-holds) so no bot stands floating above the ground.
+        if (!sServerFacade.isMoving(bot))
+            SettleToGround(bot);
+    }
+
+    // ===== LOD COLD DORMANCY (the scale lever for 10-15k bots) =====
+    // A random-fleet bot with NO real player within lodColdRange goes DORMANT: SetColdDormant
+    // drops its combat + makes it VISIBILITY_OFF, and its ENTIRE AI is SKIPPED here (truly idle).
+    // Critically it does NOT run its grind/combat engine while invisible -- an invisible bot's
+    // pull-cast can't make a mob aggro (Spell IsVisibleForOrDetect), which is the exact bug that
+    // got this feature hard-disabled before; skipping all AI when dormant avoids it. The bot wakes
+    // the instant a real player comes within lodColdRange. HasPlayerNearby only iterates the handful
+    // of online real players (cheap even at 15k bots) -- the expensive DoNextAction is what we skip,
+    // so we only pay full AI cost for bots a player can actually see. Instant rollback:
+    // AiPlayerbot.LODColdUpdateMs = 0 in bin/aiplayerbot.conf + restart.
+    if (sPlayerbotAIConfig.lodColdUpdateMs && bot->IsInWorld() && !HasRealPlayerMaster()
+        && sRandomPlayerbotMgr.IsRandomBot(bot))
+    {
+        // NEVER go dormant while in a fight: SetColdDormant does CombatStop, so dormant-ing a
+        // bot mid-combat makes it "stop attacking and stand there eating hits" -- exactly the
+        // symptom seen as a player moves and bots at the trailing edge of the lodColdRange bubble
+        // get put to sleep mid-fight. A bot that is fighting or being attacked STAYS AWAKE until
+        // the fight ends, then goes dormant. (A dormant bot is invisible so nothing attacks it ->
+        // it never enters this branch unless it was already awake + engaged.)
+        const bool fighting = bot->IsInCombat() || !bot->getAttackers().empty();
+        if (!fighting && !HasPlayerNearby(sPlayerbotAIConfig.lodColdRange))
+        {
+            if (!coldDormant)
+                SetColdDormant(true);
+            return;                 // dormant -> skip ALL AI this tick
+        }
+        else if (coldDormant)
+        {
+            SetColdDormant(false);  // player near OR pulled into a fight -> wake / stay awake
+        }
+    }
+
+    // COMBAT PREEMPT: a bot that is in combat or is being attacked must NOT stay parked on a long
+    // non-combat wait. Travel/camp/move actions set multi-second WaitForReach delays, and the
+    // early-return below blocks the bot's whole brain -- including combat reactions -- until that
+    // delay elapses. That is the visible "stands there with a mob on it, doesn't attack for 20-30s
+    // / freezes when a 2nd mob joins after the first dies" bug: the bot is mid non-combat action and
+    // can't react. CAP the wait to one global cooldown so it re-evaluates and fights within ~0.5s
+    // (not zero -> avoids every-frame churn / extra bot-AI execution that drives the tick + crashes).
+    // CAST COMMITMENT: do NOT shrink the delay while the bot is mid-cast on a cast-time spell.
+    // A successful cast set the delay to cover its full cast duration (CastSpell ->
+    // GetSpellCastDuration); shrinking it back to GCD here re-runs the strategy engine MID-CAST,
+    // and the engine then picks a chase/move/target action that CANCELS the in-flight heal/cast.
+    // The heal never lands -> HP stays low -> the heal trigger re-fires -> the bot recasts the
+    // SAME heal in a tight loop (measured: recast_pct ~80%, the user's "constantly recasts its
+    // own heal" symptom). Let the cast finish. EXCEPTION: at critical HP allow the preempt so a
+    // dying bot can still react/flee instead of finishing a doomed cast.
+    // Use the AUTHORITATIVE "am I casting a cast-time/channeled non-melee spell" check (the same
+    // one the movement guards use), NOT a single SPELL_STATE: a cast-time heal sits in PREPARING
+    // during its cast bar, so the earlier narrow SPELL_STATE_CASTING test missed it -> the preempt
+    // kept shrinking the delay -> the engine re-ran mid-cast and canceled the heal.
+    const bool castCommitting = bot->IsNonMeleeSpellCasted(true, false, true);
+    // Is the in-progress cast a HEAL? A heal at low HP is the bot's SURVIVAL action -- it MUST
+    // finish, never bail. The heal_cancel.csv trace proved the old unconditional critical-HP bail
+    // was canceling the very heal keeping the bot alive: paladins at 2-16% HP looped Holy Light,
+    // the bail re-enabled the preempt -> the engine re-ran mid-cast -> 'select new target' (rel 90)
+    // canceled the heal every ~0.5s until the bot died. So only allow a critical-HP bail when the
+    // in-flight cast is NOT a heal (e.g. a doomed offensive cast worth abandoning to flee).
+    bool castingHeal = false;
+    if (Spell* gcast = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL))
+        castingHeal = gcast->m_spellInfo && IsHealSpell(gcast->m_spellInfo);
+    const bool criticalHpBail = (bot->GetHealthPercent() < 25.0f) && !castingHeal;
+    if (bot && bot->IsInWorld() && (bot->IsInCombat() || !bot->getAttackers().empty()) &&
+        aiInternalUpdateDelay > sPlayerbotAIConfig.globalCoolDown &&
+        (!castCommitting || criticalHpBail))
+    {
+        aiInternalUpdateDelay = sPlayerbotAIConfig.globalCoolDown;
+    }
+
     if(aiInternalUpdateDelay > elapsed)
     {
         aiInternalUpdateDelay -= elapsed;
@@ -698,6 +2959,26 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     {
         aiInternalUpdateDelay = 0;
         isWaiting = false;
+    }
+
+    // LOD fast wake: a dormant (COLD) bot must become visible/active the INSTANT a real
+    // player comes within range, not after its slow ~15s brain tick. Cheap: short-circuits
+    // on an empty server and only scans the handful of real players.
+    if (coldDormant && bot && bot->IsInWorld() && !sRandomPlayerbotMgr.GetPlayers().empty())
+    {
+        const bool nearPlayer = HasPlayerNearby(sPlayerbotAIConfig.lodColdRange);
+        // TEMP COLDDBG: sample whether dormant bots see the online player + distance.
+        static std::atomic<uint32> dbgCtr{0};
+        if ((dbgCtr++ % 150) == 0)
+            sLog.outError("COLDDBG dormant bot=%s map=%u players=%u near=%d range=%.0f",
+                bot->GetName(), bot->GetMapId(), (uint32)sRandomPlayerbotMgr.GetPlayers().size(),
+                nearPlayer ? 1 : 0, sPlayerbotAIConfig.lodColdRange);
+        if (nearPlayer)
+        {
+            sLog.outError("COLDWAKE bot=%s woke (player within %.0f)", bot->GetName(), sPlayerbotAIConfig.lodColdRange);
+            SetColdDormant(false);
+            ResetAIInternalUpdateDelay();   // think now, don't wait out the cold delay
+        }
     }
 
     // cancel logout in combat
@@ -1044,12 +3325,38 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         MapManager::SetContinentUpdatePhase("bot-internal", bot ? bot->GetGUIDLow() : 0);
         UpdateAIInternal(elapsed, minimal);
 
+        // LOD COLD tier: a bot with NO real player within lodColdRange (different
+        // zone/continent, or an empty server) goes DORMANT -- invisible (Greater
+        // Invisibility) + combat dropped + brain on the slow lodColdUpdateMs interval --
+        // REGARDLESS of whether it is currently fighting, because going dormant drops the
+        // fight. This is deliberately distance-based, NOT GetPriorityType(), which would
+        // classify any fighting bot as IN_COMBAT/foreground and so could never go cold.
+        // This is what lets the throttle apply to the constantly-fighting far fleet, and
+        // it is the primary CPU + crash-rate reduction (crashes scale with bot-AI
+        // execution volume). SetAIInternalUpdateDelay here is not overridden by the
+        // YieldAIInternalThread below (it only acts when the delay is near zero).
+        if (sPlayerbotAIConfig.lodColdUpdateMs && bot && bot->IsInWorld()
+            && !HasPlayerNearby(sPlayerbotAIConfig.lodColdRange))
+        {
+            SetColdDormant(true);
+            SetAIInternalUpdateDelay(sPlayerbotAIConfig.lodColdUpdateMs);
+        }
+        else if (coldDormant)
+        {
+            SetColdDormant(false);   // a real player is now near -> promote / wake instantly
+        }
+
         bool min = minimal;
         // Keep distant noncombat bots on the cheap yield, but let bots in a
         // player's visual/nearby lane react at normal cadence so they do not
         // look frozen while the rest of the world stays throttled.
         if (!inCombat)
             min = !IsForegroundPriority(GetPriorityType());
+
+        // SUPERVISOR MODE: keep the whole (small) fleet at full foreground cadence even with NO
+        // player online, so it quests/grinds at real speed for autonomous observation of true APM.
+        if (sPlayerbotAIConfig.supervisorMode)
+            min = false;
 
         SC_PHASE("UpdateAI.YieldAIInternalThread", bot ? bot->GetName() : "(null)");
         MapManager::SetContinentUpdatePhase("bot-yield", bot ? bot->GetGUIDLow() : 0);
@@ -1182,7 +3489,11 @@ bool PlayerbotAI::UpdateAIReaction(uint32 elapsed, bool minimal, bool isStunned)
         {
             if(reaction->ShouldInterruptCast())
             {
-                InterruptSpell();
+                // Only break a cast for a panic reaction (flee/avoid-aoe) when the bot is actually
+                // in danger. At healthy HP a player finishes the 1-2s cast first -- interrupting
+                // offensive casts at full health read as scatter-brained self-cancels.
+                if (bot->GetHealthPercent() < 50.0f || !bot->IsNonMeleeSpellCasted(true, false, true))
+                    InterruptSpell();
             }
 
             if (reaction->ShouldInterruptMovement())
@@ -1547,7 +3858,7 @@ void PlayerbotAI::OnCombatStarted()
             {
                 std::ostringstream out;
                 out << "status=" << (interruptedQuestTravel ? "expired" : "cooldown")
-                    << " destination=" << (travelTarget && travelTarget->GetDestination() ? travelTarget->GetDestination()->GetTitle() : "none");
+                    << " destinationPtr=" << (travelTarget && travelTarget->GetDestination() ? 1 : 0);
                 sPlayerbotAIConfig.logEvent(this, "TravelCombatInterrupt", bot->GetName(), out.str());
             }
         }
@@ -1780,13 +4091,16 @@ void PlayerbotAI::UpdateAIInternal(uint32 elapsed, bool minimal)
 
         if (logout && !bot->GetSession()->ShouldLogOut(time(nullptr)))
         {
+            // This runs on a map-worker thread. LogoutPlayerBot tears the Player down and raced
+            // the world thread's unlocked playerBots iteration (13 SIGSEGVs in AllowActivity via
+            // LogPlayerLocation) -> queue the logout; the holder drains it on the world thread.
             if (master && master->GetPlayerbotMgr())
             {
-                master->GetPlayerbotMgr()->LogoutPlayerBot(bot->GetObjectGuid().GetRawValue());
+                master->GetPlayerbotMgr()->QueueBotLogout(bot->GetObjectGuid().GetRawValue());
             }
             else
             {
-                sRandomPlayerbotMgr.LogoutPlayerBot(bot->GetObjectGuid().GetRawValue());
+                sRandomPlayerbotMgr.QueueBotLogout(bot->GetObjectGuid().GetRawValue());
             }
             return;
         }
@@ -1883,9 +4197,12 @@ std::string PlayerbotAI::BuildCurrentTaskSummary()
     TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
     TravelDestination* destination = travelTarget ? travelTarget->GetDestination() : nullptr;
     out << " travelStatus=" << (travelTarget ? static_cast<uint32>(travelTarget->GetStatus()) : 0)
-        << " travel=" << (destination ? destination->GetTitle() : "none");
+        << " travelPtr=" << (destination ? 1 : 0);
 
     out << " moving=" << ((sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0)
+        << " dead=" << (sServerFacade.UnitIsDead(bot) ? 1 : 0)
+        << " ghost=" << (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) ? 1 : 0)
+        << " corpse=" << (bot->GetCorpse() ? 1 : 0)
         << " combat=" << (sServerFacade.IsInCombat(bot) ? 1 : 0)
         << " afk=" << (bot->isAFK() ? 1 : 0)
         << " waiting=" << (isWaiting ? 1 : 0)
@@ -1924,6 +4241,7 @@ void PlayerbotAI::LogActionMetricsSnapshot(time_t now)
         << " targetTicks=" << actionMetricTargetTicks
         << " travelTicks=" << actionMetricTravelTicks
         << " questTravelTicks=" << actionMetricQuestTravelTicks
+        << " moveProgressTicks=" << actionMetricMoveProgressTicks
         << " staleResets=" << actionMetricStaleResets
         << " noProgressTicks=" << actionMetricNoProgressTicks
         << " sameActionStreak=" << actionMetricSameActionStreak
@@ -1931,6 +4249,7 @@ void PlayerbotAI::LogActionMetricsSnapshot(time_t now)
 
     sPlayerbotAIConfig.logEvent(this, "ActionRateTrace", actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName, out.str());
     sPlayerbotAIConfig.logEvent(this, "ActionTaskTrace", "task", BuildCurrentTaskSummary());
+    LogBotStatsSnapshot(now, apm, decisionTpm, actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0);
 
     actionMetricWindowStart = now;
     actionMetricTicks = 0;
@@ -1942,8 +4261,74 @@ void PlayerbotAI::LogActionMetricsSnapshot(time_t now)
     actionMetricTargetTicks = 0;
     actionMetricTravelTicks = 0;
     actionMetricQuestTravelTicks = 0;
+    actionMetricMoveProgressTicks = 0;
     actionMetricStaleResets = 0;
     actionMetricNoProgressTicks = 0;
+}
+
+void PlayerbotAI::LogBotStatsSnapshot(time_t now, uint32 apm, uint32 decisionTpm, uint32 sinceProgressSec)
+{
+    if (!sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        return;
+
+    uint32 questLogCount = 0;
+    uint32 questCompleteCount = 0;
+    uint32 questIncompleteCount = 0;
+    uint32 questRewardReadyCount = 0;
+
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32 questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId)
+            continue;
+
+        ++questLogCount;
+        QuestStatus status = bot->GetQuestStatus(questId);
+        if (status == QUEST_STATUS_COMPLETE)
+        {
+            ++questCompleteCount;
+            if (!bot->GetQuestRewardStatus(questId))
+                ++questRewardReadyCount;
+        }
+        else if (status == QUEST_STATUS_INCOMPLETE)
+        {
+            ++questIncompleteCount;
+        }
+    }
+
+    TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+    TravelDestination* destination = travelTarget ? travelTarget->GetDestination() : nullptr;
+    Unit* currentTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+    LootObject lootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+
+    std::ostringstream out;
+    out << "level=" << uint32(bot->GetLevel())
+        << " xp=" << bot->GetUInt32Value(PLAYER_XP)
+        << " nextXp=" << bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP)
+        << " money=" << bot->GetMoney()
+        << " map=" << bot->GetMapId()
+        << " x=" << std::fixed << std::setprecision(2) << bot->GetPositionX()
+        << " y=" << bot->GetPositionY()
+        << " z=" << bot->GetPositionZ()
+        << " dead=" << (sServerFacade.UnitIsDead(bot) ? 1 : 0)
+        << " ghost=" << (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) ? 1 : 0)
+        << " moving=" << ((sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0)
+        << " combat=" << (sServerFacade.IsInCombat(bot) ? 1 : 0)
+        << " casting=" << (bot->IsNonMeleeSpellCasted(true, false, true) ? 1 : 0)
+        << " apm=" << apm
+        << " decisionTpm=" << decisionTpm
+        << " sinceProgressSec=" << sinceProgressSec
+        << " quests=" << questLogCount
+        << " questComplete=" << questCompleteCount
+        << " questIncomplete=" << questIncompleteCount
+        << " questRewardReady=" << questRewardReadyCount
+        << " target=" << (currentTarget ? currentTarget->GetName() : "none")
+        << " loot=" << (!lootTarget.IsEmpty() ? 1 : 0)
+        << " travelStatus=" << (travelTarget ? static_cast<uint32>(travelTarget->GetStatus()) : 0)
+        << " travelEntry=" << (travelTarget ? travelTarget->GetEntry() : 0)
+        << " travelPtr=" << (destination ? 1 : 0);
+
+    sPlayerbotAIConfig.logEvent(this, "BotStatsSnapshot", "", out.str());
 }
 
 void PlayerbotAI::LogVisibleActivitySnapshot(time_t now)
@@ -1961,27 +4346,54 @@ void PlayerbotAI::LogVisibleActivitySnapshot(time_t now)
     const uint32 apm = static_cast<uint32>(std::round(actionMetricExecutedTicks * perMinute));
     const uint32 decisionTpm = static_cast<uint32>(std::round(actionMetricTicks * perMinute));
     const uint32 sinceProgressSec = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+    const bool unitDead = sServerFacade.UnitIsDead(bot);
+    const bool ghost = bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);
+    Corpse* corpse = bot->GetCorpse();
+    const bool hasCorpse = corpse;
+    const bool corpseRecoveryAction =
+        (unitDead || ghost || currentState == BotState::BOT_STATE_DEAD) &&
+        (currentState == BotState::BOT_STATE_DEAD || hasCorpse || ghost);
 
     TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
     Unit* currentTarget = AI_VALUE(Unit*, "current target");
     LootObject lootTarget = AI_VALUE(LootObject, "loot target");
     const bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
     const bool combat = sServerFacade.IsInCombat(bot);
+    const bool casting = bot->IsNonMeleeSpellCasted(true, false, true);
+    GuidPosition rpgTarget = AI_VALUE(GuidPosition, "rpg target");
+    const float corpseDist = corpse ? WorldPosition(bot).distance(WorldPosition(corpse)) : 0.0f;
+    const bool reclaimReady = corpse ?
+        corpse->GetGhostTime() + bot->GetCorpseReclaimDelay(corpse->GetType() == CORPSE_RESURRECTABLE_PVP) <= now :
+        false;
+    const bool validCorpseReclaimWait =
+        corpseRecoveryAction &&
+        corpse &&
+        !reclaimReady &&
+        corpseDist < CORPSE_RECLAIM_RADIUS - 5.0f;
     const bool passiveAction =
         actionMetricLastActionName.empty() ||
         actionMetricLastActionName == "check values" ||
         actionMetricLastActionName == "update pve strats" ||
         actionMetricLastActionName == "emote" ||
+        actionMetricLastActionName == "cannibalize" ||
         actionMetricLastActionName == "reset raids" ||
         actionMetricLastActionName == "clean quest log" ||
         actionMetricLastActionName == "reset travel target";
 
+    TravelDestination* visibleTravelDestination = travelTarget ? travelTarget->GetDestination() : nullptr;
+    const bool hasRealTravelDestination =
+        visibleTravelDestination && !dynamic_cast<NullTravelDestination*>(visibleTravelDestination);
+
     std::string visibleState = "active";
-    if (currentTarget)
+    if (validCorpseReclaimWait)
+        visibleState = "corpse_wait";
+    else if (corpseRecoveryAction)
+        visibleState = "corpse_recovery";
+    else if (currentTarget)
         visibleState = "target_stall";
     else if (!lootTarget.IsEmpty())
         visibleState = "loot_stall";
-    else if (travelTarget)
+    else if (travelTarget && hasRealTravelDestination)
     {
         switch (travelTarget->GetStatus())
         {
@@ -2002,15 +4414,94 @@ void PlayerbotAI::LogVisibleActivitySnapshot(time_t now)
         }
     }
 
-    if (passiveAction && !moving && !combat && !currentTarget && lootTarget.IsEmpty())
+    if (!corpseRecoveryAction && passiveAction && !moving && !combat && !currentTarget && lootTarget.IsEmpty())
         visibleState = "passive_loop";
 
-    if (visibleState == "active" && !moving && !combat && sinceProgressSec >= 15)
+    const bool hasTravelWork = IsActiveTravelWork(travelTarget) || IsPreparedTravelWork(travelTarget);
+    const bool usefulTargetMovement =
+        moving &&
+        currentTarget &&
+        (sinceProgressSec < VISIBLE_IDLE_WARN_SECONDS || actionMetricMoveProgressTicks > 0);
+    const bool usefulMoving =
+        moving &&
+        (combat || casting || usefulTargetMovement || !lootTarget.IsEmpty() || hasTravelWork || rpgTarget ||
+            corpseRecoveryAction);
+
+    if (!corpseRecoveryAction && visibleState == "active" && !usefulMoving && !combat && sinceProgressSec >= VISIBLE_IDLE_WARN_SECONDS)
         visibleState = "idle_loop";
+
+    int32 healthScore = 100;
+    std::string healthIssue = "ok";
+    auto penalize = [&](int32 penalty, const char* issue)
+    {
+        healthScore = std::max<int32>(0, healthScore - penalty);
+        if (healthIssue == "ok")
+            healthIssue = issue;
+    };
+
+    const bool dead = unitDead || ghost || currentState == BotState::BOT_STATE_DEAD;
+    const bool visibleTargetWork = IsVisibleTargetWork(bot, currentTarget, usefulTargetMovement);
+    const bool visibleCombatWork = combat && (casting || visibleTargetWork || usefulMoving);
+    const bool visibleTravelWork = hasTravelWork && usefulMoving;
+    const bool visibleLootWork = !lootTarget.IsEmpty() && (usefulMoving || casting);
+    const bool hasAssignedWork = currentTarget || !lootTarget.IsEmpty() || hasTravelWork || rpgTarget || combat;
+    const bool hasVisibleWork =
+        usefulMoving ||
+        validCorpseReclaimWait ||
+        casting ||
+        visibleCombatWork ||
+        visibleTargetWork ||
+        visibleLootWork ||
+        visibleTravelWork ||
+        corpseRecoveryAction;
+    const bool transientMetricWindow =
+        elapsedSeconds < 5.0 &&
+        sinceProgressSec < 5 &&
+        actionMetricNoProgressTicks <= 3 &&
+        actionMetricSameActionStreak < 20;
+    const bool assignedButNoVisibleWork =
+        hasAssignedWork &&
+        !hasVisibleWork &&
+        !validCorpseReclaimWait &&
+        !transientMetricWindow &&
+        sinceProgressSec >= VISIBLE_IDLE_WARN_SECONDS;
+
+    if (!hasVisibleWork && !transientMetricWindow)
+        penalize(55, "no_work");
+    if (assignedButNoVisibleWork)
+        penalize(45, "assigned_no_motion");
+    if (dead && !usefulMoving && !corpseRecoveryAction)
+        penalize(45, "dead_idle");
+    else if (dead && !usefulMoving && !validCorpseReclaimWait)
+        penalize(25, "dead_not_moving");
+    if (visibleState == "passive_loop" && !transientMetricWindow)
+        penalize(35, "passive_loop");
+    else if (visibleState == "idle_loop")
+        penalize(30, "idle_loop");
+    else if ((visibleState == "travel_work" || visibleState == "travel_move") && !usefulMoving && !combat && !casting)
+        penalize(30, "travel_no_motion");
+    if (apm == 0 && !transientMetricWindow && !validCorpseReclaimWait)
+        penalize(30, "zero_apm");
+    else if (apm < 20 && !transientMetricWindow && !validCorpseReclaimWait)
+        penalize(15, "low_apm");
+    if (sinceProgressSec >= 20 && !validCorpseReclaimWait)
+        penalize(35, "no_progress_20s");
+    else if (sinceProgressSec >= VISIBLE_IDLE_RESCUE_SECONDS && !validCorpseReclaimWait)
+        penalize(25, "no_progress_10s");
+    else if (sinceProgressSec >= VISIBLE_IDLE_WARN_SECONDS && !validCorpseReclaimWait)
+        penalize(15, "no_progress_5s");
+    if (!usefulMoving && !validCorpseReclaimWait && !combat && !casting && decisionTpm >= 120 && apm < 30 && !transientMetricWindow)
+        penalize(15, "busy_idle");
+    if (actionMetricSameActionStreak >= 80)
+        penalize(20, "same_action_80");
+    else if (actionMetricSameActionStreak >= 30)
+        penalize(10, "same_action_30");
 
     std::ostringstream out;
     out << "priority=" << static_cast<uint32>(priorityType)
         << " visibleState=" << visibleState
+        << " healthScore=" << healthScore
+        << " healthIssue=" << healthIssue
         << " apm=" << apm
         << " decisionTpm=" << decisionTpm
         << " windowSec=" << static_cast<uint32>(elapsedSeconds)
@@ -2018,19 +4509,34 @@ void PlayerbotAI::LogVisibleActivitySnapshot(time_t now)
         << " noProgressTicks=" << actionMetricNoProgressTicks
         << " sameActionStreak=" << actionMetricSameActionStreak
         << " sinceProgressSec=" << sinceProgressSec
+        << " moveProgressTicks=" << actionMetricMoveProgressTicks
         << " minimalTicks=" << actionMetricMinimalTicks
+        << " transient=" << (transientMetricWindow ? 1 : 0)
+        << " corpseWait=" << (validCorpseReclaimWait ? 1 : 0)
+        << " corpseDist=" << std::fixed << std::setprecision(1) << corpseDist
+        << " reclaimReady=" << (reclaimReady ? 1 : 0)
         << " " << BuildCurrentTaskSummary();
 
-    sPlayerbotAIConfig.logEvent(this, "VisibleBotActivityTrace",
-        actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName, out.str());
+    if (!corpseRecoveryAction)
+    {
+        sPlayerbotAIConfig.logEvent(this, "VisibleBotActivityTrace",
+            actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName, out.str());
+    }
 
-    if (decisionTpm >= 20 && apm < 20 && sinceProgressSec >= 15)
+    if (healthScore < 60 && (!corpseRecoveryAction || sinceProgressSec >= VISIBLE_IDLE_RESCUE_SECONDS))
+    {
+        sPlayerbotAIConfig.logEvent(this, "BotHealthLow",
+            actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName, out.str());
+    }
+
+    if (!corpseRecoveryAction && decisionTpm >= 20 && apm < 20 && sinceProgressSec >= VISIBLE_IDLE_WARN_SECONDS)
     {
         sPlayerbotAIConfig.logEvent(this, "VisibleBotLowApm",
             actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName, out.str());
     }
 
-    if (sinceProgressSec >= 15 &&
+    if (!corpseRecoveryAction &&
+        sinceProgressSec >= VISIBLE_IDLE_WARN_SECONDS &&
         (visibleState == "idle_loop" ||
          visibleState == "target_stall" ||
          visibleState == "loot_stall" ||
@@ -2041,6 +4547,316 @@ void PlayerbotAI::LogVisibleActivitySnapshot(time_t now)
     {
         sPlayerbotAIConfig.logEvent(this, "VisibleBotStuckState",
             actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName, out.str());
+    }
+
+    if (!corpseRecoveryAction && assignedButNoVisibleWork)
+    {
+        sPlayerbotAIConfig.logEvent(this, "VisibleAssignedNoMotion",
+            actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName, out.str());
+    }
+
+    const bool hardAssignedStall =
+        ENABLE_METRIC_RESCUES &&
+        !corpseRecoveryAction &&
+        assignedButNoVisibleWork &&
+        sinceProgressSec >= VISIBLE_IDLE_WARN_SECONDS &&
+        !dead &&
+        !casting &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsBeingTeleported() &&
+        !HasActivePlayerMaster() &&
+        !HasRealPlayerMaster();
+
+    if (hardAssignedStall)
+    {
+        if (moving && !usefulMoving)
+            StopMoving();
+
+        ObjectGuid clearedTargetGuid;
+        uint64 clearedLootGuid = 0;
+        std::string clearedTargetName = "none";
+        TravelStatus oldStatus = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+        TravelDestination* oldDestination = travelTarget ? travelTarget->GetDestination() : nullptr;
+        bool clearedTarget = false;
+        bool clearedLoot = false;
+        bool clearedTravel = false;
+        bool clearedRpg = false;
+        bool exitedCombat = false;
+
+        if (currentTarget &&
+            currentTarget->IsInWorld() &&
+            currentTarget->GetMapId() == bot->GetMapId() &&
+            !sServerFacade.IsFriendlyTo(bot, currentTarget))
+        {
+            clearedTargetGuid = currentTarget->GetObjectGuid();
+            clearedTargetName = currentTarget->GetName();
+            if (!sServerFacade.UnitIsDead(currentTarget))
+                DeferTargetGuidForBot(bot, clearedTargetGuid, 12);
+
+            RESET_AI_VALUE(bool, "has attackers");
+            ClearCurrentCombatTarget(aiObjectContext, bot, currentTarget, true);
+            OnCombatEnded();
+            ResetStaleTargetState();
+            clearedTarget = true;
+            exitedCombat = true;
+        }
+        else if (combat && !bot->GetVictim())
+        {
+            bot->CombatStop(false);
+            OnCombatEnded();
+            ResetStaleTargetState();
+            exitedCombat = true;
+        }
+
+        if (!lootTarget.IsEmpty())
+        {
+            clearedLootGuid = lootTarget.guid.GetCounter();
+            DeferLootGuidForBot(bot, lootTarget.guid, 10);
+            if (LootObjectStack* availableLoot = AI_VALUE(LootObjectStack*, "available loot"))
+                availableLoot->Remove(lootTarget.guid);
+            RESET_AI_VALUE(LootObject, "loot target");
+            clearedLoot = true;
+        }
+
+        if (travelTarget)
+        {
+            travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+            travelTarget->SetForced(false);
+            RESET_AI_VALUE(bool, "travel target active");
+            aiObjectContext->ClearValues("no active travel destinations");
+            clearedTravel = true;
+        }
+
+        if (rpgTarget)
+        {
+            RESET_AI_VALUE(GuidPosition, "rpg target");
+            clearedRpg = true;
+        }
+
+        RESET_AI_VALUE(ObjectGuid, "attack target");
+
+        bool questRequested = false;
+        bool travelChosen = false;
+        bool targetSelected = false;
+        bool attackAnything = false;
+        bool grindRequested = false;
+        bool travelMoved = false;
+        bool rpgChosen = false;
+        bool rpgMoved = false;
+        bool randomMoved = false;
+        bool idleNudged = false;
+
+        PushVisibleWork(this, aiObjectContext, bot, "visible-assigned-stall",
+            questRequested, travelChosen, targetSelected, attackAnything, grindRequested, travelMoved,
+            rpgChosen, rpgMoved, randomMoved, idleNudged, true);
+
+        Unit* rescuedTarget = AI_VALUE(Unit*, "current target");
+        LootObject rescuedLoot = AI_VALUE(LootObject, "loot target");
+        GuidPosition rescuedRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+        TravelTarget* rescuedTravel = AI_VALUE(TravelTarget*, "travel target");
+        TravelDestination* rescuedDestination = rescuedTravel ? rescuedTravel->GetDestination() : nullptr;
+        const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        const bool directedMovementWork =
+            HasDirectedMovementWork(rescuedTravel, rescuedRpgTarget, travelMoved, rpgMoved, movingAfter);
+        const bool fallbackMovementWork =
+            HasFallbackMovementWork(randomMoved, idleNudged, movingAfter);
+        const bool workAssigned =
+            HasConcreteRecoveryWork(bot, rescuedTravel, rescuedTarget, rescuedLoot, movingAfter,
+                travelMoved, false) ||
+            directedMovementWork ||
+            fallbackMovementWork;
+
+        std::ostringstream rescueOut;
+        rescueOut << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+            << " oldState=" << visibleState
+            << " oldStatus=" << static_cast<uint32>(oldStatus)
+            << " newStatus=" << (rescuedTravel ? static_cast<uint32>(rescuedTravel->GetStatus()) : 0)
+            << " sinceProgressSec=" << sinceProgressSec
+            << " noProgressTicks=" << actionMetricNoProgressTicks
+            << " sameActionStreak=" << actionMetricSameActionStreak
+            << " clearedTarget=" << (clearedTarget ? 1 : 0)
+            << " clearedTargetGuid=" << clearedTargetGuid.GetCounter()
+            << " clearedTargetName=" << clearedTargetName
+            << " clearedLoot=" << (clearedLoot ? 1 : 0)
+            << " clearedLootGuid=" << clearedLootGuid
+            << " clearedTravel=" << (clearedTravel ? 1 : 0)
+            << " clearedRpg=" << (clearedRpg ? 1 : 0)
+            << " exitedCombat=" << (exitedCombat ? 1 : 0)
+            << " quest=" << (questRequested ? 1 : 0)
+            << " choose=" << (travelChosen ? 1 : 0)
+            << " selectTarget=" << (targetSelected ? 1 : 0)
+            << " attackAnything=" << (attackAnything ? 1 : 0)
+            << " grindRequest=" << (grindRequested ? 1 : 0)
+            << " rpgChoose=" << (rpgChosen ? 1 : 0)
+            << " travelMove=" << (travelMoved ? 1 : 0)
+            << " rpgMove=" << (rpgMoved ? 1 : 0)
+            << " randomMove=" << (randomMoved ? 1 : 0)
+            << " idleNudge=" << (idleNudged ? 1 : 0)
+            << " directedMove=" << (directedMovementWork ? 1 : 0)
+            << " fallbackMove=" << (fallbackMovementWork ? 1 : 0)
+            << " movingAfter=" << (movingAfter ? 1 : 0)
+            << " target=" << (rescuedTarget ? rescuedTarget->GetName() : "none")
+            << " loot=" << (!rescuedLoot.IsEmpty() ? 1 : 0)
+            << " rpgTarget=" << (rescuedRpgTarget ? 1 : 0)
+            << " workAssigned=" << (workAssigned ? 1 : 0)
+            << " destinationPtr=" << (rescuedDestination ? 1 : (oldDestination ? 1 : 0));
+        sPlayerbotAIConfig.logEvent(this, "VisibleAssignedStallRescue", "", rescueOut.str());
+
+        if (workAssigned)
+            actionMetricLastProgress = now;
+    }
+
+    const bool hardVisibleIdle =
+        ENABLE_METRIC_RESCUES &&
+        !corpseRecoveryAction &&
+        !hasVisibleWork &&
+        sinceProgressSec >= VISIBLE_IDLE_RESCUE_SECONDS &&
+        !validCorpseReclaimWait;
+
+    if (((healthScore == 0 && healthIssue == "no_work") || hardVisibleIdle) &&
+        !corpseRecoveryAction &&
+        !HasActivePlayerMaster() &&
+        !HasRealPlayerMaster() &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !dead &&
+        !combat &&
+        !casting &&
+        !currentTarget &&
+        lootTarget.IsEmpty())
+    {
+        if (moving && !usefulMoving)
+            StopMoving();
+
+        TravelStatus oldStatus = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+        TravelDestination* oldDestination = travelTarget ? travelTarget->GetDestination() : nullptr;
+        if (travelTarget)
+        {
+            travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+            travelTarget->SetForced(false);
+        }
+
+        RESET_AI_VALUE(bool, "travel target active");
+        RESET_AI_VALUE(GuidPosition, "rpg target");
+        RESET_AI_VALUE(ObjectGuid, "attack target");
+        aiObjectContext->GetValue<bool>("no active travel destinations", "quest")->Reset();
+
+        bool questRequested = false;
+        bool travelChosen = false;
+        bool targetSelected = false;
+        bool attackAnything = false;
+        bool grindRequested = false;
+        bool travelMoved = false;
+        bool rpgChosen = false;
+        bool rpgMoved = false;
+        bool randomMoved = false;
+        bool idleNudged = false;
+
+        auto visibleHasImmediateWork = [&]() -> bool
+        {
+            Unit* workTarget = AI_VALUE(Unit*, "current target");
+            LootObject workLoot = AI_VALUE(LootObject, "loot target");
+            GuidPosition workRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+            TravelTarget* workTravel = AI_VALUE(TravelTarget*, "travel target");
+            const bool workMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool directedMovement =
+                HasDirectedMovementWork(workTravel, workRpgTarget, travelMoved, rpgMoved, workMoving);
+            return HasUsefulAssignedWork(bot, workTravel, workTarget, workLoot, workMoving, directedMovement);
+        };
+
+        auto visibleTryAssignedTravelMove = [&]() -> bool
+        {
+            const bool moved = MoveAssignedTravelWork(this, aiObjectContext, bot, "visible-no-work");
+            travelMoved = travelMoved || moved;
+            return moved;
+        };
+
+        questRequested = DoSpecificAction("request quest travel target", Event(), true);
+        if (questRequested)
+            visibleTryAssignedTravelMove();
+
+        if (!visibleHasImmediateWork())
+        {
+            travelChosen = DoSpecificAction("choose travel target", Event(), true);
+            if (travelChosen)
+                visibleTryAssignedTravelMove();
+        }
+
+        if (!visibleHasImmediateWork())
+        {
+            ResetTargetScanCaches(aiObjectContext);
+            targetSelected = DoSpecificAction("select new target", Event(), true);
+        }
+
+        if (!visibleHasImmediateWork())
+            attackAnything = DoSpecificAction("attack anything", Event(), true);
+
+        if (!visibleHasImmediateWork())
+        {
+            Unit* selectedTarget = AI_VALUE(Unit*, "current target");
+            if (selectedTarget)
+                attackAnything = ForceConcreteTargetWork(this, bot, selectedTarget, "visible-no-work-target-handoff") ||
+                    attackAnything;
+        }
+
+        if (!visibleHasImmediateWork())
+        {
+            grindRequested = RequestGrindTravelFallback(this, aiObjectContext, bot, "visible-no-work");
+            if (grindRequested)
+                visibleTryAssignedTravelMove();
+        }
+
+        const bool allowVisibleFallbackMovement = false;
+        if (allowVisibleFallbackMovement && !visibleHasImmediateWork())
+        {
+            rpgChosen = DoSpecificAction("choose rpg target", Event(), true);
+            rpgMoved = DoSpecificAction("move to rpg target", Event(), true);
+            if (!visibleHasImmediateWork() && !rpgMoved)
+                randomMoved = DoSpecificAction("move random", Event("visible no work", "emergency rescue", bot), true);
+            if (!visibleHasImmediateWork() && !randomMoved && !sServerFacade.isMoving(bot) && !bot->isMovingOrTurning())
+                idleNudged = ForceIdleRescueNudge(this, bot, "visible-no-work");
+        }
+
+        Unit* rescuedTarget = AI_VALUE(Unit*, "current target");
+        LootObject rescuedLoot = AI_VALUE(LootObject, "loot target");
+        GuidPosition rescuedRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+        TravelTarget* rescuedTravel = AI_VALUE(TravelTarget*, "travel target");
+        TravelDestination* rescuedDestination = rescuedTravel ? rescuedTravel->GetDestination() : nullptr;
+        const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        const bool directedMovementWork =
+            HasDirectedMovementWork(rescuedTravel, rescuedRpgTarget, travelMoved, rpgMoved, movingAfter);
+        const bool workAssigned =
+            HasConcreteRecoveryWork(bot, rescuedTravel, rescuedTarget, rescuedLoot, movingAfter,
+                travelMoved, false);
+
+        std::ostringstream rescueOut;
+        rescueOut << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+            << " oldStatus=" << static_cast<uint32>(oldStatus)
+            << " newStatus=" << (rescuedTravel ? static_cast<uint32>(rescuedTravel->GetStatus()) : 0)
+            << " sinceProgressSec=" << sinceProgressSec
+            << " sameActionStreak=" << actionMetricSameActionStreak
+            << " hardIdle=" << (hardVisibleIdle ? 1 : 0)
+            << " quest=" << (questRequested ? 1 : 0)
+            << " choose=" << (travelChosen ? 1 : 0)
+            << " selectTarget=" << (targetSelected ? 1 : 0)
+            << " attackAnything=" << (attackAnything ? 1 : 0)
+            << " grindRequest=" << (grindRequested ? 1 : 0)
+            << " rpgChoose=" << (rpgChosen ? 1 : 0)
+            << " travelMove=" << (travelMoved ? 1 : 0)
+            << " rpgMove=" << (rpgMoved ? 1 : 0)
+            << " randomMove=" << (randomMoved ? 1 : 0)
+            << " idleNudge=" << (idleNudged ? 1 : 0)
+            << " nudgeOnly=" << ((randomMoved || idleNudged) && !workAssigned ? 1 : 0)
+            << " directedMove=" << (directedMovementWork ? 1 : 0)
+            << " movingAfter=" << (movingAfter ? 1 : 0)
+            << " target=" << (rescuedTarget ? rescuedTarget->GetName() : "none")
+            << " loot=" << (!rescuedLoot.IsEmpty() ? 1 : 0)
+            << " rpgTarget=" << (rescuedRpgTarget ? 1 : 0)
+            << " workAssigned=" << (workAssigned ? 1 : 0)
+            << " destinationPtr=" << (rescuedDestination ? 1 : (oldDestination ? 1 : 0));
+        sPlayerbotAIConfig.logEvent(this, "VisibleNoWorkEmergencyRescue", "", rescueOut.str());
+
+        if (workAssigned)
+            actionMetricLastProgress = now;
     }
 }
 
@@ -2067,6 +4883,11 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
         actionMetricWindowStart = now;
         actionMetricLastProgress = now;
         actionMetricLastSnapshot = now;
+        actionMetricHasLastMovePosition = true;
+        actionMetricLastMoveMap = bot->GetMapId();
+        actionMetricLastMoveX = bot->GetPositionX();
+        actionMetricLastMoveY = bot->GetPositionY();
+        actionMetricLastMoveZ = bot->GetPositionZ();
     }
 
     ++actionMetricTicks;
@@ -2075,8 +4896,41 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
         ++actionMetricMinimalTicks;
     if (bot->isAFK())
         ++actionMetricAfkTicks;
-    if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning())
+    const bool movementIntent = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+    bool movementProgress = false;
+    const uint32 currentMoveMap = bot->GetMapId();
+    const float currentMoveX = bot->GetPositionX();
+    const float currentMoveY = bot->GetPositionY();
+    const float currentMoveZ = bot->GetPositionZ();
+    if (movementIntent)
+    {
+        if (actionMetricHasLastMovePosition && actionMetricLastMoveMap == currentMoveMap)
+        {
+            const float dx = currentMoveX - actionMetricLastMoveX;
+            const float dy = currentMoveY - actionMetricLastMoveY;
+            const float dz = currentMoveZ - actionMetricLastMoveZ;
+            // This runs at server tick cadence. With many bots the per-update
+            // movement delta can be far below a quarter yard even while the bot
+            // is visibly walking, so use a small threshold and let the stall
+            // timer catch true no-progress cases.
+            movementProgress = (dx * dx + dy * dy + dz * dz) >= 0.03f * 0.03f;
+        }
+        else if (actionMetricHasLastMovePosition)
+        {
+            movementProgress = true;
+        }
+    }
+
+    actionMetricHasLastMovePosition = true;
+    actionMetricLastMoveMap = currentMoveMap;
+    actionMetricLastMoveX = currentMoveX;
+    actionMetricLastMoveY = currentMoveY;
+    actionMetricLastMoveZ = currentMoveZ;
+
+    if (movementIntent)
         ++actionMetricMovingTicks;
+    if (movementProgress)
+        ++actionMetricMoveProgressTicks;
     if (sServerFacade.IsInCombat(bot))
         ++actionMetricCombatTicks;
     if (AI_VALUE(Unit*, "current target"))
@@ -2085,6 +4939,7 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
     TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
     TravelDestination* destination = travelTarget ? travelTarget->GetDestination() : nullptr;
     const bool travelActive = travelTarget && travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_NONE;
+    const bool travelWorkActive = IsActiveTravelWork(travelTarget);
     if (travelActive)
         ++actionMetricTravelTicks;
     if (destination)
@@ -2118,13 +4973,77 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
     if (staleReset)
         ++actionMetricStaleResets;
 
-    if (actionExecuted || staleReset)
+    const bool currentCombat = sServerFacade.IsInCombat(bot);
+    const bool currentCasting = bot->IsNonMeleeSpellCasted(true, false, true);
+    Unit* metricCurrentTarget = AI_VALUE(Unit*, "current target");
+    const bool hasCurrentTarget = metricCurrentTarget != nullptr;
+    const bool hasLootTarget = !AI_VALUE(LootObject, "loot target").IsEmpty();
+    GuidPosition activeRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+    const bool usefulMovementProgress =
+        movementProgress &&
+        (currentCombat || currentCasting || hasCurrentTarget || hasLootTarget || travelWorkActive || activeRpgTarget);
+    const bool visibleTargetWork = IsVisibleTargetWork(bot, metricCurrentTarget, movementProgress);
+    // A bot standing still while actively meleeing its target is doing REAL work,
+    // not stalling. The old streak-based "melee swing loop" detector flipped on at
+    // sameActionStreak >= 60 and made hasLiveWork=false, so the no-progress timer
+    // climbed during every melee fight and tripped the rescue system below, which
+    // yanked the bot off its target into a fake "look active" move. Never treat an
+    // active melee swing as "no progress".
+    const bool meleeSwingLoop = false;
+    const bool hasLiveWork =
+        usefulMovementProgress ||
+        currentCasting ||
+        (visibleTargetWork && !meleeSwingLoop);
+    const bool fillerNoWorkAction =
+        lastActionName.empty() ||
+        lastActionName == "none" ||
+        lastActionName == "check values" ||
+        lastActionName == "update pve strats" ||
+        lastActionName == "emote" ||
+        lastActionName == "jump" ||
+        lastActionName == "cannibalize" ||
+        lastActionName == "drink" ||
+        lastActionName == "food" ||
+        lastActionName == "clean quest log" ||
+        lastActionName == "reset raids" ||
+        lastActionName == "reset travel target" ||
+        // NOTE: the bot's own PLANNING/navigation actions (choose travel target,
+        // request quest travel target, request named travel target, choose rpg
+        // target, move to rpg target) are NOT "filler / no work" - they are the bot
+        // actively deciding where to go and pursuing it. Counting them as no-work is
+        // what made a normally-questing bot trip the idle/stall rescue cascades every
+        // ~6-12 ticks, which then cleared the travel target it had just picked
+        // (self-perpetuating churn). They are intentionally NOT listed here.
+        lastActionName == "move random" ||
+        lastActionName == "add all loot" ||
+        lastActionName == "loot" ||
+        lastActionName == "store loot" ||
+        lastActionName == "attack anything" ||
+        lastActionName == "attack my target" ||
+        lastActionName == "accept trade" ||
+        lastActionName == "accept invitation" ||
+        lastActionName == "invite nearby" ||
+        lastActionName == "rpg duel" ||
+        lastActionName == "rpg gossip talk" ||
+        lastActionName == "rpg emote" ||
+        lastActionName == "rpg stay" ||
+        lastActionName == "rpg use" ||
+        lastActionName == "rpg sell" ||
+        lastActionName == "rpg cancel";
+    const bool usefulActionProgress =
+        actionExecuted &&
+        (hasLiveWork || (!fillerNoWorkAction && !currentCombat && !hasCurrentTarget));
+
+    if (usefulActionProgress || staleReset || usefulMovementProgress)
     {
         ++actionMetricExecutedTicks;
         actionMetricLastProgress = now;
+        actionMetricNoProgressTicks = 0;
     }
     else
     {
+        if (actionExecuted)
+            ++actionMetricExecutedTicks;
         ++actionMetricNoProgressTicks;
     }
 
@@ -2134,15 +5053,641 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
         actionMetricLastSnapshot = now;
     }
 
-    if ((now - actionMetricLastVisibleSnapshot) >= 15)
-    {
-        LogVisibleActivitySnapshot(now);
-        actionMetricLastVisibleSnapshot = now;
-    }
-
     const time_t noProgressSecs = actionMetricLastProgress ? (now - actionMetricLastProgress) : 0;
 
-    if (!minimal && !actionExecuted && actionMetricLastProgress && noProgressSecs >= 15)
+    if (!minimal &&
+        !HasActivePlayerMaster() &&
+        !HasRealPlayerMaster() &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !sServerFacade.UnitIsDead(bot) &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsBeingTeleported() &&
+        !currentCasting &&
+        !currentCombat &&
+        ENABLE_METRIC_RESCUES &&
+        noProgressSecs >= 6)
+    {
+        // NOTE: this whole "hard idle / stall rescue" block is now gated on
+        // !currentCombat. A bot in real combat must NEVER be declared stalled,
+        // have its target deferred/cleared, or be force-moved — that was the
+        // "fake move every melee fight" behavior. Reachability while fighting is
+        // handled in AttackAction (relocate-to-unreachable), not by this rescue.
+        Unit* hardTarget = AI_VALUE(Unit*, "current target");
+        LootObject hardLoot = AI_VALUE(LootObject, "loot target");
+        TravelTarget* hardTravel = AI_VALUE(TravelTarget*, "travel target");
+        TravelDestination* hardDestination = hardTravel ? hardTravel->GetDestination() : nullptr;
+        const bool hardDestinationPresent = hardDestination != nullptr;
+        const TravelStatus hardOldStatus = hardTravel ? hardTravel->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+        GuidPosition hardRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+        const bool hardNullDestination = !hardDestinationPresent;
+        const bool hardTravelActive = IsActiveTravelWork(hardTravel);
+        const bool hardTravelPreparing = hardOldStatus == TravelStatus::TRAVEL_STATUS_PREPARE;
+        const bool hardTargetVisible =
+            hardTarget &&
+            hardTarget->IsInWorld() &&
+            hardTarget->GetMapId() == bot->GetMapId() &&
+            !sServerFacade.IsFriendlyTo(bot, hardTarget);
+        const bool hardMeleeConnected =
+            hardTargetVisible &&
+            bot->GetVictim() == hardTarget &&
+            bot->CanReachWithMeleeAutoAttack(hardTarget) &&
+            bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+        const bool hardFakeMovement =
+            movementIntent && !movementProgress &&
+            (actionMetricNoProgressTicks >= 12 || actionMetricSameActionStreak >= 12 || noProgressSecs >= 8);
+        const bool hardCombatStall =
+            currentCombat &&
+            hardTargetVisible &&
+            !hardMeleeConnected &&
+            !movementProgress &&
+            (actionMetricNoProgressTicks >= 12 || actionMetricSameActionStreak >= 12 || noProgressSecs >= 8);
+        // A bot connected in melee with its target in real combat is NEVER stalled.
+        // The old streak-based "melee loop stall" declared an actively-fighting bot
+        // stuck after 45 identical swings and deferred its target for 20 ticks, making
+        // it run off mid-fight and return — the "fake move every melee fight" cheat.
+        // Disabled: real melee combat is real work.
+        const bool hardMeleeLoopStall = false;
+        const bool hardNoVisibleWork =
+            !currentCombat &&
+            !movementProgress &&
+            !hardMeleeConnected &&
+            (fillerNoWorkAction || actionMetricNoProgressTicks >= 12 || actionMetricSameActionStreak >= 12);
+        const bool hardTravelStall =
+            hardTravel &&
+            !movementProgress &&
+            ((!hardTravelPreparing && hardNullDestination) ||
+             hardOldStatus == TravelStatus::TRAVEL_STATUS_NONE ||
+             hardOldStatus == TravelStatus::TRAVEL_STATUS_COOLDOWN ||
+             hardOldStatus == TravelStatus::TRAVEL_STATUS_EXPIRED ||
+             (hardTravelPreparing && noProgressSecs >= 20) ||
+             (hardTravelActive && (actionMetricNoProgressTicks >= 12 || noProgressSecs >= 8)));
+        const bool hardLootStall =
+            !hardLoot.IsEmpty() &&
+            !movementProgress &&
+            (actionMetricNoProgressTicks >= 12 || actionMetricSameActionStreak >= 12 || noProgressSecs >= 8);
+        const bool hardTargetStall =
+            hardTargetVisible &&
+            !hardMeleeConnected &&
+            !movementProgress &&
+            !currentCasting &&
+            (actionMetricNoProgressTicks >= 12 || actionMetricSameActionStreak >= 12 || noProgressSecs >= 8);
+
+        if (hardFakeMovement || hardCombatStall || hardMeleeLoopStall || hardNoVisibleWork ||
+            hardTravelStall || hardLootStall || hardTargetStall)
+        {
+            bool clearedTravel = false;
+            bool clearedTarget = false;
+            bool clearedLoot = false;
+            bool clearedRpg = false;
+            ObjectGuid targetGuid;
+            uint64 lootGuid = 0;
+            std::string targetName = "none";
+
+            if (movementIntent && !movementProgress)
+                StopMoving();
+
+            if (!hardLoot.IsEmpty())
+            {
+                lootGuid = hardLoot.guid.GetCounter();
+                DeferLootGuidForBot(bot, hardLoot.guid, 10);
+                if (LootObjectStack* availableLoot = AI_VALUE(LootObjectStack*, "available loot"))
+                    availableLoot->Remove(hardLoot.guid);
+                RESET_AI_VALUE(LootObject, "loot target");
+                clearedLoot = true;
+            }
+
+            if (hardTargetVisible && (!currentCombat || hardCombatStall || hardMeleeLoopStall || hardTargetStall))
+            {
+                targetGuid = hardTarget->GetObjectGuid();
+                targetName = hardTarget->GetName();
+                const bool hardTargetDead = sServerFacade.UnitIsDead(hardTarget);
+                if (!hardTargetDead && (hardCombatStall || hardMeleeLoopStall || hardTargetStall))
+                {
+                    DeferTargetGuidForBot(bot, targetGuid, hardMeleeLoopStall ? 20 : 12);
+                    ResetTargetScanCaches(context);
+                }
+                RESET_AI_VALUE(bool, "has attackers");
+                ClearCurrentCombatTarget(context, bot, hardTarget, !hardTargetDead);
+                if (!hardTargetDead)
+                    bot->CombatStop(false);
+                OnCombatEnded();
+                ResetStaleTargetState();
+                clearedTarget = true;
+            }
+
+            const bool hardTravelInvalid =
+                hardTravel &&
+                (!hardTravelPreparing && hardNullDestination ||
+                 hardOldStatus == TravelStatus::TRAVEL_STATUS_NONE ||
+                 hardOldStatus == TravelStatus::TRAVEL_STATUS_COOLDOWN ||
+                 hardOldStatus == TravelStatus::TRAVEL_STATUS_EXPIRED);
+            if (hardTravelInvalid)
+            {
+                hardTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                hardTravel->SetForced(false);
+                RESET_AI_VALUE(bool, "travel target active");
+                context->ClearValues("no active travel destinations");
+                clearedTravel = true;
+            }
+
+            if (hardRpgTarget)
+            {
+                RESET_AI_VALUE(GuidPosition, "rpg target");
+                clearedRpg = true;
+            }
+
+            bool questRequested = false;
+            bool travelChosen = false;
+            bool targetSelected = false;
+            bool attackAnything = false;
+            bool grindRequested = false;
+            bool travelMoved = false;
+            bool rpgChosen = false;
+            bool rpgMoved = false;
+            bool randomMoved = false;
+            bool idleNudged = false;
+            const bool suppressLocalTargetRetry =
+                hardMeleeLoopStall &&
+                !movementProgress &&
+                noProgressSecs >= 10;
+
+            auto hasImmediateWork = [&]() -> bool
+            {
+                Unit* workTarget = AI_VALUE(Unit*, "current target");
+                LootObject workLoot = AI_VALUE(LootObject, "loot target");
+                GuidPosition workRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+                TravelTarget* workTravel = AI_VALUE(TravelTarget*, "travel target");
+                const bool workMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool directedMovement =
+                    HasDirectedMovementWork(workTravel, workRpgTarget, travelMoved, rpgMoved, workMoving);
+                return HasUsefulAssignedWork(bot, workTravel, workTarget, workLoot, workMoving, directedMovement);
+            };
+
+            auto tryAssignedTravelMove = [&]() -> bool
+            {
+                const bool moved = MoveAssignedTravelWork(this, context, bot, "hard-idle");
+                travelMoved = travelMoved || moved;
+                return moved;
+            };
+
+            if (IsActiveTravelWork(hardTravel))
+                tryAssignedTravelMove();
+
+            questRequested = DoSpecificAction("request quest travel target", Event(), true);
+            if (questRequested)
+                tryAssignedTravelMove();
+
+            if (!hasImmediateWork())
+            {
+                travelChosen = DoSpecificAction("choose travel target", Event(), true);
+                if (travelChosen)
+                    tryAssignedTravelMove();
+            }
+
+            if (!suppressLocalTargetRetry && !hasImmediateWork())
+            {
+                ResetTargetScanCaches(context);
+                targetSelected = DoSpecificAction("select new target", Event(), true);
+            }
+
+            // Selecting a target is not visible work. Immediately push the target
+            // through attack/reach so melee bots do not stand staring at mobs.
+            if (!suppressLocalTargetRetry && !hasImmediateWork())
+                attackAnything = DoSpecificAction("attack anything", Event(), true);
+
+            if (!suppressLocalTargetRetry && !hasImmediateWork())
+            {
+                Unit* selectedTarget = AI_VALUE(Unit*, "current target");
+                if (selectedTarget)
+                    attackAnything = ForceConcreteTargetWork(this, bot, selectedTarget, "hard-idle-target-handoff") ||
+                        attackAnything;
+            }
+
+            if (!hasImmediateWork())
+            {
+                grindRequested = RequestGrindTravelFallback(this, context, bot, "hard-idle");
+                if (grindRequested)
+                    tryAssignedTravelMove();
+            }
+
+            // If planning cannot produce quest/travel/target work, do not leave
+            // the bot visually dead. A small RPG/random/nudge move keeps it
+            // participating while the next planner tick finds stronger work.
+            const bool allowHardIdleFallbackMovement = true;
+            if (allowHardIdleFallbackMovement && !hasImmediateWork())
+            {
+                rpgChosen = DoSpecificAction("choose rpg target", Event(), true);
+                rpgMoved = DoSpecificAction("move to rpg target", Event(), true);
+                if (!hasImmediateWork() && !rpgMoved)
+                    randomMoved = DoSpecificAction("move random", Event("hard idle", "visible hard idle rescue", bot), true);
+                if (!hasImmediateWork() && !randomMoved && !sServerFacade.isMoving(bot) && !bot->isMovingOrTurning())
+                    idleNudged = ForceIdleRescueNudge(this, bot, "hard-idle");
+            }
+
+            Unit* newTarget = AI_VALUE(Unit*, "current target");
+            const std::string newTargetName =
+                (newTarget && newTarget->IsInWorld()) ? newTarget->GetName() : "none";
+            LootObject newLoot = AI_VALUE(LootObject, "loot target");
+            GuidPosition newRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+            TravelTarget* newTravel = AI_VALUE(TravelTarget*, "travel target");
+            const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool directedMovementWork =
+                HasDirectedMovementWork(newTravel, newRpgTarget, travelMoved, rpgMoved, movingAfter);
+            bool reacquiredClearedTarget =
+                targetGuid &&
+                newTarget &&
+                newTarget->GetObjectGuid() == targetGuid &&
+                (hardCombatStall || hardMeleeLoopStall || hardTargetStall) &&
+                !bot->IsNonMeleeSpellCasted(true, false, true);
+            if (reacquiredClearedTarget)
+            {
+                DeferTargetGuidForBot(bot, targetGuid, hardMeleeLoopStall ? 30 : 18);
+                ClearCurrentCombatTarget(context, bot, newTarget, true);
+                OnCombatEnded();
+                ResetStaleTargetState();
+
+                PushVisibleWork(this, context, bot, "hard-idle-reacquire-clear",
+                    questRequested, travelChosen, targetSelected, attackAnything, grindRequested, travelMoved,
+                    rpgChosen, rpgMoved, randomMoved, idleNudged, true, !suppressLocalTargetRetry);
+
+                newTarget = AI_VALUE(Unit*, "current target");
+                newLoot = AI_VALUE(LootObject, "loot target");
+                newRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+                newTravel = AI_VALUE(TravelTarget*, "travel target");
+            }
+
+            if (newTarget &&
+                !suppressLocalTargetRetry &&
+                !bot->IsNonMeleeSpellCasted(true, false, true) &&
+                !(bot->GetVictim() == newTarget && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING)))
+            {
+                attackAnything = ForceConcreteTargetWork(this, bot, newTarget, "hard-idle-target-handoff") ||
+                    attackAnything;
+                newTarget = AI_VALUE(Unit*, "current target");
+                newLoot = AI_VALUE(LootObject, "loot target");
+                newRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+                newTravel = AI_VALUE(TravelTarget*, "travel target");
+            }
+
+            const bool staleSuppressedTarget =
+                suppressLocalTargetRetry &&
+                newTarget &&
+                !bot->IsNonMeleeSpellCasted(true, false, true) &&
+                !(bot->GetVictim() == newTarget &&
+                  bot->CanReachWithMeleeAutoAttack(newTarget) &&
+                  bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING));
+            if (staleSuppressedTarget)
+            {
+                DeferTargetGuidForBot(bot, newTarget->GetObjectGuid(), hardMeleeLoopStall ? 30 : 18);
+                ClearCurrentCombatTarget(context, bot, newTarget, true);
+                OnCombatEnded();
+                ResetStaleTargetState();
+                ResetTargetScanCaches(context);
+
+                newTarget = nullptr;
+                newLoot = AI_VALUE(LootObject, "loot target");
+                newRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+                newTravel = AI_VALUE(TravelTarget*, "travel target");
+            }
+
+            const bool movingAfterReacquireClear = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool directedMovementAfterReacquireClear =
+                HasDirectedMovementWork(newTravel, newRpgTarget, travelMoved, rpgMoved, movingAfterReacquireClear);
+            const bool concreteRecoveryWork =
+                HasConcreteRecoveryWork(bot, newTravel, newTarget, newLoot, movingAfterReacquireClear,
+                    travelMoved, false) &&
+                (!reacquiredClearedTarget || !newTarget || newTarget->GetObjectGuid() != targetGuid);
+            const bool fallbackRecoveryProbe = HasFallbackMovementWork(randomMoved, idleNudged, movingAfterReacquireClear);
+            const bool workAssigned =
+                concreteRecoveryWork ||
+                directedMovementAfterReacquireClear ||
+                fallbackRecoveryProbe;
+            const bool rescueAttempted =
+                questRequested || travelChosen || targetSelected || attackAnything || grindRequested ||
+                travelMoved || rpgChosen || rpgMoved || randomMoved || idleNudged || clearedTravel ||
+                clearedTarget || clearedLoot || clearedRpg;
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason="
+                    << (hardCombatStall ? "combat-stall" :
+                        hardMeleeLoopStall ? "melee-loop-stall" :
+                        hardTargetStall ? "target-stall" :
+                        hardLootStall ? "loot-stall" :
+                        hardTravelStall ? "travel-stall" :
+                        hardFakeMovement ? "fake-movement" : "no-visible-work")
+                    << " action=" << (lastActionName.empty() ? "none" : lastActionName)
+                    << " noProgressSec=" << noProgressSecs
+                    << " noProgressTicks=" << actionMetricNoProgressTicks
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " moveProgressTicks=" << actionMetricMoveProgressTicks
+                    << " movingIntent=" << (movementIntent ? 1 : 0)
+                    << " movementProgress=" << (movementProgress ? 1 : 0)
+                    << " oldStatus=" << static_cast<uint32>(hardOldStatus)
+                    << " nullDest=" << (hardNullDestination ? 1 : 0)
+                    << " clearedTravel=" << (clearedTravel ? 1 : 0)
+                    << " clearedTarget=" << (clearedTarget ? 1 : 0)
+                    << " clearedLoot=" << (clearedLoot ? 1 : 0)
+                    << " clearedRpg=" << (clearedRpg ? 1 : 0)
+                    << " target=" << targetName
+                    << " targetGuid=" << targetGuid.GetCounter()
+                    << " lootGuid=" << lootGuid
+                    << " quest=" << (questRequested ? 1 : 0)
+                    << " choose=" << (travelChosen ? 1 : 0)
+                    << " selectTarget=" << (targetSelected ? 1 : 0)
+                    << " attackAnything=" << (attackAnything ? 1 : 0)
+                    << " grindRequest=" << (grindRequested ? 1 : 0)
+                    << " rpgChoose=" << (rpgChosen ? 1 : 0)
+                    << " travelMove=" << (travelMoved ? 1 : 0)
+                    << " rpgMove=" << (rpgMoved ? 1 : 0)
+                    << " randomMove=" << (randomMoved ? 1 : 0)
+                    << " idleNudge=" << (idleNudged ? 1 : 0)
+                    << " movingAfter=" << (movingAfterReacquireClear ? 1 : 0)
+                    << " directedMove=" << (directedMovementAfterReacquireClear ? 1 : 0)
+                    << " suppressLocalTargetRetry=" << (suppressLocalTargetRetry ? 1 : 0)
+                    << " reacquiredClearedTarget=" << (reacquiredClearedTarget ? 1 : 0)
+                    << " staleSuppressedTarget=" << (staleSuppressedTarget ? 1 : 0)
+                    << " newTarget=" << newTargetName
+                    << " newLoot=" << (!newLoot.IsEmpty() ? 1 : 0)
+                    << " newRpgTarget=" << (newRpgTarget ? 1 : 0)
+                    << " concreteWork=" << (concreteRecoveryWork ? 1 : 0)
+                    << " fallbackProbe=" << (fallbackRecoveryProbe ? 1 : 0)
+                    << " workAssigned=" << (workAssigned ? 1 : 0)
+                    << " destinationPtr=" << (hardDestinationPresent ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(this, "HardIdleBotTrace", "", out.str());
+            }
+
+            if (workAssigned)
+            {
+                actionMetricLastProgress = now;
+                return;
+            }
+
+            if (rescueAttempted && (movingAfterReacquireClear || newRpgTarget || newTravel))
+            {
+                StopMoving();
+                bot->InterruptMoving(true);
+                RESET_AI_VALUE(GuidPosition, "rpg target");
+
+                if (newTravel && !IsActiveTravelWork(newTravel) && !IsPreparedTravelWork(newTravel))
+                {
+                    newTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    newTravel->SetForced(false);
+                    RESET_AI_VALUE(bool, "travel target active");
+                }
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 5) == 1)
+                {
+                    std::ostringstream out;
+                    out << "reason=no-concrete-work"
+                        << " oldReason="
+                        << (hardCombatStall ? "combat-stall" :
+                            hardMeleeLoopStall ? "melee-loop-stall" :
+                            hardTargetStall ? "target-stall" :
+                            hardLootStall ? "loot-stall" :
+                            hardTravelStall ? "travel-stall" :
+                            hardFakeMovement ? "fake-movement" : "no-visible-work")
+                        << " movingAfter=" << (movingAfterReacquireClear ? 1 : 0)
+                        << " travelStatus=" << (newTravel ? static_cast<uint32>(newTravel->GetStatus()) : 0)
+                        << " rpgTarget=" << (newRpgTarget ? 1 : 0)
+                        << " target=" << (newTarget ? newTarget->GetName() : "none")
+                        << " loot=" << (!newLoot.IsEmpty() ? 1 : 0)
+                        << " randomMove=" << (randomMoved ? 1 : 0)
+                        << " idleNudge=" << (idleNudged ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "NoConcreteWorkClear", "", out.str());
+                }
+            }
+        }
+    }
+
+    if (!minimal &&
+        !HasActivePlayerMaster() &&
+        !HasRealPlayerMaster() &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !sServerFacade.UnitIsDead(bot) &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsBeingTeleported() &&
+        !currentCombat &&
+        !currentCasting &&
+        !hasCurrentTarget &&
+        !hasLootTarget &&
+        fillerNoWorkAction &&
+        ENABLE_METRIC_RESCUES &&
+        noProgressSecs >= VISIBLE_IDLE_WARN_SECONDS)
+    {
+        TravelTarget* noWorkTravel = AI_VALUE(TravelTarget*, "travel target");
+        TravelDestination* noWorkDestination = noWorkTravel ? noWorkTravel->GetDestination() : nullptr;
+        TravelStatus noWorkStatus = noWorkTravel ? noWorkTravel->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+        GuidPosition noWorkRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+        const bool noWorkNullDestination = !noWorkDestination || dynamic_cast<NullTravelDestination*>(noWorkDestination);
+        const bool noWorkMovingWithoutAssignment =
+            movementIntent &&
+            !IsActiveTravelWork(noWorkTravel) &&
+            !IsPreparedTravelWork(noWorkTravel) &&
+            !noWorkRpgTarget;
+        const bool noConcreteWork =
+            !IsActiveTravelWork(noWorkTravel) &&
+            !IsPreparedTravelWork(noWorkTravel) &&
+            !noWorkRpgTarget;
+
+        if ((noWorkMovingWithoutAssignment || (noConcreteWork && noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS)) &&
+            (noWorkNullDestination ||
+             noWorkStatus == TravelStatus::TRAVEL_STATUS_NONE ||
+             noWorkStatus == TravelStatus::TRAVEL_STATUS_COOLDOWN ||
+             noWorkStatus == TravelStatus::TRAVEL_STATUS_EXPIRED ||
+             actionMetricSameActionStreak >= 20))
+        {
+            if (noWorkMovingWithoutAssignment)
+                StopMoving();
+
+            if (noWorkTravel)
+            {
+                noWorkTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                noWorkTravel->SetForced(false);
+            }
+
+            RESET_AI_VALUE(bool, "travel target active");
+            RESET_AI_VALUE(GuidPosition, "rpg target");
+            RESET_AI_VALUE(ObjectGuid, "attack target");
+            context->GetValue<bool>("no active travel destinations", "quest")->Reset();
+
+            bool questRequested = false;
+            bool travelChosen = false;
+            bool targetSelected = false;
+            bool attackAnything = false;
+            bool grindRequested = false;
+            bool travelMoved = false;
+            bool rpgChosen = false;
+            bool rpgMoved = false;
+            bool randomMoved = false;
+            bool idleNudged = false;
+
+            auto noWorkHasImmediateWork = [&]() -> bool
+            {
+                Unit* workTarget = AI_VALUE(Unit*, "current target");
+                LootObject workLoot = AI_VALUE(LootObject, "loot target");
+                GuidPosition workRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+                TravelTarget* workTravel = AI_VALUE(TravelTarget*, "travel target");
+                const bool workMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool directedMovement =
+                    HasDirectedMovementWork(workTravel, workRpgTarget, travelMoved, rpgMoved, workMoving);
+                return HasUsefulAssignedWork(bot, workTravel, workTarget, workLoot, workMoving, directedMovement);
+            };
+
+            auto noWorkTryAssignedTravelMove = [&]() -> bool
+            {
+                const bool moved = MoveAssignedTravelWork(this, context, bot, "metric-no-work");
+                travelMoved = travelMoved || moved;
+                return moved;
+            };
+
+            questRequested = DoSpecificAction("request quest travel target", Event(), true);
+            if (questRequested)
+                noWorkTryAssignedTravelMove();
+
+            if (!noWorkHasImmediateWork())
+            {
+                travelChosen = DoSpecificAction("choose travel target", Event(), true);
+                if (travelChosen)
+                    noWorkTryAssignedTravelMove();
+            }
+
+            if (!noWorkHasImmediateWork())
+            {
+                ResetTargetScanCaches(context);
+                targetSelected = DoSpecificAction("select new target", Event(), true);
+            }
+
+            if (!noWorkHasImmediateWork())
+                attackAnything = DoSpecificAction("attack anything", Event(), true);
+
+            if (!noWorkHasImmediateWork())
+            {
+                Unit* selectedTarget = AI_VALUE(Unit*, "current target");
+                if (selectedTarget)
+                    attackAnything = ForceConcreteTargetWork(this, bot, selectedTarget, "metric-no-work-target-handoff") ||
+                        attackAnything;
+            }
+
+            if (!noWorkHasImmediateWork())
+            {
+                grindRequested = RequestGrindTravelFallback(this, context, bot, "metric-no-work");
+                if (grindRequested)
+                    noWorkTryAssignedTravelMove();
+            }
+
+            const bool allowNoWorkFallbackMovement = true;
+            if (allowNoWorkFallbackMovement && !noWorkHasImmediateWork())
+            {
+                rpgChosen = DoSpecificAction("choose rpg target", Event(), true);
+                rpgMoved = DoSpecificAction("move to rpg target", Event(), true);
+                if (!noWorkHasImmediateWork() && !rpgMoved)
+                    randomMoved = DoSpecificAction("move random", Event("metric no work", "active filler rescue", bot), true);
+                if (!noWorkHasImmediateWork() && !randomMoved && !sServerFacade.isMoving(bot) && !bot->isMovingOrTurning())
+                    idleNudged = ForceIdleRescueNudge(this, bot, "metric-no-work");
+            }
+
+            Unit* rescuedTarget = AI_VALUE(Unit*, "current target");
+            LootObject rescuedLoot = AI_VALUE(LootObject, "loot target");
+            GuidPosition rescuedRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+            TravelTarget* rescuedTravel = AI_VALUE(TravelTarget*, "travel target");
+            TravelDestination* rescuedDestination = rescuedTravel ? rescuedTravel->GetDestination() : nullptr;
+            TravelStatus rescuedStatus = rescuedTravel ? rescuedTravel->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+            if (rescuedTarget &&
+                !bot->IsNonMeleeSpellCasted(true, false, true) &&
+                !(bot->GetVictim() == rescuedTarget && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING)))
+            {
+                attackAnything = ForceConcreteTargetWork(this, bot, rescuedTarget, "metric-no-work-target-handoff") ||
+                    attackAnything;
+                rescuedTarget = AI_VALUE(Unit*, "current target");
+                rescuedLoot = AI_VALUE(LootObject, "loot target");
+                rescuedRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+                rescuedTravel = AI_VALUE(TravelTarget*, "travel target");
+                rescuedDestination = rescuedTravel ? rescuedTravel->GetDestination() : nullptr;
+                rescuedStatus = rescuedTravel ? rescuedTravel->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+            }
+            const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool directedMovementWork =
+                HasDirectedMovementWork(rescuedTravel, rescuedRpgTarget, travelMoved, rpgMoved, movingAfter);
+            const bool fallbackMovementWork =
+                HasFallbackMovementWork(randomMoved, idleNudged, movingAfter);
+            const bool workAssigned =
+                HasConcreteRecoveryWork(bot, rescuedTravel, rescuedTarget, rescuedLoot, movingAfter,
+                    travelMoved, false) ||
+                directedMovementWork ||
+                fallbackMovementWork;
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv") && (workAssigned || urand(1, 5) == 1))
+            {
+                std::ostringstream out;
+                out << "action=" << (lastActionName.empty() ? "none" : lastActionName)
+                    << " oldStatus=" << static_cast<uint32>(noWorkStatus)
+                    << " newStatus=" << static_cast<uint32>(rescuedStatus)
+                    << " nullDest=" << (noWorkNullDestination ? 1 : 0)
+                    << " movingWithoutWork=" << (noWorkMovingWithoutAssignment ? 1 : 0)
+                    << " noProgressSec=" << noProgressSecs
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " quest=" << (questRequested ? 1 : 0)
+                    << " choose=" << (travelChosen ? 1 : 0)
+                    << " selectTarget=" << (targetSelected ? 1 : 0)
+                    << " attackAnything=" << (attackAnything ? 1 : 0)
+                    << " grindRequest=" << (grindRequested ? 1 : 0)
+                    << " rpgChoose=" << (rpgChosen ? 1 : 0)
+                    << " travelMove=" << (travelMoved ? 1 : 0)
+                    << " rpgMove=" << (rpgMoved ? 1 : 0)
+                    << " randomMove=" << (randomMoved ? 1 : 0)
+                    << " idleNudge=" << (idleNudged ? 1 : 0)
+                    << " nudgeOnly=" << ((randomMoved || idleNudged) && !workAssigned ? 1 : 0)
+                    << " directedMove=" << (directedMovementWork ? 1 : 0)
+                    << " fallbackMove=" << (fallbackMovementWork ? 1 : 0)
+                    << " movingAfter=" << (movingAfter ? 1 : 0)
+                    << " target=" << (rescuedTarget ? rescuedTarget->GetName() : "none")
+                    << " loot=" << (!rescuedLoot.IsEmpty() ? 1 : 0)
+                    << " rpgTarget=" << (rescuedRpgTarget ? 1 : 0)
+                    << " workAssigned=" << (workAssigned ? 1 : 0)
+                    << " destinationPtr=" << (rescuedDestination ? 1 : (noWorkDestination ? 1 : 0));
+                sPlayerbotAIConfig.logEvent(this, "NoWorkActiveRescue", "", out.str());
+            }
+
+            if (workAssigned)
+            {
+                actionMetricLastProgress = now;
+                return;
+            }
+
+            if (movingAfter || rescuedRpgTarget ||
+                (rescuedTravel && !IsActiveTravelWork(rescuedTravel) && !IsPreparedTravelWork(rescuedTravel)))
+            {
+                StopMoving();
+                bot->InterruptMoving(true);
+                RESET_AI_VALUE(GuidPosition, "rpg target");
+
+                if (rescuedTravel && !IsActiveTravelWork(rescuedTravel) && !IsPreparedTravelWork(rescuedTravel))
+                {
+                    rescuedTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    rescuedTravel->SetForced(false);
+                    RESET_AI_VALUE(bool, "travel target active");
+                }
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 5) == 1)
+                {
+                    std::ostringstream out;
+                    out << "reason=no-work-active"
+                        << " movingAfter=" << (movingAfter ? 1 : 0)
+                        << " travelStatus=" << static_cast<uint32>(rescuedStatus)
+                        << " rpgTarget=" << (rescuedRpgTarget ? 1 : 0)
+                        << " target=" << (rescuedTarget ? rescuedTarget->GetName() : "none")
+                        << " loot=" << (!rescuedLoot.IsEmpty() ? 1 : 0)
+                        << " randomMove=" << (randomMoved ? 1 : 0)
+                        << " idleNudge=" << (idleNudged ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "NoConcreteWorkClear", "", out.str());
+                }
+            }
+        }
+    }
+
+    if (ENABLE_METRIC_RESCUES && !minimal && !actionExecuted && actionMetricLastProgress && noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS)
     {
         const bool autonomousRandomBot = !HasActivePlayerMaster() && !HasRealPlayerMaster();
         std::string loopReason = "idle";
@@ -2172,7 +5717,376 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
         else if (!AI_VALUE(LootObject, "loot target").IsEmpty())
             loopReason = "loot_stall";
 
-        if ((now - actionMetricLastStallSnapshot) >= 15)
+        const bool corpseRecoveryStall =
+            sServerFacade.UnitIsDead(bot) &&
+            (currentState == BotState::BOT_STATE_DEAD || bot->GetCorpse() || bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST)) &&
+            (actionMetricLastActionName.empty() ||
+             actionMetricLastActionName == "none" ||
+             actionMetricLastActionName == "auto release" ||
+             actionMetricLastActionName == "find corpse" ||
+             actionMetricLastActionName == "revive from corpse" ||
+             actionMetricLastActionName == "spirit healer");
+
+        if (autonomousRandomBot &&
+            currentState != BotState::BOT_STATE_DEAD &&
+            !sServerFacade.UnitIsDead(bot) &&
+            !bot->IsTaxiFlying() &&
+            !bot->IsBeingTeleported() &&
+            !bot->IsNonMeleeSpellCasted(true, false, true) &&
+            actionMetricExecutedTicks == 0 &&
+            noProgressSecs >= 8)
+        {
+            Unit* zeroApmTarget = AI_VALUE(Unit*, "current target");
+            LootObject zeroApmLoot = AI_VALUE(LootObject, "loot target");
+            TravelTarget* zeroApmTravel = AI_VALUE(TravelTarget*, "travel target");
+            TravelDestination* zeroApmDestination = zeroApmTravel ? zeroApmTravel->GetDestination() : nullptr;
+            const bool zeroApmNullDestination =
+                !zeroApmDestination || dynamic_cast<NullTravelDestination*>(zeroApmDestination);
+            const bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool combat = sServerFacade.IsInCombat(bot) || bot->GetVictim();
+            const bool staleLoot = !zeroApmLoot.IsEmpty();
+            const bool staleTarget =
+                zeroApmTarget &&
+                zeroApmTarget->IsInWorld() &&
+                zeroApmTarget->GetMapId() == bot->GetMapId() &&
+                !sServerFacade.IsFriendlyTo(bot, zeroApmTarget);
+            const bool staleTravelWork =
+                zeroApmTravel &&
+                zeroApmTarget == nullptr &&
+                zeroApmLoot.IsEmpty() &&
+                actionMetricMoveProgressTicks == 0 &&
+                noProgressSecs >= 12 &&
+                (zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_TRAVEL ||
+                 zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK);
+            const bool staleNullTravel =
+                zeroApmTravel &&
+                zeroApmNullDestination &&
+                noProgressSecs >= 8 &&
+                (zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_PREPARE ||
+                 zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_TRAVEL ||
+                 zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK ||
+                 zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_EXPIRED);
+
+            if ((!moving && (staleLoot || (!combat && staleTarget))) || staleTravelWork || staleNullTravel)
+            {
+                uint64 lootGuid = 0;
+                uint64 targetGuid = 0;
+                std::string targetName = "none";
+
+                if (staleLoot)
+                {
+                    lootGuid = zeroApmLoot.guid.GetCounter();
+                    DeferLootGuidForBot(bot, zeroApmLoot.guid, 15);
+                    if (LootObjectStack* availableLoot = AI_VALUE(LootObjectStack*, "available loot"))
+                        availableLoot->Remove(zeroApmLoot.guid);
+                    RESET_AI_VALUE(LootObject, "loot target");
+                }
+
+                if (!combat && staleTarget)
+                {
+                    targetGuid = zeroApmTarget->GetObjectGuid().GetCounter();
+                    targetName = zeroApmTarget->GetName();
+                    RESET_AI_VALUE(bool, "has attackers");
+                    RESET_AI_VALUE(Unit*, "old target");
+                    RESET_AI_VALUE(Unit*, "current target");
+                    RESET_AI_VALUE(Unit*, "pull target");
+                    RESET_AI_VALUE(Unit*, "dps target");
+                    RESET_AI_VALUE(ObjectGuid, "attack target");
+                    bot->SetSelectionGuid(ObjectGuid());
+                    bot->CombatStop(false);
+                    OnCombatEnded();
+                    ResetStaleTargetState();
+                }
+
+                if (zeroApmTravel &&
+                    (staleTravelWork ||
+                     staleNullTravel ||
+                     zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK ||
+                     zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_COOLDOWN ||
+                     zeroApmTravel->GetStatus() == TravelStatus::TRAVEL_STATUS_EXPIRED))
+                {
+                    if (staleTravelWork || staleNullTravel)
+                        StopMoving();
+                    zeroApmTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    zeroApmTravel->SetForced(false);
+                    RESET_AI_VALUE(bool, "travel target active");
+                    context->ClearValues("no active travel destinations");
+                }
+
+                RESET_AI_VALUE(GuidPosition, "rpg target");
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "loop=" << loopReason
+                        << " action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                        << " noProgressSec=" << noProgressSecs
+                        << " noProgressTicks=" << actionMetricNoProgressTicks
+                        << " sameActionStreak=" << actionMetricSameActionStreak
+                        << " nullDest=" << (zeroApmNullDestination ? 1 : 0)
+                        << " lootGuid=" << lootGuid
+                        << " targetGuid=" << targetGuid
+                        << " target=" << targetName
+                        << " travelStatus=" << (zeroApmTravel ? static_cast<uint32>(zeroApmTravel->GetStatus()) : 0)
+                        << " travelPtr=" << (zeroApmDestination ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "ZeroApmStaleWorkClear", "", out.str());
+                }
+
+                actionMetricLastProgress = now;
+                return;
+            }
+        }
+
+        if (autonomousRandomBot &&
+            currentState != BotState::BOT_STATE_DEAD &&
+            !sServerFacade.UnitIsDead(bot) &&
+            !bot->IsTaxiFlying() &&
+            !bot->IsBeingTeleported() &&
+            !bot->IsNonMeleeSpellCasted(true, false, true) &&
+            !movementIntent &&
+            !sServerFacade.IsInCombat(bot) &&
+            !bot->GetVictim())
+        {
+            Unit* stalledTarget = AI_VALUE(Unit*, "current target");
+            if (stalledTarget &&
+                stalledTarget->IsInWorld() &&
+                stalledTarget->GetMapId() == bot->GetMapId() &&
+                !sServerFacade.IsFriendlyTo(bot, stalledTarget) &&
+                !sServerFacade.UnitIsDead(stalledTarget) &&
+                noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS &&
+                (actionMetricNoProgressTicks >= 20 || actionMetricSameActionStreak >= 15 || noProgressSecs >= 20))
+            {
+                ObjectGuid targetGuid = stalledTarget->GetObjectGuid();
+                std::string targetName = stalledTarget->GetName();
+
+                RESET_AI_VALUE(bool, "has attackers");
+                RESET_AI_VALUE(Unit*, "old target");
+                RESET_AI_VALUE(Unit*, "current target");
+                RESET_AI_VALUE(Unit*, "pull target");
+                RESET_AI_VALUE(Unit*, "dps target");
+                RESET_AI_VALUE(ObjectGuid, "attack target");
+                bot->SetSelectionGuid(ObjectGuid());
+                bot->CombatStop(false);
+                OnCombatEnded();
+                ResetStaleTargetState();
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                        << " target=" << targetName
+                        << " guid=" << targetGuid.GetCounter()
+                        << " noProgressSec=" << noProgressSecs
+                        << " noProgressTicks=" << actionMetricNoProgressTicks
+                        << " sameActionStreak=" << actionMetricSameActionStreak
+                        << " reason=pre-stuck";
+                    sPlayerbotAIConfig.logEvent(this, "CombatTargetMetricRefresh", std::to_string(targetGuid.GetCounter()), out.str());
+                }
+
+                actionMetricLastProgress = now;
+                return;
+            }
+        }
+
+        if (autonomousRandomBot &&
+            currentState != BotState::BOT_STATE_DEAD &&
+            !sServerFacade.UnitIsDead(bot) &&
+            !bot->IsTaxiFlying() &&
+            !bot->IsBeingTeleported() &&
+            !bot->IsNonMeleeSpellCasted(true, false, true) &&
+            !movementIntent &&
+            !sServerFacade.IsInCombat(bot) &&
+            !AI_VALUE(Unit*, "current target") &&
+            AI_VALUE(LootObject, "loot target").IsEmpty() &&
+            noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS)
+        {
+            TravelTarget* staleTravel = AI_VALUE(TravelTarget*, "travel target");
+            TravelDestination* staleDestination = staleTravel ? staleTravel->GetDestination() : nullptr;
+            TravelStatus oldStatus = staleTravel ? staleTravel->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+            const bool staleNullDestination =
+                !staleDestination || dynamic_cast<NullTravelDestination*>(staleDestination);
+
+            RESET_AI_VALUE(bool, "has attackers");
+            RESET_AI_VALUE(Unit*, "old target");
+            RESET_AI_VALUE(Unit*, "pull target");
+            RESET_AI_VALUE(Unit*, "dps target");
+            RESET_AI_VALUE(ObjectGuid, "attack target");
+            RESET_AI_VALUE(GuidPosition, "rpg target");
+            bot->SetSelectionGuid(ObjectGuid());
+            ResetStaleTargetState();
+
+            if (staleTravel &&
+                (oldStatus == TravelStatus::TRAVEL_STATUS_NONE ||
+                 (staleNullDestination &&
+                  (oldStatus == TravelStatus::TRAVEL_STATUS_PREPARE ||
+                   oldStatus == TravelStatus::TRAVEL_STATUS_TRAVEL ||
+                   oldStatus == TravelStatus::TRAVEL_STATUS_WORK)) ||
+                 oldStatus == TravelStatus::TRAVEL_STATUS_COOLDOWN ||
+                 oldStatus == TravelStatus::TRAVEL_STATUS_EXPIRED))
+            {
+                staleTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                staleTravel->SetForced(false);
+                RESET_AI_VALUE(bool, "travel target active");
+                context->ClearValues("no active travel destinations");
+            }
+
+            bool questRequested = false;
+            bool travelChosen = false;
+            bool targetSelected = false;
+            bool attackAnything = false;
+            bool grindRequested = false;
+            bool travelMoved = false;
+            bool rpgChosen = false;
+            bool rpgMoved = false;
+            bool randomMoved = false;
+            bool idleNudged = false;
+
+            auto metricResetHasImmediateWork = [&]() -> bool
+            {
+                Unit* workTarget = AI_VALUE(Unit*, "current target");
+                LootObject workLoot = AI_VALUE(LootObject, "loot target");
+                GuidPosition workRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+                TravelTarget* workTravel = AI_VALUE(TravelTarget*, "travel target");
+                const bool workMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool directedMovement =
+                    HasDirectedMovementWork(workTravel, workRpgTarget, travelMoved, rpgMoved, workMoving);
+                return HasUsefulAssignedWork(bot, workTravel, workTarget, workLoot, workMoving, directedMovement);
+            };
+
+            auto metricResetTryAssignedTravelMove = [&]() -> bool
+            {
+                const bool moved = MoveAssignedTravelWork(this, context, bot, "metric-reset-no-work");
+                travelMoved = travelMoved || moved;
+                return moved;
+            };
+
+            questRequested = DoSpecificAction("request quest travel target", Event(), true);
+            if (questRequested)
+                metricResetTryAssignedTravelMove();
+
+            if (!metricResetHasImmediateWork())
+            {
+                travelChosen = DoSpecificAction("choose travel target", Event(), true);
+                if (travelChosen)
+                    metricResetTryAssignedTravelMove();
+            }
+
+            if (!metricResetHasImmediateWork())
+            {
+                ResetTargetScanCaches(context);
+                targetSelected = DoSpecificAction("select new target", Event(), true);
+            }
+
+            if (!metricResetHasImmediateWork())
+                attackAnything = DoSpecificAction("attack anything", Event(), true);
+
+            if (!metricResetHasImmediateWork())
+            {
+                Unit* selectedTarget = AI_VALUE(Unit*, "current target");
+                if (selectedTarget)
+                    attackAnything = ForceConcreteTargetWork(this, bot, selectedTarget,
+                        "metric-reset-no-work-target-handoff") || attackAnything;
+            }
+
+            if (!metricResetHasImmediateWork())
+            {
+                grindRequested = RequestGrindTravelFallback(this, context, bot, "metric-reset-no-work");
+                if (grindRequested)
+                    metricResetTryAssignedTravelMove();
+            }
+
+            const bool allowMetricResetFallbackMovement = true;
+            if (allowMetricResetFallbackMovement && !metricResetHasImmediateWork())
+            {
+                rpgChosen = DoSpecificAction("choose rpg target", Event(), true);
+                rpgMoved = DoSpecificAction("move to rpg target", Event(), true);
+                if (!metricResetHasImmediateWork() && !rpgMoved)
+                    randomMoved = DoSpecificAction("move random", Event("metric no work", "idle rescue", bot), true);
+                if (!metricResetHasImmediateWork() && !randomMoved && !sServerFacade.isMoving(bot) && !bot->isMovingOrTurning())
+                    idleNudged = ForceIdleRescueNudge(this, bot, "metric-reset-no-work");
+            }
+
+            bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            Unit* newTarget = AI_VALUE(Unit*, "current target");
+            LootObject newLootTarget = AI_VALUE(LootObject, "loot target");
+            GuidPosition newRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+            TravelTarget* newTravel = AI_VALUE(TravelTarget*, "travel target");
+            TravelDestination* newDestination = newTravel ? newTravel->GetDestination() : nullptr;
+            const bool directedMovementWork =
+                HasDirectedMovementWork(newTravel, newRpgTarget, travelMoved, rpgMoved, movingAfter);
+            const bool fallbackMovementWork =
+                HasFallbackMovementWork(randomMoved, idleNudged, movingAfter);
+            bool workAssigned =
+                HasConcreteRecoveryWork(bot, newTravel, newTarget, newLootTarget, movingAfter, travelMoved, false) ||
+                directedMovementWork ||
+                fallbackMovementWork;
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                    << " noProgressSec=" << noProgressSecs
+                    << " noProgressTicks=" << actionMetricNoProgressTicks
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " oldStatus=" << static_cast<uint32>(oldStatus)
+                    << " newStatus=" << (newTravel ? static_cast<uint32>(newTravel->GetStatus()) : 0)
+                    << " quest=" << (questRequested ? 1 : 0)
+                    << " choose=" << (travelChosen ? 1 : 0)
+                    << " selectTarget=" << (targetSelected ? 1 : 0)
+                    << " attackAnything=" << (attackAnything ? 1 : 0)
+                    << " grindRequest=" << (grindRequested ? 1 : 0)
+                    << " rpgChoose=" << (rpgChosen ? 1 : 0)
+                    << " travelMove=" << (travelMoved ? 1 : 0)
+                    << " rpgMove=" << (rpgMoved ? 1 : 0)
+                    << " randomMove=" << (randomMoved ? 1 : 0)
+                    << " idleNudge=" << (idleNudged ? 1 : 0)
+                    << " nudgeOnly=" << ((randomMoved || idleNudged) && !workAssigned ? 1 : 0)
+                    << " directedMove=" << (directedMovementWork ? 1 : 0)
+                    << " fallbackMove=" << (fallbackMovementWork ? 1 : 0)
+                    << " movingAfter=" << (movingAfter ? 1 : 0)
+                    << " target=" << (newTarget ? newTarget->GetName() : "none")
+                    << " loot=" << (!newLootTarget.IsEmpty() ? 1 : 0)
+                    << " rpgTarget=" << (newRpgTarget ? 1 : 0)
+                    << " workAssigned=" << (workAssigned ? 1 : 0)
+                    << " destinationPtr=" << (newDestination ? 1 : (staleDestination ? 1 : 0));
+                sPlayerbotAIConfig.logEvent(this, "NoWorkMetricReset", "", out.str());
+            }
+
+            if (workAssigned)
+            {
+                actionMetricLastProgress = now;
+                return;
+            }
+        }
+
+        if (autonomousRandomBot &&
+            travelTarget &&
+            travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_EXPIRED &&
+            !AI_VALUE(Unit*, "current target") &&
+            AI_VALUE(LootObject, "loot target").IsEmpty() &&
+            !movementIntent &&
+            !sServerFacade.IsInCombat(bot))
+        {
+            TravelDestination* expiredDestination = travelTarget->GetDestination();
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason=" << loopReason
+                    << " stallSec=" << noProgressSecs
+                    << " action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                    << " travelPtr=" << (expiredDestination ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(this, "ExpiredTravelMetricRefresh", "", out.str());
+            }
+
+            RESET_AI_VALUE(bool, "travel target active");
+            context->ClearValues("no active travel destinations");
+            travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+            travelTarget->SetForced(false);
+            actionMetricLastProgress = now;
+            return;
+        }
+
+        if (!corpseRecoveryStall && (now - actionMetricLastStallSnapshot) >= 15)
         {
             LogDecisionStallSnapshot(now, loopReason);
             actionMetricLastStallSnapshot = now;
@@ -2205,45 +6119,38 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
             {
                 if (actionMetricLastActionName == "find corpse")
                 {
+                    FindCorpseAction findCorpse(this);
+                    Event event;
+                    bool nudged = findCorpse.Execute(event);
+                    bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
                     if (Corpse* corpse = bot->GetCorpse())
                     {
                         WorldPosition corpsePos(corpse);
-                        if (corpsePos && !HasPlayerNearby(corpsePos))
+                        if (corpsePos &&
+                            !HasPlayerNearby(corpsePos) &&
+                            sPlayerbotAIConfig.hasLog("bot_events.csv") &&
+                            (now - actionMetricLastStallSnapshot) >= 15)
                         {
-                            if (TeleportGhostUnstuck(this, bot, corpsePos, "DeadCorpseMetricTeleport", CORPSE_RECLAIM_RADIUS > 5.0f ? CORPSE_RECLAIM_RADIUS - 2.0f : 3.0f))
-                            {
-                                actionMetricLastProgress = now;
-                                return;
-                            }
+                            std::ostringstream out;
+                            out << "stallSec=" << noProgressSecs
+                                << " nudged=" << (nudged ? 1 : 0)
+                                << " moving=" << (moving ? 1 : 0)
+                                << " corpseMap=" << corpsePos.getMapId()
+                                << " corpseX=" << std::fixed << std::setprecision(2) << corpsePos.getX()
+                                << " corpseY=" << corpsePos.getY()
+                                << " corpseZ=" << corpsePos.getZ();
+                            sPlayerbotAIConfig.logEvent(this, "DeadCorpseMetricStall", "", out.str());
+                            actionMetricLastStallSnapshot = now;
                         }
                     }
-                }
-                else if (actionMetricLastActionName == "spirit healer")
-                {
-                    GuidPosition grave = AI_VALUE(GuidPosition, "best graveyard");
-                    WorldPosition gravePos(grave);
-                    if (gravePos && !HasPlayerNearby(gravePos))
-                    {
-                        if (TeleportGhostUnstuck(this, bot, gravePos, "DeadSpiritHealerMetricTeleport"))
-                        {
-                            actionMetricLastProgress = now;
-                            return;
-                        }
-                    }
+                    return;
                 }
             }
 
             if (travelTarget && travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_COOLDOWN)
             {
                 TravelDestination* cooldownDestination = travelTarget->GetDestination();
-                const bool questCooldown =
-                    cooldownDestination &&
-                    (cooldownDestination->GetPurpose() == TravelDestinationPurpose::QuestGiver ||
-                     cooldownDestination->GetPurpose() == TravelDestinationPurpose::QuestTaker ||
-                     cooldownDestination->GetPurpose() == TravelDestinationPurpose::QuestObjective1 ||
-                     cooldownDestination->GetPurpose() == TravelDestinationPurpose::QuestObjective2 ||
-                     cooldownDestination->GetPurpose() == TravelDestinationPurpose::QuestObjective3 ||
-                     cooldownDestination->GetPurpose() == TravelDestinationPurpose::QuestObjective4);
+                const bool questCooldown = cooldownDestination != nullptr;
 
                 if (questCooldown || !AI_VALUE(LootObject, "loot target").IsEmpty())
                 {
@@ -2253,7 +6160,7 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
                         out << "reason=" << loopReason
                             << " stallSec=" << noProgressSecs
                             << " action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
-                            << " travel=" << (cooldownDestination ? cooldownDestination->GetTitle() : "none");
+                            << " travelPtr=" << (cooldownDestination ? 1 : 0);
                         sPlayerbotAIConfig.logEvent(this, "TravelCooldownForcedRefresh", "", out.str());
                     }
 
@@ -2267,6 +6174,12 @@ void PlayerbotAI::TrackActionMetrics(bool minimal, bool actionExecuted, bool sta
             }
         }
     }
+
+    if ((now - actionMetricLastVisibleSnapshot) >= 15)
+    {
+        LogVisibleActivitySnapshot(now);
+        actionMetricLastVisibleSnapshot = now;
+    }
 }
 
 void PlayerbotAI::ResetStaleTargetState()
@@ -2279,6 +6192,188 @@ void PlayerbotAI::ResetStaleTargetState()
     staleTargetLastZ = 0.0f;
     staleTargetLastDistance = 0.0f;
     staleTargetLastTargetHealth = 0;
+    staleTargetRecoveries = 0;
+}
+
+bool PlayerbotAI::ClearExpiredTravelAfterStaleTargetReset()
+{
+    TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+    if (!travelTarget || travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_EXPIRED)
+        return false;
+
+    TravelDestination* destination = travelTarget->GetDestination();
+    travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+    travelTarget->SetForced(false);
+    aiObjectContext->GetValue<bool>("travel target active")->Reset();
+    aiObjectContext->ClearValues("no active travel destinations");
+    aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+    aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+    aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+    {
+        std::ostringstream out;
+        out << "destinationPtr=" << (destination ? 1 : 0)
+            << " state=" << static_cast<uint32>(currentState);
+        sPlayerbotAIConfig.logEvent(this, "StaleTargetExpiredTravelReset", "", out.str());
+    }
+
+    return true;
+}
+
+void PlayerbotAI::ResetTravelNoMotionState()
+{
+    travelNoMotionRetries = 0;
+    travelNoMotionNextRetry = 0;
+    travelNoMotionEntry = 0;
+    travelNoMotionMap = 0;
+    travelNoMotionX = 0.0f;
+    travelNoMotionY = 0.0f;
+    travelNoMotionZ = 0.0f;
+}
+
+bool PlayerbotAI::RecoverTravelNoMotion(time_t now)
+{
+    if (currentState == BotState::BOT_STATE_DEAD ||
+        HasActivePlayerMaster() ||
+        HasRealPlayerMaster() ||
+        bot->IsTaxiFlying() ||
+        bot->IsBeingTeleported() ||
+        bot->IsNonMeleeSpellCasted(true, false, true) ||
+        sServerFacade.isMoving(bot) ||
+        bot->isMovingOrTurning() ||
+        sServerFacade.IsInCombat(bot) ||
+        aiObjectContext->GetValue<Unit*>("current target")->Get() ||
+        !aiObjectContext->GetValue<LootObject>("loot target")->Get().IsEmpty())
+    {
+        ResetTravelNoMotionState();
+        return false;
+    }
+
+    TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+    if (!travelTarget || !travelTarget->GetPosition())
+    {
+        ResetTravelNoMotionState();
+        return false;
+    }
+
+    TravelStatus status = travelTarget->GetStatus();
+    if (status != TravelStatus::TRAVEL_STATUS_READY &&
+        status != TravelStatus::TRAVEL_STATUS_TRAVEL)
+    {
+        ResetTravelNoMotionState();
+        return false;
+    }
+
+    uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+    if (noProgressSecs < 6)
+        return false;
+
+    WorldPosition* travelPos = travelTarget->GetPosition();
+    const bool sameEndpoint =
+        travelNoMotionEntry == travelTarget->GetEntry() &&
+        travelNoMotionMap == travelPos->getMapId() &&
+        std::fabs(travelNoMotionX - travelPos->getX()) < 1.0f &&
+        std::fabs(travelNoMotionY - travelPos->getY()) < 1.0f &&
+        std::fabs(travelNoMotionZ - travelPos->getZ()) < 3.0f;
+
+    if (!sameEndpoint)
+    {
+        travelNoMotionRetries = 0;
+        travelNoMotionNextRetry = 0;
+        travelNoMotionEntry = travelTarget->GetEntry();
+        travelNoMotionMap = travelPos->getMapId();
+        travelNoMotionX = travelPos->getX();
+        travelNoMotionY = travelPos->getY();
+        travelNoMotionZ = travelPos->getZ();
+    }
+
+    if (travelNoMotionNextRetry && now < travelNoMotionNextRetry)
+        return false;
+
+    bool dispatched = DoSpecificAction("move to travel target", Event(), true);
+    const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+    Unit* currentTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+    LootObject lootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+    TravelStatus statusAfter = travelTarget->GetStatus();
+    const bool usefulAfter =
+        movingAfter ||
+        sServerFacade.IsInCombat(bot) ||
+        currentTarget ||
+        !lootTarget.IsEmpty();
+
+    if (usefulAfter)
+    {
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 8) == 1)
+        {
+            std::ostringstream out;
+            out << "reason=recovered"
+                << " dispatched=" << (dispatched ? 1 : 0)
+                << " retries=" << travelNoMotionRetries
+                << " noProgressSec=" << noProgressSecs
+                << " status=" << static_cast<uint32>(status)
+                << " statusAfter=" << static_cast<uint32>(statusAfter)
+                << " moving=" << (movingAfter ? 1 : 0)
+                << " entry=" << travelTarget->GetEntry()
+                << " travelPtr=" << (travelTarget->GetDestination() ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(this, "TravelNoMotionRecovery", "", out.str());
+        }
+
+        ResetTravelNoMotionState();
+        return true;
+    }
+
+    ++travelNoMotionRetries;
+    travelNoMotionNextRetry = now + 3;
+    const bool expireTravel = (travelNoMotionRetries >= 2 && noProgressSecs >= 12) || noProgressSecs >= 18;
+
+    if (expireTravel)
+    {
+        travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+        travelTarget->SetExpireIn(1000);
+        aiObjectContext->GetValue<bool>("travel target active")->Reset();
+        aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+        aiObjectContext->ClearValues("no active travel destinations");
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "reason=expired"
+                << " dispatched=" << (dispatched ? 1 : 0)
+                << " retries=" << travelNoMotionRetries
+                << " noProgressSec=" << noProgressSecs
+                << " status=" << static_cast<uint32>(status)
+                << " statusAfter=" << static_cast<uint32>(statusAfter)
+                << " moving=0"
+                << " map=" << travelPos->getMapId()
+                << " x=" << std::fixed << std::setprecision(2) << travelPos->getX()
+                << " y=" << travelPos->getY()
+                << " z=" << travelPos->getZ()
+                << " entry=" << travelTarget->GetEntry()
+                << " travelPtr=" << (travelTarget->GetDestination() ? 1 : 0);
+            sPlayerbotAIConfig.logEvent(this, "TravelNoMotionRecovery", "", out.str());
+        }
+
+        ResetTravelNoMotionState();
+        return true;
+    }
+
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 4) == 1)
+    {
+        std::ostringstream out;
+        out << "reason=retry"
+            << " dispatched=" << (dispatched ? 1 : 0)
+            << " retries=" << travelNoMotionRetries
+            << " noProgressSec=" << noProgressSecs
+            << " status=" << static_cast<uint32>(status)
+            << " statusAfter=" << static_cast<uint32>(statusAfter)
+            << " moving=0"
+            << " entry=" << travelTarget->GetEntry()
+            << " travelPtr=" << (travelTarget->GetDestination() ? 1 : 0);
+        sPlayerbotAIConfig.logEvent(this, "TravelNoMotionRecovery", "", out.str());
+    }
+
+    return false;
 }
 
 bool PlayerbotAI::DetectAndClearStaleTarget()
@@ -2301,8 +6396,7 @@ bool PlayerbotAI::DetectAndClearStaleTarget()
     float const verticalDelta = std::fabs(bot->GetPositionZ() - currentTarget->GetPositionZ());
     bool const inLos = bot->IsWithinLOSInMap(currentTarget, true);
     bool const isRangedBot = IsRanged(bot);
-    bool const inMeleeRange = bot->CanReachWithMeleeAutoAttack(currentTarget) ||
-        (distance2d <= 3.0f && verticalDelta <= 1.5f && inLos);
+    bool const inMeleeRange = bot->CanReachWithMeleeAutoAttack(currentTarget);
     bool const inUsefulCombatRange = isRangedBot ?
         (inLos && distance2d <= GetRange("spell") + sPlayerbotAIConfig.contactDistance) :
         inMeleeRange;
@@ -2318,6 +6412,7 @@ bool PlayerbotAI::DetectAndClearStaleTarget()
         staleTargetLastZ = botZ;
         staleTargetLastDistance = distance2d;
         staleTargetLastTargetHealth = currentTarget->GetHealth();
+        staleTargetRecoveries = 0;
         return false;
     }
 
@@ -2335,8 +6430,19 @@ bool PlayerbotAI::DetectAndClearStaleTarget()
     bool const inCombat = sServerFacade.IsInCombat(bot) || AI_VALUE2(bool, "combat", "self target");
     bool const recentSpell = lastSpell.time && lastSpell.target == targetGuid && (now - lastSpell.time) <= 3;
     bool const targetHealthChanged = staleTargetLastTargetHealth != currentTarget->GetHealth();
+    bool const targetHealthDropped = currentTarget->GetHealth() < staleTargetLastTargetHealth;
     bool const closingDistance = moving && staleTargetLastDistance > 0.0f && (distance2d + 1.0f) < staleTargetLastDistance;
-    bool const usefulProgress = recentSpell || targetHealthChanged || closingDistance || (!inCombat && inUsefulCombatRange);
+    // Progress means the fight is actually advancing: the target is LOSING health, or
+    // we are closing the gap to it. Merely casting at it (recentSpell) or standing in
+    // spell range (!inCombat && inUsefulCombatRange) is NOT progress -- those let a bot
+    // rooted in place, perpetually casting at a target whose HP never drops (mob is
+    // unreachable / leashed / evade-resetting), escape stale detection forever. Measured:
+    // ~8.5k such casts/run, bots rooted for minutes on a single un-killable mob. Using
+    // "health dropped" rather than "health changed" also catches the evade-reset loop
+    // where the mob takes a little damage then heals back to full between casts.
+    bool const usefulProgress = targetHealthDropped || closingDistance;
+    TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+    bool const expiredTravelTarget = travelTarget && travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_EXPIRED;
 
     if (usefulProgress)
     {
@@ -2346,6 +6452,7 @@ bool PlayerbotAI::DetectAndClearStaleTarget()
         staleTargetLastZ = botZ;
         staleTargetLastDistance = distance2d;
         staleTargetLastTargetHealth = currentTarget->GetHealth();
+        staleTargetRecoveries = 0;
         return false;
     }
 
@@ -2362,74 +6469,157 @@ bool PlayerbotAI::DetectAndClearStaleTarget()
     uint32 const staleThreshold = inCombat ? 6u : 8u;
     uint32 const recoveryThreshold = inCombat ? 4u : 6u;
     uint32 const detachedThreshold = (!attachedToTarget && !hasAttackers && !inCombat) ? 2u : staleThreshold;
+    uint32 const maxRecoveryAttempts = inCombat ? 3u : 4u;
+    bool recoveryExhausted = false;
 
     if (hasVictim && staleTargetLastProgress && (now - staleTargetLastProgress) >= recoveryThreshold &&
         !(steepCloseGeometry && staleTargetSince && (now - staleTargetSince) >= staleThreshold + 2u))
     {
-        bool recovered = false;
-        MotionMaster* mm = bot->GetMotionMaster();
-        MovementGeneratorType moveType = mm ? mm->GetCurrentMovementGeneratorType() : IDLE_MOTION_TYPE;
+        recoveryExhausted =
+            staleTargetRecoveries >= maxRecoveryAttempts &&
+            !recentSpell &&
+            !targetHealthChanged &&
+            !closingDistance;
 
-        if (!AllowPressureWork(PerfStats::BOT_PRESSURE_WORK_STALE_TARGET_RECOVER, 1500, 4500))
+        if (recoveryExhausted)
         {
-            staleTargetLastProgress = now;
-            return false;
-        }
-
-        bot->SetSelectionGuid(targetGuid);
-        bot->SetTarget(currentTarget);
-
-        if (!isRangedBot)
-        {
-            if (mm && (!inMeleeRange || moveType != CHASE_MOTION_TYPE))
-            {
-                mm->MoveChase(currentTarget, ATTACK_DISTANCE, bot->GetAngle(currentTarget));
-                recovered = true;
-            }
-
-            if (inMeleeRange)
-            {
+            std::string const targetName = currentTarget->GetName();
+            if (bot->GetVictim() == currentTarget)
                 bot->AttackStop(true);
-                recovered = bot->Attack(currentTarget, true) || recovered;
-            }
-            else if (!hasVictim)
-            {
-                recovered = bot->Attack(currentTarget, true) || recovered;
-            }
-        }
-        else if (inLos)
-        {
-            recovered = bot->Attack(currentTarget, false);
-        }
 
-        if (recovered)
-        {
+            DeferTargetGuidForBot(bot, targetGuid, 20);
+            RESET_AI_VALUE(Unit*, "old target");
+            RESET_AI_VALUE(Unit*, "current target");
+            RESET_AI_VALUE(Unit*, "pull target");
+            RESET_AI_VALUE(ObjectGuid, "attack target");
+            bot->SetSelectionGuid(ObjectGuid());
+            bool const expiredTravelReset = ClearExpiredTravelAfterStaleTargetReset();
+
             if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
             {
                 std::ostringstream out;
-                out << "target=" << currentTarget->GetName()
+                out << "target=" << targetName
                     << " dist=" << std::fixed << std::setprecision(2) << distance
                     << " dist2d=" << std::fixed << std::setprecision(2) << distance2d
                     << " dz=" << std::fixed << std::setprecision(2) << verticalDelta
-                    << " ranged=" << (isRangedBot ? 1 : 0)
+                    << " recoveries=" << staleTargetRecoveries
+                    << " staleFor=" << (now - staleTargetLastProgress)
+                    << " targetAge=" << (now - staleTargetSince)
+                    << " moving=" << (moving ? 1 : 0)
                     << " meleeRange=" << (inMeleeRange ? 1 : 0)
-                    << " motion=" << moveType
                     << " los=" << (inLos ? 1 : 0)
-                    << " staleFor=" << (now - staleTargetLastProgress);
-                sPlayerbotAIConfig.logEvent(this, "StaleTargetRecover", std::to_string(targetGuid.GetCounter()), out.str());
+                    << " expiredTravelReset=" << (expiredTravelReset ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(this, "StaleTargetRecoveryExhausted", std::to_string(targetGuid.GetCounter()), out.str());
+                sPlayerbotAIConfig.logEvent(this, "StaleTargetHardReset", std::to_string(targetGuid.GetCounter()), out.str());
+                sPlayerbotAIConfig.logEvent(this, "StaleTargetReset", std::to_string(targetGuid.GetCounter()), out.str());
             }
 
-            staleTargetLastX = botX;
-            staleTargetLastY = botY;
-            staleTargetLastZ = botZ;
-            staleTargetLastProgress = now;
-            staleTargetLastDistance = distance2d;
-            staleTargetLastTargetHealth = currentTarget->GetHealth();
-            return false;
+            ResetStaleTargetState();
+            return true;
+        }
+        else
+        {
+            bool recovered = false;
+            MotionMaster* mm = bot->GetMotionMaster();
+            MovementGeneratorType moveType = mm ? mm->GetCurrentMovementGeneratorType() : IDLE_MOTION_TYPE;
+
+            const bool closeOrCommittedTarget =
+                distance2d <= 12.0f ||
+                hasVictim ||
+                inCombat;
+            if (!closeOrCommittedTarget &&
+                !AllowPressureWork(PerfStats::BOT_PRESSURE_WORK_STALE_TARGET_RECOVER, 1500, 4500))
+                return false;
+
+            bot->SetSelectionGuid(targetGuid);
+            bot->SetTarget(currentTarget);
+
+            if (!isRangedBot)
+            {
+                if (mm && !inMeleeRange)
+                {
+                    if (moveType == CHASE_MOTION_TYPE && !closingDistance)
+                        bot->InterruptMoving(true);
+
+                    mm->MoveChase(currentTarget);
+                    recovered = true;
+                }
+                else if (mm && moveType != CHASE_MOTION_TYPE)
+                {
+                    mm->MoveChase(currentTarget);
+                    recovered = true;
+                }
+
+                if (inMeleeRange)
+                {
+                    bot->AttackStop(true);
+                    recovered = bot->Attack(currentTarget, true) || recovered;
+                }
+                else if (!hasVictim)
+                {
+                    recovered = bot->Attack(currentTarget, true) || recovered;
+                }
+            }
+            else if (inLos)
+            {
+                recovered = bot->Attack(currentTarget, false);
+            }
+
+            if (recovered)
+            {
+                const bool recoveryMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool recoveryCasting = bot->IsNonMeleeSpellCasted(true, false, true);
+                const bool recoveryMadeProgress =
+                    recoveryCasting ||
+                    targetHealthChanged ||
+                    closingDistance ||
+                    (!inMeleeRange && !hasVictim && recoveryMoving);
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "target=" << currentTarget->GetName()
+                        << " dist=" << std::fixed << std::setprecision(2) << distance
+                        << " dist2d=" << std::fixed << std::setprecision(2) << distance2d
+                        << " dz=" << std::fixed << std::setprecision(2) << verticalDelta
+                        << " ranged=" << (isRangedBot ? 1 : 0)
+                        << " meleeRange=" << (inMeleeRange ? 1 : 0)
+                        << " motion=" << moveType
+                        << " los=" << (inLos ? 1 : 0)
+                        << " healthChanged=" << (targetHealthChanged ? 1 : 0)
+                        << " closing=" << (closingDistance ? 1 : 0)
+                        << " movingAfter=" << (recoveryMoving ? 1 : 0)
+                        << " castingAfter=" << (recoveryCasting ? 1 : 0)
+                        << " progress=" << (recoveryMadeProgress ? 1 : 0)
+                        << " closeBypass=" << (closeOrCommittedTarget ? 1 : 0)
+                        << " staleFor=" << (now - staleTargetLastProgress);
+                    sPlayerbotAIConfig.logEvent(this, "StaleTargetRecover", std::to_string(targetGuid.GetCounter()), out.str());
+                }
+
+                staleTargetLastX = botX;
+                staleTargetLastY = botY;
+                staleTargetLastZ = botZ;
+                if (recoveryMadeProgress)
+                    staleTargetLastProgress = now;
+                staleTargetLastDistance = distance2d;
+                staleTargetLastTargetHealth = currentTarget->GetHealth();
+                ++staleTargetRecoveries;
+                return false;
+            }
         }
     }
 
-    if (staleTargetLastProgress && (now - staleTargetLastProgress) < detachedThreshold)
+    if (expiredTravelTarget &&
+        staleTargetLastProgress &&
+        (now - staleTargetLastProgress) >= 10 &&
+        !hasAttackers &&
+        !recentSpell &&
+        !targetHealthChanged)
+    {
+        recoveryExhausted = true;
+    }
+
+    if (!recoveryExhausted && staleTargetLastProgress && (now - staleTargetLastProgress) < detachedThreshold)
         return false;
 
     std::list<ObjectGuid> possibleTargets = AI_VALUE(std::list<ObjectGuid>, "possible attack targets");
@@ -2437,7 +6627,7 @@ bool PlayerbotAI::DetectAndClearStaleTarget()
     bool const geometryBlocked = (!inLos && verticalDelta > 6.0f) ||
         (steepCloseGeometry && staleTargetSince && (now - staleTargetSince) >= staleThreshold + 2u);
     bool const notClosing = moving && staleTargetLastDistance > 0.0f && distance2d >= staleTargetLastDistance - 0.5f;
-    if (targetStillPreferred && !geometryBlocked && !notClosing && (now - staleTargetLastProgress) < staleThreshold + 2u)
+    if (!recoveryExhausted && targetStillPreferred && !geometryBlocked && !notClosing && (now - staleTargetLastProgress) < staleThreshold + 2u)
         return false;
 
     std::string const targetName = currentTarget->GetName();
@@ -2445,11 +6635,13 @@ bool PlayerbotAI::DetectAndClearStaleTarget()
     if (bot->GetVictim() == currentTarget)
         bot->AttackStop(true);
 
+    DeferTargetGuidForBot(bot, targetGuid, recoveryExhausted ? 20 : 12);
     RESET_AI_VALUE(Unit*, "old target");
     RESET_AI_VALUE(Unit*, "current target");
     RESET_AI_VALUE(Unit*, "pull target");
     RESET_AI_VALUE(ObjectGuid, "attack target");
     bot->SetSelectionGuid(ObjectGuid());
+    bool const expiredTravelReset = ClearExpiredTravelAfterStaleTargetReset();
 
     if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
     {
@@ -2472,7 +6664,8 @@ bool PlayerbotAI::DetectAndClearStaleTarget()
             << " los=" << (inLos ? 1 : 0)
             << " dz=" << std::fixed << std::setprecision(2) << verticalDelta
             << " geometryBlocked=" << (geometryBlocked ? 1 : 0)
-            << " notClosing=" << (notClosing ? 1 : 0);
+            << " notClosing=" << (notClosing ? 1 : 0)
+            << " expiredTravelReset=" << (expiredTravelReset ? 1 : 0);
         sPlayerbotAIConfig.logEvent(this, "StaleTargetReset", std::to_string(targetGuid.GetCounter()), out.str());
     }
 
@@ -3323,11 +7516,2278 @@ void PlayerbotAI::DoNextAction(bool min)
         }
     }
 
+    bool minimal = !AllowActivity();
+
     SC_PHASE("DoNextAction.staleTargetRecover", bot ? bot->GetName() : "(null)");
     MapManager::SetContinentUpdatePhase("bot-stale-recover", bot ? bot->GetGUIDLow() : 0);
     bool staleReset = DetectAndClearStaleTarget();
 
-    bool minimal = !AllowActivity();
+    const bool botDead = sServerFacade.UnitIsDead(bot);
+    if (!botDead)
+    {
+        deadFastLaneNextRetry = 0;
+        deadFastLaneRetries = 0;
+    }
+
+    if (botDead && !bot->IsBeingTeleported())
+    {
+        const time_t now = time(0);
+        const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+        const bool ghost = bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);
+        const bool wasGhost = ghost;
+        bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        bool recovered = false;
+        bool attemptedRecovery = false;
+
+        // Dead bots should not carry live quest/combat/loot bookkeeping. That
+        // stale work makes the health scorer report idle/no-work while the dead
+        // fast lane is actually trying to release or corpse-run.
+        aiObjectContext->GetValue<Unit*>("old target")->Reset();
+        aiObjectContext->GetValue<Unit*>("current target")->Reset();
+        aiObjectContext->GetValue<Unit*>("pull target")->Reset();
+        aiObjectContext->GetValue<Unit*>("dps target")->Reset();
+        aiObjectContext->GetValue<Unit*>("enemy player target")->Reset();
+        aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+        aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+        aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+        aiObjectContext->GetValue<bool>("travel target active")->Reset();
+        if (TravelTarget* deadTravelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get())
+        {
+            deadTravelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+            deadTravelTarget->SetForced(false);
+        }
+        bot->SetSelectionGuid(ObjectGuid());
+
+        const bool retryDue = !deadFastLaneNextRetry || now >= deadFastLaneNextRetry || noProgressSecs >= 120;
+
+        if (retryDue)
+        {
+            attemptedRecovery = true;
+            if (!ghost)
+                recovered = DoSpecificAction("auto release", Event(), true);
+            else if (bot->GetCorpse())
+            {
+                FindCorpseAction findCorpse(this);
+                Event event;
+                recovered = findCorpse.Execute(event);
+            }
+            else
+                recovered = DoSpecificAction("repop", Event(), true);
+
+            moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool apparentRecoveryProgress =
+                moving ||
+                (!wasGhost && bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST)) ||
+                !sServerFacade.UnitIsDead(bot) ||
+                bot->IsBeingTeleported();
+
+            if (apparentRecoveryProgress)
+                deadFastLaneRetries = 0;
+            else if (deadFastLaneRetries < 10)
+                ++deadFastLaneRetries;
+
+            const uint32 retryDelay = 1;
+            deadFastLaneNextRetry = now + retryDelay;
+        }
+
+        if (!moving &&
+            ghost &&
+            bot->GetCorpse() &&
+            noProgressSecs >= 120)
+        {
+            WorldPosition corpsePos(bot->GetCorpse());
+            if (corpsePos && !HasPlayerNearby(corpsePos))
+                recovered = TeleportGhostUnstuck(this, bot, corpsePos, "DeadFastLaneCorpseTeleport", CORPSE_RECLAIM_RADIUS > 5.0f ? CORPSE_RECLAIM_RADIUS - 2.0f : 3.0f);
+        }
+
+        moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        const bool deadAfterRecovery = sServerFacade.UnitIsDead(bot);
+        const bool ghostAfterRecovery = bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);
+        const bool releasedThisTick = !wasGhost && ghostAfterRecovery;
+        const bool revivedThisTick = !deadAfterRecovery;
+        const bool teleportedThisTick = bot->IsBeingTeleported();
+        const bool madeRecoveryProgress = moving || releasedThisTick || revivedThisTick || teleportedThisTick;
+
+        if (madeRecoveryProgress)
+        {
+            actionMetricLastProgress = now;
+            actionMetricNoProgressTicks = 0;
+            actionMetricSameActionStreak = 0;
+        }
+
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv") &&
+            attemptedRecovery &&
+            ((recovered && urand(1, 20) == 1) ||
+             (recovered && !madeRecoveryProgress && noProgressSecs >= 10 && (now - actionMetricLastStallSnapshot) >= 10) ||
+             (!recovered && !moving && noProgressSecs >= 60 && (now - actionMetricLastStallSnapshot) >= 15)))
+        {
+            std::ostringstream out;
+            out << "ghost=" << (ghost ? 1 : 0)
+                << " corpse=" << (bot->GetCorpse() ? 1 : 0)
+                << " recovered=" << (recovered ? 1 : 0)
+                << " progress=" << (madeRecoveryProgress ? 1 : 0)
+                << " released=" << (releasedThisTick ? 1 : 0)
+                << " revived=" << (revivedThisTick ? 1 : 0)
+                << " teleported=" << (teleportedThisTick ? 1 : 0)
+                << " moving=" << (moving ? 1 : 0)
+                << " noProgressSec=" << noProgressSecs
+                << " retryDelaySec=" << (deadFastLaneNextRetry > now ? static_cast<uint32>(deadFastLaneNextRetry - now) : 0)
+                << " retries=" << deadFastLaneRetries
+                << " action=" << (ghost ? (bot->GetCorpse() ? "find corpse" : "repop") : "auto release");
+            sPlayerbotAIConfig.logEvent(this, "DeadFastLaneRecovery", "", out.str());
+            if ((!recovered && !moving) || (recovered && !madeRecoveryProgress))
+                actionMetricLastStallSnapshot = now;
+        }
+
+        if (madeRecoveryProgress)
+        {
+            TrackActionMetrics(false, true, staleReset);
+            return;
+        }
+
+        // Dead bots must not fall through into normal live engines. If corpse
+        // recovery could not make progress this tick, wait for the next dead
+        // fast-lane retry instead of creating quest/combat/travel work as a ghost.
+        TrackActionMetrics(false, false, staleReset);
+        return;
+    }
+
+    // ============================ CALCULATED MODE ============================
+    // The legacy fast-lane "rescue" cascades below (~12 blocks) each ran a private
+    // copy of a "re-pick the bot's work" sequence and then return;ed BEFORE the
+    // normal strategy engine ran. That meant any of them could REPLACE the bot's
+    // own decision and interrupt it mid-task on any tick its stall counters tripped
+    // - the "hidden drivers" behind jumpy / out-of-order behavior. They are gated
+    // OFF here so living bots ALWAYS fall through to currentEngine->DoNextAction()
+    // and behave by their strategy relevances alone. Flip to true to restore.
+    const bool kEnableLegacyFastLanes = false;
+    if (kEnableLegacyFastLanes)
+    {
+    if (!minimal &&
+        actionMetricLastProgress &&
+        !HasActivePlayerMaster() &&
+        !HasRealPlayerMaster() &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsBeingTeleported() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        !sServerFacade.isMoving(bot) &&
+        !bot->isMovingOrTurning() &&
+        !sServerFacade.IsInCombat(bot) &&
+        !bot->GetVictim())
+    {
+        AiObjectContext* context = aiObjectContext;
+        const time_t now = time(0);
+        const uint32 noProgressSecs = static_cast<uint32>(now - actionMetricLastProgress);
+        Unit* staleTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+        LootObject staleLoot = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+        const bool hasStaleLoot = !staleLoot.IsEmpty();
+        const bool hasStaleTarget =
+            staleTarget &&
+            staleTarget->IsInWorld() &&
+            staleTarget->GetMapId() == bot->GetMapId() &&
+            !sServerFacade.IsFriendlyTo(bot, staleTarget);
+        const bool targetLootConflict =
+            hasStaleLoot &&
+            hasStaleTarget &&
+            staleLoot.guid == staleTarget->GetObjectGuid();
+        const bool staleTargetNoMotion =
+            hasStaleTarget &&
+            noProgressSecs >= 8 &&
+            (actionMetricNoProgressTicks >= 10 || actionMetricSameActionStreak >= 10);
+        const bool staleLootNoMotion =
+            hasStaleLoot &&
+            noProgressSecs >= 8 &&
+            (actionMetricNoProgressTicks >= 10 || actionMetricSameActionStreak >= 10);
+
+        if ((targetLootConflict && noProgressSecs >= 5) || staleTargetNoMotion || staleLootNoMotion)
+        {
+            ObjectGuid targetGuid;
+            uint64 lootGuid = 0;
+            std::string targetName = "none";
+
+            if (hasStaleLoot)
+            {
+                lootGuid = staleLoot.guid.GetCounter();
+                DeferLootGuidForBot(bot, staleLoot.guid, 10);
+                if (LootObjectStack* availableLoot = aiObjectContext->GetValue<LootObjectStack*>("available loot")->Get())
+                    availableLoot->Remove(staleLoot.guid);
+                aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+            }
+
+            if (hasStaleTarget)
+            {
+                targetGuid = staleTarget->GetObjectGuid();
+                targetName = staleTarget->GetName();
+                RESET_AI_VALUE(bool, "has attackers");
+                RESET_AI_VALUE(Unit*, "old target");
+                RESET_AI_VALUE(Unit*, "current target");
+                RESET_AI_VALUE(Unit*, "pull target");
+                RESET_AI_VALUE(Unit*, "dps target");
+                RESET_AI_VALUE(ObjectGuid, "attack target");
+                bot->SetSelectionGuid(ObjectGuid());
+                bot->CombatStop(false);
+                OnCombatEnded();
+                ResetStaleTargetState();
+            }
+
+            RESET_AI_VALUE(GuidPosition, "rpg target");
+
+            TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+            bool questRequested = DoSpecificAction("request quest travel target", Event(), true);
+            bool travelChosen = questRequested ? false : DoSpecificAction("choose travel target", Event(), true);
+            bool targetSelected = (questRequested || travelChosen) ? false : DoSpecificAction("select new target", Event(), true);
+            bool attackAnything = (questRequested || travelChosen || targetSelected) ? false : DoSpecificAction("attack anything", Event(), true);
+            bool grindRequested = (questRequested || travelChosen || targetSelected || attackAnything) ? false :
+                RequestGrindTravelFallback(this, aiObjectContext, bot, "stale-loot-target-conflict");
+            bool travelMoved = (questRequested || travelChosen || grindRequested) ?
+                MoveAssignedTravelWork(this, aiObjectContext, bot, "stale-loot-target-conflict") : false;
+
+            Unit* newTarget = AI_VALUE(Unit*, "current target");
+            LootObject newLoot = AI_VALUE(LootObject, "loot target");
+            GuidPosition newRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+            bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            bool directedMovementWork =
+                HasDirectedMovementWork(travelTarget, newRpgTarget, travelMoved, false, movingAfter);
+            bool workAssigned =
+                HasUsefulAssignedWork(bot, travelTarget, newTarget, newLoot, movingAfter, directedMovementWork);
+            bool rescuePushed = false;
+
+            if (!workAssigned)
+            {
+                bool rescueQuestRequested = false;
+                bool rescueTravelChosen = false;
+                bool rescueTargetSelected = false;
+                bool rescueAttackAnything = false;
+                bool rescueGrindRequested = false;
+                bool rescueTravelMoved = false;
+                bool rescueRpgChosen = false;
+                bool rescueRpgMoved = false;
+                bool rescueRandomMoved = false;
+                bool rescueIdleNudged = false;
+
+                rescuePushed = PushVisibleWork(this, aiObjectContext, bot, "stale-loot-target-fast-clear",
+                    rescueQuestRequested, rescueTravelChosen, rescueTargetSelected, rescueAttackAnything,
+                    rescueGrindRequested, rescueTravelMoved, rescueRpgChosen, rescueRpgMoved,
+                    rescueRandomMoved, rescueIdleNudged, true);
+
+                questRequested = questRequested || rescueQuestRequested;
+                travelChosen = travelChosen || rescueTravelChosen;
+                targetSelected = targetSelected || rescueTargetSelected;
+                attackAnything = attackAnything || rescueAttackAnything;
+                grindRequested = grindRequested || rescueGrindRequested;
+                travelMoved = travelMoved || rescueTravelMoved;
+
+                newTarget = AI_VALUE(Unit*, "current target");
+                newLoot = AI_VALUE(LootObject, "loot target");
+                newRpgTarget = AI_VALUE(GuidPosition, "rpg target");
+                travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                directedMovementWork =
+                    HasDirectedMovementWork(travelTarget, newRpgTarget, travelMoved || rescueTravelMoved,
+                        rescueRpgMoved, movingAfter);
+                workAssigned = rescuePushed ||
+                    HasConcreteRecoveryWork(bot, travelTarget, newTarget, newLoot, movingAfter,
+                        travelMoved || rescueTravelMoved, false);
+            }
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "reason=" << (targetLootConflict ? "target-loot-conflict" : (hasStaleTarget ? "target-no-motion" : "loot-no-motion"))
+                    << " noProgressSec=" << noProgressSecs
+                    << " noProgressTicks=" << actionMetricNoProgressTicks
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " target=" << targetName
+                    << " targetGuid=" << targetGuid.GetCounter()
+                    << " lootGuid=" << lootGuid
+                    << " quest=" << (questRequested ? 1 : 0)
+                    << " choose=" << (travelChosen ? 1 : 0)
+                    << " selectTarget=" << (targetSelected ? 1 : 0)
+                    << " attackAnything=" << (attackAnything ? 1 : 0)
+                    << " grindRequest=" << (grindRequested ? 1 : 0)
+                    << " travelMove=" << (travelMoved ? 1 : 0)
+                    << " rescuePushed=" << (rescuePushed ? 1 : 0)
+                    << " movingAfter=" << (movingAfter ? 1 : 0)
+                    << " newTarget=" << (newTarget ? newTarget->GetName() : "none")
+                    << " newLoot=" << (!newLoot.IsEmpty() ? 1 : 0)
+                    << " workAssigned=" << (workAssigned ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(this, "StaleLootTargetFastClear", "", out.str());
+            }
+
+            if (workAssigned)
+                actionMetricLastProgress = now;
+            TrackActionMetrics(false, workAssigned, true);
+            return;
+        }
+    }
+
+    if (currentState == BotState::BOT_STATE_COMBAT &&
+        !botDead &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        !aiObjectContext->GetValue<Unit*>("current target")->Get() &&
+        !aiObjectContext->GetValue<Unit*>("dps target")->Get() &&
+        aiObjectContext->GetValue<LootObject>("loot target")->Get().IsEmpty())
+    {
+        const time_t now = time(0);
+        const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+        const bool passiveAction =
+            actionMetricLastActionName.empty() ||
+            actionMetricLastActionName == "none" ||
+            actionMetricLastActionName == "check values" ||
+            actionMetricLastActionName == "update pve strats" ||
+            actionMetricLastActionName == "emote" ||
+            actionMetricLastActionName == "cannibalize" ||
+            actionMetricLastActionName == "reset raids" ||
+            actionMetricLastActionName == "move random" ||
+            actionMetricLastActionName == "move to rpg target" ||
+            actionMetricLastActionName == "choose rpg target" ||
+            actionMetricLastActionName == "accept invitation" ||
+            actionMetricLastActionName == "select new target" ||
+            actionMetricLastActionName == "move to travel target" ||
+            actionMetricLastActionName == "request quest travel target";
+
+        if (passiveAction && (noProgressSecs >= 3 || actionMetricNoProgressTicks >= 3 || actionMetricSameActionStreak >= 20))
+        {
+            ObjectGuid attackTarget = aiObjectContext->GetValue<ObjectGuid>("attack target")->Get();
+            TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+
+            aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+            aiObjectContext->GetValue<Unit*>("old target")->Reset();
+            aiObjectContext->GetValue<Unit*>("pull target")->Reset();
+            bot->CombatStop(false);
+            OnCombatEnded();
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                    << " noProgressSec=" << noProgressSecs
+                    << " noProgressTicks=" << actionMetricNoProgressTicks
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " moving=" << ((sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0)
+                    << " attackTarget=" << (attackTarget ? 1 : 0)
+                    << " travelStatus=" << (travelTarget ? static_cast<uint32>(travelTarget->GetStatus()) : 0)
+                    << " travelPtr=" << (travelTarget && travelTarget->GetDestination() ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(this, "CombatStateNoWorkExit", "", out.str());
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState == BotState::BOT_STATE_COMBAT &&
+        !botDead &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        sServerFacade.IsInCombat(bot) &&
+        !aiObjectContext->GetValue<Unit*>("current target")->Get() &&
+        !aiObjectContext->GetValue<Unit*>("dps target")->Get() &&
+        !bot->GetVictim() &&
+        aiObjectContext->GetValue<LootObject>("loot target")->Get().IsEmpty())
+    {
+        const time_t now = time(0);
+        const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+        const bool staleNoTargetCombat =
+            noProgressSecs >= 8 ||
+            actionMetricNoProgressTicks >= 80 ||
+            actionMetricSameActionStreak >= 80;
+
+        if (staleNoTargetCombat)
+        {
+            const bool hadAttackers = aiObjectContext->GetValue<bool>("has attackers")->Get();
+            Unit* newTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+            bool exitedCombat = true;
+            bool workAssigned = false;
+            bool questRequested = false;
+            bool travelChosen = false;
+            bool targetSelected = false;
+            bool attackAnything = false;
+            bool grindRequested = false;
+            bool travelMoved = false;
+            bool rpgChosen = false;
+            bool rpgMoved = false;
+            bool randomMoved = false;
+            bool idleNudged = false;
+
+            aiObjectContext->GetValue<bool>("has attackers")->Reset();
+            aiObjectContext->GetValue<Unit*>("old target")->Reset();
+            aiObjectContext->GetValue<Unit*>("current target")->Reset();
+            aiObjectContext->GetValue<Unit*>("pull target")->Reset();
+            aiObjectContext->GetValue<Unit*>("dps target")->Reset();
+            aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+            aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+            ResetTargetScanCaches(aiObjectContext);
+            bot->AttackStop(true);
+            bot->SetSelectionGuid(ObjectGuid());
+            bot->SetTargetGuid(ObjectGuid());
+            bot->CombatStop(true);
+            OnCombatEnded();
+            ResetStaleTargetState();
+
+            // This path means combat has already been stale with no usable target.
+            // Do not immediately scan/reacquire local mobs on the same tick; make
+            // the bot resume quest/travel/grind work first and let normal combat
+            // reacquire attackers on the next active tick if something is truly hitting it.
+            PushVisibleWork(this, aiObjectContext, bot, "combat-no-target-hard-recover",
+                questRequested, travelChosen, targetSelected, attackAnything, grindRequested, travelMoved,
+                rpgChosen, rpgMoved, randomMoved, idleNudged, true, false);
+            newTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+
+            LootObject newLootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+            GuidPosition newRpgTarget = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+            TravelTarget* newTravel = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+            const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool directedMovementWork =
+                HasDirectedMovementWork(newTravel, newRpgTarget, travelMoved, rpgMoved, movingAfter);
+            const bool usefulWorkAssigned =
+                HasConcreteRecoveryWork(bot, newTravel, newTarget, newLootTarget, movingAfter,
+                    travelMoved, false);
+            const bool fallbackWorkAssigned = HasFallbackMovementWork(randomMoved, idleNudged, movingAfter);
+            const bool stillCombatNoTarget =
+                sServerFacade.IsInCombat(bot) &&
+                !newTarget &&
+                !bot->GetVictim() &&
+                !bot->IsNonMeleeSpellCasted(true, false, true);
+            workAssigned = usefulWorkAssigned || directedMovementWork || fallbackWorkAssigned;
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                    << " noProgressSec=" << noProgressSecs
+                    << " noProgressTicks=" << actionMetricNoProgressTicks
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " attackers=" << (hadAttackers ? 1 : 0)
+                    << " selected=" << (targetSelected ? 1 : 0)
+                    << " newTarget=" << (newTarget ? newTarget->GetName() : "none")
+                    << " exited=" << (exitedCombat ? 1 : 0)
+                    << " quest=" << (questRequested ? 1 : 0)
+                    << " choose=" << (travelChosen ? 1 : 0)
+                    << " attackAnything=" << (attackAnything ? 1 : 0)
+                    << " grindRequest=" << (grindRequested ? 1 : 0)
+                    << " travelMove=" << (travelMoved ? 1 : 0)
+                    << " rpgMove=" << (rpgMoved ? 1 : 0)
+                    << " randomMove=" << (randomMoved ? 1 : 0)
+                    << " idleNudge=" << (idleNudged ? 1 : 0)
+                    << " movingAfter=" << (movingAfter ? 1 : 0)
+                    << " loot=" << (!newLootTarget.IsEmpty() ? 1 : 0)
+                    << " rpgTarget=" << (newRpgTarget ? 1 : 0)
+                    << " directedWork=" << (directedMovementWork ? 1 : 0)
+                    << " usefulWork=" << (usefulWorkAssigned ? 1 : 0)
+                    << " fallbackWork=" << (fallbackWorkAssigned ? 1 : 0)
+                    << " stillCombatNoTarget=" << (stillCombatNoTarget ? 1 : 0)
+                    << " workAssigned=" << (workAssigned ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(this, "CombatNoTargetHardRecover", "", out.str());
+            }
+
+            if (workAssigned)
+            {
+                TrackActionMetrics(false, true, staleReset || exitedCombat);
+                return;
+            }
+
+            if ((movingAfter || newRpgTarget) && !workAssigned)
+            {
+                StopMoving();
+                bot->InterruptMoving(true);
+                aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+                if (newTravel && !IsActiveTravelWork(newTravel) && !IsPreparedTravelWork(newTravel))
+                {
+                    newTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    newTravel->SetForced(false);
+                    aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                }
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !botDead &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        !sServerFacade.IsInCombat(bot) &&
+        !bot->GetVictim() &&
+        !sServerFacade.isMoving(bot) &&
+        !bot->isMovingOrTurning())
+    {
+        Unit* stalledTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+        if (stalledTarget &&
+            stalledTarget->IsInWorld() &&
+            stalledTarget->GetMapId() == bot->GetMapId() &&
+            !sServerFacade.IsFriendlyTo(bot, stalledTarget) &&
+            !sServerFacade.UnitIsDead(stalledTarget))
+        {
+            const time_t now = time(0);
+            const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+            const bool staleTargetState =
+                noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS &&
+                (actionMetricNoProgressTicks >= 20 || actionMetricSameActionStreak >= 15 || noProgressSecs >= 20);
+
+            if (staleTargetState)
+            {
+                const ObjectGuid targetGuid = stalledTarget->GetObjectGuid();
+                const std::string targetName = stalledTarget->GetName();
+                TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+
+                aiObjectContext->GetValue<bool>("has attackers")->Reset();
+                aiObjectContext->GetValue<Unit*>("old target")->Reset();
+                aiObjectContext->GetValue<Unit*>("current target")->Reset();
+                aiObjectContext->GetValue<Unit*>("pull target")->Reset();
+                aiObjectContext->GetValue<Unit*>("dps target")->Reset();
+                aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+                bot->SetSelectionGuid(ObjectGuid());
+                bot->CombatStop(false);
+                OnCombatEnded();
+                ResetStaleTargetState();
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                        << " target=" << targetName
+                        << " guid=" << targetGuid.GetCounter()
+                        << " dist=" << std::fixed << std::setprecision(2) << bot->GetDistance(stalledTarget)
+                        << " noProgressSec=" << noProgressSecs
+                        << " noProgressTicks=" << actionMetricNoProgressTicks
+                        << " sameActionStreak=" << actionMetricSameActionStreak
+                        << " travelStatus=" << (travelTarget ? static_cast<uint32>(travelTarget->GetStatus()) : 0)
+                        << " travelPtr=" << (travelTarget && travelTarget->GetDestination() ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "CombatTargetNoProgressReset", std::to_string(targetGuid.GetCounter()), out.str());
+                }
+
+                TrackActionMetrics(false, true, true);
+                return;
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !botDead &&
+        !HasActivePlayerMaster() &&
+        !HasRealPlayerMaster() &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsBeingTeleported() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        !sServerFacade.IsInCombat(bot) &&
+        !sServerFacade.isMoving(bot) &&
+        !bot->isMovingOrTurning() &&
+        !aiObjectContext->GetValue<Unit*>("current target")->Get() &&
+        !aiObjectContext->GetValue<Unit*>("dps target")->Get() &&
+        !bot->GetVictim() &&
+        aiObjectContext->GetValue<LootObject>("loot target")->Get().IsEmpty())
+    {
+        const time_t now = time(0);
+        const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+        const bool staleActionWithoutWork =
+            (actionMetricLastActionName.empty() || actionMetricLastActionName == "none") ?
+                (noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS && actionMetricNoProgressTicks >= 20) :
+                (noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS &&
+                 (actionMetricSameActionStreak >= 15 || actionMetricNoProgressTicks >= 6 || noProgressSecs >= 20));
+
+        if (staleActionWithoutWork)
+        {
+            TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+            TravelDestination* destination = travelTarget ? travelTarget->GetDestination() : nullptr;
+            const TravelStatus oldStatus = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+
+            aiObjectContext->GetValue<bool>("has attackers")->Reset();
+            aiObjectContext->GetValue<Unit*>("old target")->Reset();
+            aiObjectContext->GetValue<Unit*>("pull target")->Reset();
+            aiObjectContext->GetValue<Unit*>("dps target")->Reset();
+            aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+            bot->SetSelectionGuid(ObjectGuid());
+            ResetStaleTargetState();
+
+            if (travelTarget)
+            {
+                travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                travelTarget->SetForced(false);
+                aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                aiObjectContext->ClearValues("no active travel destinations");
+            }
+
+            aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+
+            bool questRequested = false;
+            bool travelChosen = false;
+            bool targetSelected = false;
+            bool attackAnything = false;
+            bool grindRequested = false;
+            bool travelMoved = false;
+            bool rpgChosen = false;
+            bool rpgMoved = false;
+            bool randomMoved = false;
+            bool idleNudged = false;
+
+            PushVisibleWork(this, aiObjectContext, bot, "stale-action-no-work",
+                questRequested, travelChosen, targetSelected, attackAnything, grindRequested, travelMoved,
+                rpgChosen, rpgMoved, randomMoved, idleNudged, true);
+            Unit* newTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+            const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            LootObject newLootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+            GuidPosition newRpgTarget = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+            const bool directedMovementWork =
+                HasDirectedMovementWork(travelTarget, newRpgTarget, travelMoved, rpgMoved, movingAfter);
+            const bool fallbackMovementWork =
+                HasFallbackMovementWork(randomMoved, idleNudged, movingAfter);
+            const bool workAssigned =
+                HasConcreteRecoveryWork(bot, travelTarget, newTarget, newLootTarget, movingAfter, travelMoved, false) ||
+                directedMovementWork ||
+                fallbackMovementWork;
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << actionMetricLastActionName
+                    << " noProgressSec=" << noProgressSecs
+                    << " noProgressTicks=" << actionMetricNoProgressTicks
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " oldStatus=" << static_cast<uint32>(oldStatus)
+                    << " newStatus=" << (travelTarget ? static_cast<uint32>(travelTarget->GetStatus()) : 0)
+                    << " quest=" << (questRequested ? 1 : 0)
+                    << " choose=" << (travelChosen ? 1 : 0)
+                    << " selectTarget=" << (targetSelected ? 1 : 0)
+                    << " attackAnything=" << (attackAnything ? 1 : 0)
+                    << " grindRequest=" << (grindRequested ? 1 : 0)
+                    << " rpgChoose=" << (rpgChosen ? 1 : 0)
+                    << " travelMove=" << (travelMoved ? 1 : 0)
+                    << " rpgMove=" << (rpgMoved ? 1 : 0)
+                    << " randomMove=" << (randomMoved ? 1 : 0)
+                    << " idleNudge=" << (idleNudged ? 1 : 0)
+                    << " nudgeOnly=" << ((randomMoved || idleNudged) && !workAssigned ? 1 : 0)
+                    << " directedMove=" << (directedMovementWork ? 1 : 0)
+                    << " fallbackMove=" << (fallbackMovementWork ? 1 : 0)
+                    << " movingAfter=" << (movingAfter ? 1 : 0)
+                    << " target=" << (newTarget ? newTarget->GetName() : "none")
+                    << " loot=" << (!newLootTarget.IsEmpty() ? 1 : 0)
+                    << " rpgTarget=" << (newRpgTarget ? 1 : 0)
+                    << " workAssigned=" << (workAssigned ? 1 : 0)
+                    << " destinationPtr=" << (destination ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(this, "NoWorkActionReset", "", out.str());
+            }
+
+            if (workAssigned)
+            {
+                TrackActionMetrics(false, true, true);
+                return;
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !botDead &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+        if (travelTarget && travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_EXPIRED)
+        {
+            const time_t now = time(0);
+            Unit* currentTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+            LootObject lootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+            TravelDestination* destination = travelTarget->GetDestination();
+            const bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool combat = sServerFacade.IsInCombat(bot);
+            const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+            const bool shouldClear =
+                !moving &&
+                ((!lootTarget.IsEmpty() && (combat || currentTarget || noProgressSecs >= 3 || actionMetricSameActionStreak >= 20)) ||
+                 noProgressSecs >= 3 ||
+                 actionMetricNoProgressTicks >= 30 ||
+                 actionMetricSameActionStreak >= 20);
+
+            if (shouldClear)
+            {
+                const uint64 lootGuid = lootTarget.IsEmpty() ? 0 : lootTarget.guid.GetCounter();
+                if (!lootTarget.IsEmpty())
+                {
+                    DeferLootGuidForBot(bot, lootTarget.guid, 15);
+                    if (LootObjectStack* availableLoot = aiObjectContext->GetValue<LootObjectStack*>("available loot")->Get())
+                        availableLoot->Remove(lootTarget.guid);
+                    aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+                }
+
+                travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                travelTarget->SetForced(false);
+                aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                aiObjectContext->ClearValues("no active travel destinations");
+                aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+
+                if (!currentTarget)
+                    aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "destinationPtr=" << (destination ? 1 : 0)
+                        << " noProgressSec=" << noProgressSecs
+                        << " sameActionStreak=" << actionMetricSameActionStreak
+                        << " combat=" << (combat ? 1 : 0)
+                        << " target=" << (currentTarget ? currentTarget->GetName() : "none")
+                        << " lootGuid=" << lootGuid
+                        << " action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName);
+                    sPlayerbotAIConfig.logEvent(this, "ExpiredTravelStaleClear", "", out.str());
+                }
+
+                staleReset = true;
+            }
+        }
+    }
+
+    if (currentState != BotState::BOT_STATE_DEAD &&
+        !botDead &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        Unit* loopTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+        if (loopTarget &&
+            loopTarget->IsInWorld() &&
+            loopTarget->GetMapId() == bot->GetMapId() &&
+            !sServerFacade.IsFriendlyTo(bot, loopTarget) &&
+            !sServerFacade.UnitIsDead(loopTarget))
+        {
+            const time_t now = time(0);
+            const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+            const bool loopAction =
+                actionMetricLastActionName == "reach melee" ||
+                actionMetricLastActionName == "reach spell" ||
+                actionMetricLastActionName == "-ranged,+close" ||
+                actionMetricLastActionName == "melee" ||
+                actionMetricLastActionName == "battle shout" ||
+                actionMetricLastActionName == "renew on party" ||
+                actionMetricLastActionName == "clean quest log" ||
+                actionMetricLastActionName == "add all loot" ||
+                actionMetricLastActionName == "store loot" ||
+                actionMetricLastActionName == "loot" ||
+                actionMetricLastActionName == "move to loot" ||
+                actionMetricLastActionName == "move random" ||
+                actionMetricLastActionName == "move out of enemy contact" ||
+                actionMetricLastActionName == "move to rpg target" ||
+                actionMetricLastActionName == "choose rpg target" ||
+                actionMetricLastActionName == "choose travel target" ||
+                actionMetricLastActionName == "choose group travel target" ||
+                actionMetricLastActionName == "invite nearby" ||
+                actionMetricLastActionName == "emote" ||
+                actionMetricLastActionName == "hunter's mark" ||
+                actionMetricLastActionName == "select new target" ||
+                actionMetricLastActionName == "request quest travel target" ||
+                actionMetricLastActionName == "update pve strats";
+            const bool passiveCombatLoopAction =
+                actionMetricLastActionName == "check values" ||
+                actionMetricLastActionName == "update pve strats" ||
+                actionMetricLastActionName == "move to rpg target" ||
+                actionMetricLastActionName == "choose rpg target" ||
+                actionMetricLastActionName == "choose travel target" ||
+                actionMetricLastActionName == "choose group travel target" ||
+                actionMetricLastActionName == "invite nearby" ||
+                actionMetricLastActionName == "select new target";
+            const bool targetFillerLoopAction =
+                passiveCombatLoopAction ||
+                actionMetricLastActionName == "add all loot" ||
+                actionMetricLastActionName == "store loot" ||
+                actionMetricLastActionName == "loot" ||
+                actionMetricLastActionName == "move to loot" ||
+                actionMetricLastActionName == "clean quest log" ||
+                actionMetricLastActionName == "emote" ||
+                actionMetricLastActionName == "jump" ||
+                actionMetricLastActionName == "drink" ||
+                actionMetricLastActionName == "food" ||
+                actionMetricLastActionName == "move random" ||
+                actionMetricLastActionName == "request named travel target" ||
+                actionMetricLastActionName == "rpg work" ||
+                actionMetricLastActionName == "rpg use" ||
+                actionMetricLastActionName == "rpg stay" ||
+                actionMetricLastActionName == "rpg emote" ||
+                actionMetricLastActionName == "rpg sell" ||
+                actionMetricLastActionName == "rpg cancel";
+            const bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool casting = bot->IsNonMeleeSpellCasted(true, false, true);
+            const bool victimTarget = bot->GetVictim() == loopTarget;
+            const bool victimInReach =
+                victimTarget &&
+                (bot->CanReachWithMeleeAutoAttack(loopTarget) ||
+                 (IsRanged(bot) && bot->IsWithinLOSInMap(loopTarget, true) &&
+                  sServerFacade.GetDistance2d(bot, loopTarget) <= GetRange("spell") + sPlayerbotAIConfig.contactDistance));
+            const bool genericTargetLoopAction = !loopAction && !passiveCombatLoopAction;
+            const ObjectGuid loopTargetGuid = loopTarget->GetObjectGuid();
+            const bool fillerRetryDue =
+                targetFastLaneGuid != loopTargetGuid ||
+                !targetFastLaneNextRetry ||
+                now >= targetFastLaneNextRetry ||
+                noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS;
+            const bool fillerNeedsCombatPrime =
+                targetFillerLoopAction &&
+                fillerRetryDue &&
+                !casting &&
+                (!victimInReach ||
+                 noProgressSecs >= 8 ||
+                 actionMetricNoProgressTicks >= 20 ||
+                 actionMetricSameActionStreak >= 30);
+
+            if (fillerNeedsCombatPrime)
+            {
+                TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                const TravelStatus oldTravelStatus = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+                bool travelCleared = false;
+
+                aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+                aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+
+                if (travelTarget && !victimInReach)
+                {
+                    travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    travelTarget->SetForced(false);
+                    aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                    aiObjectContext->ClearValues("no active travel destinations");
+                    travelCleared = true;
+                }
+
+                bot->SetSelectionGuid(loopTarget->GetObjectGuid());
+                bot->SetTarget(loopTarget);
+
+                const bool forcedAttack = DoSpecificAction("attack", Event("target filler fast lane", "combat owns tick", bot), true);
+                bool directProgress = false;
+                if (!forcedAttack && !bot->IsNonMeleeSpellCasted(true, false, true))
+                {
+                    const bool rangedBot = IsRanged(bot) && bot->getClass() != CLASS_PALADIN;
+                    const bool inLos = bot->IsWithinLOSInMap(loopTarget, true);
+                    const float distance = sServerFacade.GetDistance2d(bot, loopTarget);
+                    const float spellRange = GetRange("spell");
+
+                    if (!rangedBot || !inLos || distance > spellRange + sPlayerbotAIConfig.contactDistance)
+                    {
+                        bot->Attack(loopTarget, true);
+                        if (MotionMaster* mm = bot->GetMotionMaster())
+                        {
+                            // Ranged bots close only to keep-away (flee) distance,
+                            // not melee reach -- see the current-target fast lane.
+                            if (rangedBot)
+                                mm->MoveChase(loopTarget, GetRange("flee"), bot->GetAngle(loopTarget));
+                            else
+                                mm->MoveChase(loopTarget);
+                            directProgress = true;
+                        }
+                    }
+                    else
+                    {
+                        bot->Attack(loopTarget, false);
+                        // Ranged attack selection is only a setup step. Do not
+                        // call this progress unless a spell/combat state starts.
+                        aiObjectContext->GetValue<Unit*>("dps target")->Set(loopTarget);
+                        directProgress = TryImmediateRangedCombatAction(this, bot, loopTarget) ||
+                            bot->IsNonMeleeSpellCasted(true, false, true);
+                    }
+                    OnCombatStarted();
+                }
+
+                const bool nowMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool nowCasting = bot->IsNonMeleeSpellCasted(true, false, true);
+                const bool nowCombat = sServerFacade.IsInCombat(bot);
+                const bool nowRangedBot = IsRanged(bot) && bot->getClass() != CLASS_PALADIN;
+                const bool nowVictimInReach =
+                    bot->GetVictim() == loopTarget &&
+                    (bot->CanReachWithMeleeAutoAttack(loopTarget) ||
+                     (nowRangedBot && bot->IsWithinLOSInMap(loopTarget, true) &&
+                      sServerFacade.GetDistance2d(bot, loopTarget) <= GetRange("spell") + sPlayerbotAIConfig.contactDistance));
+                const bool passiveRangedVictimOnly = nowRangedBot && nowVictimInReach && !nowCombat && !nowCasting && !nowMoving && !directProgress;
+                const bool usefulMovingProgress =
+                    nowMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || actionMetricMoveProgressTicks > 0);
+                const bool countableMovingProgress =
+                    usefulMovingProgress &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || !nowVictimInReach);
+                const bool meleeSwinging =
+                    bot->GetVictim() == loopTarget &&
+                    bot->CanReachWithMeleeAutoAttack(loopTarget) &&
+                    bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+                const bool meleeMovingWithoutContact =
+                    !nowRangedBot &&
+                    nowMoving &&
+                    bot->GetVictim() == loopTarget &&
+                    !bot->CanReachWithMeleeAutoAttack(loopTarget);
+                bool combatConnectKick = false;
+                if (!nowCasting &&
+                    !meleeSwinging &&
+                    (!usefulMovingProgress || nowVictimInReach || meleeMovingWithoutContact) &&
+                    noProgressSecs >= VISIBLE_IDLE_WARN_SECONDS)
+                {
+                    combatConnectKick = ForceCombatConnect(this, bot, loopTarget, "target-filler-stall");
+                }
+
+                const bool postKickMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool postKickCasting = bot->IsNonMeleeSpellCasted(true, false, true);
+                const bool postKickMeleeSwinging =
+                    bot->GetVictim() == loopTarget &&
+                    bot->CanReachWithMeleeAutoAttack(loopTarget) &&
+                    bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+                const bool postKickUsefulMoving =
+                    postKickMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || actionMetricMoveProgressTicks > 0);
+                const bool postKickCountableMoving =
+                    postKickUsefulMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || !nowVictimInReach);
+                const bool usefulDirectProgress =
+                    directProgress &&
+                    (postKickCasting || postKickMeleeSwinging || postKickCountableMoving);
+                const bool freshVictimSetup =
+                    nowVictimInReach &&
+                    !passiveRangedVictimOnly &&
+                    (postKickCasting || postKickMeleeSwinging || postKickCountableMoving) &&
+                    noProgressSecs < 2;
+                const bool primedCombat =
+                    usefulDirectProgress ||
+                    postKickCountableMoving ||
+                    postKickCasting ||
+                    postKickMeleeSwinging ||
+                    (combatConnectKick && (postKickCountableMoving || postKickCasting || postKickMeleeSwinging)) ||
+                    freshVictimSetup;
+                targetFastLaneGuid = loopTargetGuid;
+                if (primedCombat)
+                {
+                    targetFastLaneFailures = 0;
+                    targetFastLaneNextRetry = now + (nowVictimInReach ? 3 : 1);
+                }
+                else
+                {
+                    ++targetFastLaneFailures;
+                    targetFastLaneNextRetry = now + ((!postKickMoving && !postKickCasting && !postKickMeleeSwinging) ? 1 :
+                        std::min<uint32>(5, 1 + targetFastLaneFailures));
+                }
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv") &&
+                    (!primedCombat || urand(1, 50) == 1))
+                {
+                    std::ostringstream out;
+                    out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                        << " target=" << loopTarget->GetName()
+                        << " guid=" << loopTarget->GetGUIDLow()
+                        << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, loopTarget)
+                        << " noProgressSec=" << noProgressSecs
+                        << " noProgressTicks=" << actionMetricNoProgressTicks
+                        << " sameActionStreak=" << actionMetricSameActionStreak
+                        << " forcedAttack=" << (forcedAttack ? 1 : 0)
+                        << " direct=" << (directProgress ? 1 : 0)
+                        << " usefulDirect=" << (usefulDirectProgress ? 1 : 0)
+                        << " moving=" << (postKickMoving ? 1 : 0)
+                        << " usefulMoving=" << (postKickUsefulMoving ? 1 : 0)
+                        << " countableMoving=" << (postKickCountableMoving ? 1 : 0)
+                        << " casting=" << (postKickCasting ? 1 : 0)
+                        << " combat=" << (nowCombat ? 1 : 0)
+                        << " victimReach=" << (nowVictimInReach ? 1 : 0)
+                        << " meleeSwing=" << (postKickMeleeSwinging ? 1 : 0)
+                        << " connectKick=" << (combatConnectKick ? 1 : 0)
+                        << " freshVictimSetup=" << (freshVictimSetup ? 1 : 0)
+                        << " passiveRangedVictimOnly=" << (passiveRangedVictimOnly ? 1 : 0)
+                        << " travelCleared=" << (travelCleared ? 1 : 0)
+                        << " oldTravelStatus=" << static_cast<uint32>(oldTravelStatus)
+                        << " nextRetrySec=" << (targetFastLaneNextRetry > now ? static_cast<uint32>(targetFastLaneNextRetry - now) : 0)
+                        << " failures=" << targetFastLaneFailures
+                        << " success=" << (primedCombat ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "TargetFillerCombatPrime", std::to_string(loopTarget->GetGUIDLow()), out.str());
+                }
+
+                if (primedCombat)
+                {
+                    TrackActionMetrics(false, true, staleReset);
+                    return;
+                }
+            }
+
+            const bool frozenTargetFillerLoop =
+                targetFillerLoopAction &&
+                !moving &&
+                !casting &&
+                !victimTarget &&
+                targetFastLaneGuid == loopTargetGuid &&
+                targetFastLaneFailures >= 2 &&
+                noProgressSecs >= 6;
+            const bool loopMeleeSwinging =
+                bot->GetVictim() == loopTarget &&
+                bot->CanReachWithMeleeAutoAttack(loopTarget) &&
+                bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+            const bool loopUsefulMoving =
+                moving &&
+                (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || actionMetricMoveProgressTicks > 0);
+            const bool loopCountableMoving =
+                loopUsefulMoving &&
+                (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || !victimTarget ||
+                 !bot->CanReachWithMeleeAutoAttack(loopTarget));
+            const bool fakeMovingTargetFillerLoop =
+                targetFillerLoopAction &&
+                moving &&
+                !casting &&
+                !loopMeleeSwinging &&
+                !loopCountableMoving &&
+                targetFastLaneGuid == loopTargetGuid &&
+                targetFastLaneFailures >= 3 &&
+                noProgressSecs >= 7;
+            const bool longFakeMovingTargetLoop =
+                moving &&
+                !casting &&
+                !loopMeleeSwinging &&
+                !loopCountableMoving &&
+                noProgressSecs >= 30;
+            const bool severeLoop =
+                frozenTargetFillerLoop ||
+                fakeMovingTargetFillerLoop ||
+                longFakeMovingTargetLoop ||
+                noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS &&
+                ((targetFillerLoopAction && (actionMetricSameActionStreak >= 25 || actionMetricNoProgressTicks >= 40 || noProgressSecs >= 20)) ||
+                 (loopAction && (actionMetricSameActionStreak >= 120 || actionMetricNoProgressTicks >= 200)) ||
+                 (passiveCombatLoopAction && (actionMetricSameActionStreak >= 25 || actionMetricNoProgressTicks >= 40)) ||
+                 (genericTargetLoopAction && !moving && (actionMetricSameActionStreak >= 160 || actionMetricNoProgressTicks >= 220)));
+
+            if (severeLoop)
+            {
+                const ObjectGuid targetGuid = loopTarget->GetObjectGuid();
+                const std::string targetName = loopTarget->GetName();
+                const bool hasAttackers = aiObjectContext->GetValue<bool>("has attackers")->Get();
+                const bool wasVictim = bot->GetVictim() == loopTarget;
+                bool travelCleared = ClearExpiredTravelAfterStaleTargetReset();
+                TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                const TravelStatus oldTravelStatus = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+
+                if (targetFillerLoopAction && !hasAttackers && !sServerFacade.IsInCombat(bot) && travelTarget)
+                {
+                    travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    travelTarget->SetForced(false);
+                    aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                    aiObjectContext->ClearValues("no active travel destinations");
+                    travelCleared = true;
+                }
+
+                if (wasVictim)
+                    bot->AttackStop(true);
+
+                aiObjectContext->GetValue<Unit*>("old target")->Reset();
+                aiObjectContext->GetValue<Unit*>("current target")->Reset();
+                aiObjectContext->GetValue<Unit*>("pull target")->Reset();
+                aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+                aiObjectContext->GetValue<Unit*>("dps target")->Reset();
+                bot->SetSelectionGuid(ObjectGuid());
+
+                if (!hasAttackers)
+                {
+                    bot->CombatStop(false);
+                    OnCombatEnded();
+                }
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                        << " target=" << targetName
+                        << " guid=" << targetGuid.GetCounter()
+                        << " dist=" << std::fixed << std::setprecision(2) << bot->GetDistance(loopTarget)
+                        << " dist2d=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, loopTarget)
+                        << " noProgressSec=" << noProgressSecs
+                        << " noProgressTicks=" << actionMetricNoProgressTicks
+                        << " sameActionStreak=" << actionMetricSameActionStreak
+                        << " moving=" << (moving ? 1 : 0)
+                        << " fakeMoving=" << ((fakeMovingTargetFillerLoop || longFakeMovingTargetLoop) ? 1 : 0)
+                        << " combat=" << (sServerFacade.IsInCombat(bot) ? 1 : 0)
+                        << " victim=" << (wasVictim ? 1 : 0)
+                        << " attackers=" << (hasAttackers ? 1 : 0)
+                        << " oldTravelStatus=" << static_cast<uint32>(oldTravelStatus)
+                        << " travelStatus=" << (travelTarget ? static_cast<uint32>(travelTarget->GetStatus()) : 0)
+                        << " filler=" << (targetFillerLoopAction ? 1 : 0)
+                        << " expiredTravelReset=" << (travelCleared ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "TargetLoopHardReset", std::to_string(targetGuid.GetCounter()), out.str());
+                }
+
+                ResetStaleTargetState();
+                staleReset = true;
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        Unit* currentTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+        if (currentTarget &&
+            currentTarget->IsInWorld() &&
+            currentTarget->GetMapId() == bot->GetMapId() &&
+            !sServerFacade.IsFriendlyTo(bot, currentTarget) &&
+            !sServerFacade.UnitIsDead(currentTarget))
+        {
+            const time_t now = time(0);
+            const ObjectGuid targetGuid = currentTarget->GetObjectGuid();
+            if (targetFastLaneGuid != targetGuid)
+            {
+                targetFastLaneGuid = targetGuid;
+                targetFastLaneNextRetry = 0;
+                targetFastLaneFailures = 0;
+            }
+
+            const bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool casting = bot->IsNonMeleeSpellCasted(true, false, true);
+            const bool rangedTargetBot = IsRanged(bot) && bot->getClass() != CLASS_PALADIN;
+            const bool victimTarget = bot->GetVictim() == currentTarget;
+            const bool victimInReach =
+                victimTarget &&
+                (bot->CanReachWithMeleeAutoAttack(currentTarget) ||
+                 (rangedTargetBot && bot->IsWithinLOSInMap(currentTarget, true) &&
+                  sServerFacade.GetDistance2d(bot, currentTarget) <= GetRange("spell") + sPlayerbotAIConfig.contactDistance));
+            const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+            const bool usefulMovingProgress =
+                moving &&
+                (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || actionMetricMoveProgressTicks > 0);
+            const bool countableMovingProgress =
+                usefulMovingProgress &&
+                (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || !victimInReach);
+            const bool meleeSwinging =
+                victimTarget &&
+                bot->CanReachWithMeleeAutoAttack(currentTarget) &&
+                bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+            const bool freshVictimSetup =
+                victimInReach &&
+                (casting || meleeSwinging || countableMovingProgress) &&
+                noProgressSecs < 2;
+            const bool productive = countableMovingProgress || casting || meleeSwinging || freshVictimSetup;
+            if (productive)
+            {
+                targetFastLaneNextRetry = 0;
+                targetFastLaneFailures = 0;
+            }
+
+            const bool needsFastLane =
+                noProgressSecs >= 3 ||
+                actionMetricNoProgressTicks >= 10 ||
+                actionMetricSameActionStreak >= 20;
+            const bool retryDue = !targetFastLaneNextRetry || now >= targetFastLaneNextRetry || noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS;
+            if (!productive && needsFastLane && retryDue)
+            {
+                const bool forcedAttack = DoSpecificAction("attack", Event(), true);
+                const bool forcedMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool forcedCasting = bot->IsNonMeleeSpellCasted(true, false, true);
+                const bool forcedVictimInReach =
+                    bot->GetVictim() == currentTarget &&
+                    (bot->CanReachWithMeleeAutoAttack(currentTarget) ||
+                     (rangedTargetBot && bot->IsWithinLOSInMap(currentTarget, true) &&
+                      sServerFacade.GetDistance2d(bot, currentTarget) <= GetRange("spell") + sPlayerbotAIConfig.contactDistance));
+                const bool forcedUsefulMoving =
+                    forcedMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || actionMetricMoveProgressTicks > 0);
+                const bool forcedCountableMoving =
+                    forcedUsefulMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || !forcedVictimInReach);
+                const bool forcedMeleeSwinging =
+                    bot->GetVictim() == currentTarget &&
+                    bot->CanReachWithMeleeAutoAttack(currentTarget) &&
+                    bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+                const bool forcedFreshVictimSetup =
+                    forcedVictimInReach &&
+                    (forcedCasting || forcedMeleeSwinging || forcedCountableMoving) &&
+                    noProgressSecs < 2;
+                const bool forcedProgress =
+                    forcedCountableMoving ||
+                    forcedCasting ||
+                    forcedMeleeSwinging ||
+                    forcedFreshVictimSetup;
+                bool directProgress = false;
+                if (!forcedProgress &&
+                    !sServerFacade.isMoving(bot) &&
+                    !bot->isMovingOrTurning())
+                {
+                    const bool rangedBot = IsRanged(bot) && bot->getClass() != CLASS_PALADIN;
+                    const bool inLos = bot->IsWithinLOSInMap(currentTarget, true);
+                    const float distance = sServerFacade.GetDistance2d(bot, currentTarget);
+                    const float spellRange = GetRange("spell");
+
+                    bot->SetSelectionGuid(currentTarget->GetObjectGuid());
+                    bot->SetTarget(currentTarget);
+
+                    // A ranged bot already within spell range + LOS must NOT be
+                    // force-chased into melee here: MoveChase closes to melee
+                    // reach, parking casters at 3-5yd where the engine's ranged
+                    // repositioning then fights to back them out, interrupting
+                    // every cast (the perpetual-cast / "fake running" loop). Let
+                    // such bots fall through to the cast branch below. Mirrors the
+                    // correct ordering in the target-filler fast lane (~7082).
+                    const bool rangedInSpellRange =
+                        rangedBot && inLos &&
+                        distance <= spellRange + sPlayerbotAIConfig.contactDistance;
+
+                    if (bot->GetVictim() == currentTarget &&
+                        !bot->CanReachWithMeleeAutoAttack(currentTarget) &&
+                        !rangedInSpellRange)
+                    {
+                        if (MotionMaster* mm = bot->GetMotionMaster())
+                        {
+                            mm->MoveChase(currentTarget);
+                            directProgress = true;
+                        }
+                    }
+                    else if (!rangedBot)
+                    {
+                        bot->Attack(currentTarget, true);
+                        if (!bot->CanReachWithMeleeAutoAttack(currentTarget))
+                        {
+                            if (MotionMaster* mm = bot->GetMotionMaster())
+                            {
+                                mm->MoveChase(currentTarget);
+                                directProgress = true;
+                            }
+                        }
+                        const bool meleeActionStarted =
+                            bot->GetVictim() == currentTarget &&
+                            bot->CanReachWithMeleeAutoAttack(currentTarget) &&
+                            bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+                        directProgress = directProgress ||
+                            sServerFacade.isMoving(bot) ||
+                            bot->isMovingOrTurning() ||
+                            meleeActionStarted;
+                    }
+                    else if (inLos && distance <= spellRange + sPlayerbotAIConfig.contactDistance)
+                    {
+                        bot->Attack(currentTarget, false);
+                        OnCombatStarted();
+                        // Selecting a ranged victim is not useful by itself; the
+                        // following engine pass must actually cast or enter combat.
+                        aiObjectContext->GetValue<Unit*>("dps target")->Set(currentTarget);
+                        directProgress = TryImmediateRangedCombatAction(this, bot, currentTarget) ||
+                            bot->IsNonMeleeSpellCasted(true, false, true);
+                    }
+                    else if (MotionMaster* mm = bot->GetMotionMaster())
+                    {
+                        // Out of spell range / no LOS. Ranged bots close only to
+                        // their keep-away (flee) distance, not melee reach -- a
+                        // bare MoveChase parks them point-blank where the engine's
+                        // ranged positioning immediately backs them out, breaking
+                        // the cast. Mirrors FleeAction's ranged chase.
+                        if (rangedBot)
+                            mm->MoveChase(currentTarget, GetRange("flee"), bot->GetAngle(currentTarget));
+                        else
+                            mm->MoveChase(currentTarget);
+                        OnCombatStarted();
+                        directProgress = true;
+                    }
+                }
+
+                const bool nowMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool nowRangedBot = IsRanged(bot) && bot->getClass() != CLASS_PALADIN;
+                const bool nowVictimInReach =
+                    bot->GetVictim() == currentTarget &&
+                    (bot->CanReachWithMeleeAutoAttack(currentTarget) ||
+                     (nowRangedBot && bot->IsWithinLOSInMap(currentTarget, true) &&
+                      sServerFacade.GetDistance2d(bot, currentTarget) <= GetRange("spell") + sPlayerbotAIConfig.contactDistance));
+                const bool nowCasting = bot->IsNonMeleeSpellCasted(true, false, true);
+                const bool nowCombat = sServerFacade.IsInCombat(bot);
+                const bool passiveRangedVictimOnly = nowRangedBot && nowVictimInReach && !nowCombat && !nowCasting && !nowMoving && !directProgress;
+                const bool nowUsefulMoving =
+                    nowMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || actionMetricMoveProgressTicks > 0);
+                const bool nowCountableMoving =
+                    nowUsefulMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || !nowVictimInReach);
+                const bool nowMeleeSwinging =
+                    bot->GetVictim() == currentTarget &&
+                    bot->CanReachWithMeleeAutoAttack(currentTarget) &&
+                    bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+                const bool meleeMovingWithoutContact =
+                    !nowRangedBot &&
+                    nowMoving &&
+                    bot->GetVictim() == currentTarget &&
+                    !bot->CanReachWithMeleeAutoAttack(currentTarget);
+                bool combatConnectKick = false;
+                if (!nowCasting &&
+                    !nowMeleeSwinging &&
+                    (!nowUsefulMoving || nowVictimInReach || meleeMovingWithoutContact) &&
+                    noProgressSecs >= VISIBLE_IDLE_WARN_SECONDS)
+                {
+                    combatConnectKick = ForceCombatConnect(this, bot, currentTarget, "target-fast-lane-stall");
+                }
+
+                const bool postKickMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool postKickCasting = bot->IsNonMeleeSpellCasted(true, false, true);
+                const bool postKickMeleeSwinging =
+                    bot->GetVictim() == currentTarget &&
+                    bot->CanReachWithMeleeAutoAttack(currentTarget) &&
+                    bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING);
+                const bool postKickUsefulMoving =
+                    postKickMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || actionMetricMoveProgressTicks > 0);
+                const bool postKickCountableMoving =
+                    postKickUsefulMoving &&
+                    (noProgressSecs < VISIBLE_IDLE_WARN_SECONDS || !nowVictimInReach);
+                const bool usefulDirectProgress =
+                    directProgress &&
+                    (postKickCasting || postKickMeleeSwinging || postKickCountableMoving);
+                const bool freshPostActionVictimSetup =
+                    nowVictimInReach &&
+                    !passiveRangedVictimOnly &&
+                    (postKickCasting || postKickMeleeSwinging || postKickCountableMoving) &&
+                    noProgressSecs < 2;
+                const bool success =
+                    usefulDirectProgress ||
+                    postKickCountableMoving ||
+                    postKickCasting ||
+                    postKickMeleeSwinging ||
+                    (combatConnectKick && (postKickCountableMoving || postKickCasting || postKickMeleeSwinging)) ||
+                    freshPostActionVictimSetup;
+                if (success)
+                {
+                    targetFastLaneNextRetry = 0;
+                    targetFastLaneFailures = 0;
+                }
+                else
+                {
+                    ++targetFastLaneFailures;
+                    targetFastLaneNextRetry = now + ((!postKickMoving && !postKickCasting && !postKickMeleeSwinging) ? 1 :
+                        std::min<uint32>(5, 1 + targetFastLaneFailures));
+                }
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv") &&
+                    ((!success && (targetFastLaneFailures <= 3 || urand(1, 10) == 1)) || (success && urand(1, 25) == 1)))
+                {
+                    std::ostringstream out;
+                    out << "target=" << currentTarget->GetName()
+                        << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, currentTarget)
+                        << " result=" << (forcedAttack ? 1 : 0)
+                        << " forcedProgress=" << (forcedProgress ? 1 : 0)
+                        << " forcedUsefulMoving=" << (forcedUsefulMoving ? 1 : 0)
+                        << " forcedCountableMoving=" << (forcedCountableMoving ? 1 : 0)
+                        << " forcedMeleeSwing=" << (forcedMeleeSwinging ? 1 : 0)
+                        << " forcedFreshVictimSetup=" << (forcedFreshVictimSetup ? 1 : 0)
+                        << " direct=" << (directProgress ? 1 : 0)
+                        << " usefulDirect=" << (usefulDirectProgress ? 1 : 0)
+                        << " success=" << (success ? 1 : 0)
+                        << " failures=" << targetFastLaneFailures
+                        << " nextRetrySec=" << (targetFastLaneNextRetry > now ? static_cast<uint32>(targetFastLaneNextRetry - now) : 0)
+                        << " state=" << static_cast<uint32>(currentState)
+                        << " victim=" << ((bot->GetVictim() == currentTarget) ? 1 : 0)
+                        << " victimReach=" << (nowVictimInReach ? 1 : 0)
+                        << " passiveRangedVictimOnly=" << (passiveRangedVictimOnly ? 1 : 0)
+                        << " moving=" << (postKickMoving ? 1 : 0)
+                        << " usefulMoving=" << (postKickUsefulMoving ? 1 : 0)
+                        << " countableMoving=" << (postKickCountableMoving ? 1 : 0)
+                        << " casting=" << (postKickCasting ? 1 : 0)
+                        << " meleeSwing=" << (postKickMeleeSwinging ? 1 : 0)
+                        << " connectKick=" << (combatConnectKick ? 1 : 0)
+                        << " freshVictimSetup=" << (freshPostActionVictimSetup ? 1 : 0)
+                        << " combat=" << (sServerFacade.IsInCombat(bot) ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "TargetFastLaneAttack", std::to_string(currentTarget->GetGUIDLow()), out.str());
+                }
+
+                if (success)
+                {
+                    TrackActionMetrics(false, true, staleReset);
+                    return;
+                }
+
+                const bool deadTargetStare =
+                    targetFastLaneFailures >= 3 &&
+                    noProgressSecs >= 7 &&
+                    !postKickMoving &&
+                    !postKickCasting &&
+                    !postKickMeleeSwinging &&
+                    !sServerFacade.IsInCombat(bot);
+                const bool fakeMovingTargetStare =
+                    targetFastLaneFailures >= 3 &&
+                    noProgressSecs >= 7 &&
+                    postKickMoving &&
+                    !postKickCasting &&
+                    !postKickMeleeSwinging &&
+                    actionMetricMoveProgressTicks == 0;
+
+                if (deadTargetStare || fakeMovingTargetStare)
+                {
+                    const ObjectGuid targetGuid = currentTarget->GetObjectGuid();
+                    const std::string targetName = currentTarget->GetName();
+                    if (!sServerFacade.UnitIsDead(currentTarget))
+                        DeferTargetGuidForBot(bot, targetGuid, fakeMovingTargetStare ? 12 : 8);
+                    aiObjectContext->GetValue<Unit*>("old target")->Reset();
+                    aiObjectContext->GetValue<Unit*>("current target")->Reset();
+                    aiObjectContext->GetValue<Unit*>("pull target")->Reset();
+                    aiObjectContext->GetValue<Unit*>("dps target")->Reset();
+                    aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+                    bot->SetSelectionGuid(ObjectGuid());
+                    ResetStaleTargetState();
+
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                    {
+                        std::ostringstream out;
+                        out << "target=" << targetName
+                            << " noProgressSec=" << noProgressSecs
+                            << " failures=" << targetFastLaneFailures
+                            << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, currentTarget)
+                            << " state=" << static_cast<uint32>(currentState);
+                        if (fakeMovingTargetStare)
+                            out << " fakeMoving=1";
+                        sPlayerbotAIConfig.logEvent(this, "TargetFastLaneHardClear", std::to_string(targetGuid.GetCounter()), out.str());
+                    }
+
+                    targetFastLaneGuid = ObjectGuid();
+                    targetFastLaneNextRetry = 0;
+                    targetFastLaneFailures = 0;
+                    bool questRequested = false;
+                    bool travelChosen = false;
+                    bool targetSelected = false;
+                    bool attackAnything = false;
+                    bool grindRequested = false;
+                    bool travelMoved = false;
+                    bool rpgChosen = false;
+                    bool rpgMoved = false;
+                    bool randomMoved = false;
+                    bool idleNudged = false;
+                    PushVisibleWork(this, aiObjectContext, bot, "target-fast-lane-hard-clear",
+                        questRequested, travelChosen, targetSelected, attackAnything, grindRequested, travelMoved,
+                        rpgChosen, rpgMoved, randomMoved, idleNudged);
+
+                    Unit* newTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+                    LootObject newLootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+                    GuidPosition newRpgTarget = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+                    TravelTarget* newTravel = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                    const bool movingAfterClear = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                    const bool directedMovementWork =
+                        HasDirectedMovementWork(newTravel, newRpgTarget, travelMoved, rpgMoved, movingAfterClear);
+                    const bool workAssigned =
+                        HasConcreteRecoveryWork(bot, newTravel, newTarget, newLootTarget, movingAfterClear,
+                            travelMoved, false);
+
+                    TrackActionMetrics(false, workAssigned, true);
+                    return;
+                }
+            }
+        }
+        else
+        {
+            targetFastLaneGuid = ObjectGuid();
+            targetFastLaneNextRetry = 0;
+            targetFastLaneFailures = 0;
+        }
+    }
+
+    if (!minimal &&
+        currentState == BotState::BOT_STATE_NON_COMBAT &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        if (RecoverTravelNoMotion(time(0)))
+        {
+            TrackActionMetrics(false, true, staleReset);
+            return;
+        }
+    }
+
+    if (!minimal &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !botDead &&
+        !HasActivePlayerMaster() &&
+        !HasRealPlayerMaster() &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsBeingTeleported() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        !sServerFacade.IsInCombat(bot) &&
+        !aiObjectContext->GetValue<Unit*>("current target")->Get() &&
+        !aiObjectContext->GetValue<Unit*>("dps target")->Get() &&
+        aiObjectContext->GetValue<LootObject>("loot target")->Get().IsEmpty() &&
+        (sServerFacade.isMoving(bot) || bot->isMovingOrTurning()))
+    {
+        const time_t now = time(0);
+        const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+        const bool moveStallAction =
+            actionMetricLastActionName.empty() ||
+            actionMetricLastActionName == "none" ||
+            actionMetricLastActionName == "move to travel target" ||
+            actionMetricLastActionName == "move to rpg target" ||
+            actionMetricLastActionName == "choose rpg target" ||
+            actionMetricLastActionName == "choose group travel target" ||
+            actionMetricLastActionName == "check values" ||
+            actionMetricLastActionName == "update pve strats" ||
+            actionMetricLastActionName == "emote" ||
+            actionMetricLastActionName == "jump" ||
+            actionMetricLastActionName == "drink" ||
+            actionMetricLastActionName == "food" ||
+            actionMetricLastActionName == "clean quest log" ||
+            actionMetricLastActionName == "add all loot" ||
+            actionMetricLastActionName == "store loot" ||
+            actionMetricLastActionName == "accept trade" ||
+            actionMetricLastActionName == "invite nearby" ||
+            actionMetricLastActionName == "rpg work" ||
+            actionMetricLastActionName == "rpg use" ||
+            actionMetricLastActionName == "rpg stay" ||
+            actionMetricLastActionName == "rpg emote" ||
+            actionMetricLastActionName == "rpg duel" ||
+            actionMetricLastActionName == "rpg cancel" ||
+            actionMetricLastActionName == "request quest travel target" ||
+            actionMetricLastActionName == "choose travel target" ||
+            actionMetricLastActionName == "reset travel target";
+
+        if (moveStallAction && noProgressSecs >= 12)
+        {
+            TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+            TravelDestination* destination = travelTarget ? travelTarget->GetDestination() : nullptr;
+            const TravelStatus oldStatus = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+            bool travelCleared = false;
+
+            StopMoving();
+            bot->InterruptMoving(true);
+
+            if (travelTarget &&
+                (oldStatus == TravelStatus::TRAVEL_STATUS_COOLDOWN ||
+                 oldStatus == TravelStatus::TRAVEL_STATUS_EXPIRED ||
+                 oldStatus == TravelStatus::TRAVEL_STATUS_WORK ||
+                 noProgressSecs >= 18))
+            {
+                travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                travelTarget->SetForced(false);
+                aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                aiObjectContext->ClearValues("no active travel destinations");
+                travelCleared = true;
+            }
+
+            aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+            aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+
+            bool questRequested = false;
+            bool travelChosen = false;
+            bool targetSelected = false;
+            bool attackAnything = false;
+            bool grindRequested = false;
+            bool travelMoved = false;
+            bool rpgChosen = false;
+            bool rpgMoved = false;
+            bool randomMoved = false;
+            bool idleNudged = false;
+
+            if (!travelCleared && travelTarget &&
+                (oldStatus == TravelStatus::TRAVEL_STATUS_READY ||
+                 oldStatus == TravelStatus::TRAVEL_STATUS_TRAVEL))
+            {
+                travelMoved = DoSpecificAction("move to travel target",
+                    Event("movement no progress", "travel retry", bot), true);
+            }
+
+            if (!HasUsefulAssignedWork(bot, travelTarget, aiObjectContext->GetValue<Unit*>("current target")->Get(),
+                    aiObjectContext->GetValue<LootObject>("loot target")->Get(),
+                    sServerFacade.isMoving(bot) || bot->isMovingOrTurning(), travelMoved))
+            {
+                PushVisibleWork(this, aiObjectContext, bot, "movement-no-progress", questRequested, travelChosen,
+                    targetSelected, attackAnything, grindRequested, travelMoved, rpgChosen, rpgMoved,
+                    randomMoved, idleNudged, true);
+            }
+            Unit* newTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+            LootObject newLootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+            GuidPosition newRpgTarget = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+            TravelTarget* newTravel = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+            TravelDestination* newDestination = newTravel ? newTravel->GetDestination() : nullptr;
+            if (newTarget &&
+                !bot->IsNonMeleeSpellCasted(true, false, true) &&
+                !(bot->GetVictim() == newTarget && bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING)))
+            {
+                attackAnything = ForceConcreteTargetWork(this, bot, newTarget, "movement-no-progress-target-handoff") ||
+                    attackAnything;
+                newTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+                newLootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+                newRpgTarget = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+                newTravel = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                newDestination = newTravel ? newTravel->GetDestination() : nullptr;
+            }
+            const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+            const bool directedMovementWork =
+                HasDirectedMovementWork(newTravel, newRpgTarget, travelMoved, rpgMoved, movingAfter);
+            const bool workAssigned =
+                HasConcreteRecoveryWork(bot, newTravel, newTarget, newLootTarget, movingAfter,
+                    travelMoved, false);
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                    << " noProgressSec=" << noProgressSecs
+                    << " oldStatus=" << static_cast<uint32>(oldStatus)
+                    << " newStatus=" << (newTravel ? static_cast<uint32>(newTravel->GetStatus()) : 0)
+                    << " cleared=" << (travelCleared ? 1 : 0)
+                    << " travelMove=" << (travelMoved ? 1 : 0)
+                    << " quest=" << (questRequested ? 1 : 0)
+                    << " choose=" << (travelChosen ? 1 : 0)
+                    << " selectTarget=" << (targetSelected ? 1 : 0)
+                    << " attackAnything=" << (attackAnything ? 1 : 0)
+                    << " grindRequest=" << (grindRequested ? 1 : 0)
+                    << " rpgChoose=" << (rpgChosen ? 1 : 0)
+                    << " rpgMove=" << (rpgMoved ? 1 : 0)
+                    << " randomMove=" << (randomMoved ? 1 : 0)
+                    << " idleNudge=" << (idleNudged ? 1 : 0)
+                    << " movingAfter=" << (movingAfter ? 1 : 0)
+                    << " directedMove=" << (directedMovementWork ? 1 : 0)
+                    << " target=" << (newTarget ? newTarget->GetName() : "none")
+                    << " loot=" << (!newLootTarget.IsEmpty() ? 1 : 0)
+                    << " rpgTarget=" << (newRpgTarget ? 1 : 0)
+                    << " workAssigned=" << (workAssigned ? 1 : 0)
+                    << " destinationPtr=" << (newDestination ? 1 : (destination ? 1 : 0));
+                sPlayerbotAIConfig.logEvent(this, "MovementNoProgressReset", "", out.str());
+            }
+
+            if (workAssigned)
+            {
+                TrackActionMetrics(false, true, staleReset || travelCleared);
+                return;
+            }
+
+            if (movingAfter || newRpgTarget ||
+                (newTravel && !IsActiveTravelWork(newTravel) && !IsPreparedTravelWork(newTravel)))
+            {
+                StopMoving();
+                bot->InterruptMoving(true);
+                aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+
+                if (newTravel && !IsActiveTravelWork(newTravel) && !IsPreparedTravelWork(newTravel))
+                {
+                    newTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    newTravel->SetForced(false);
+                    aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                }
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 5) == 1)
+                {
+                    std::ostringstream out;
+                    out << "reason=movement-no-progress"
+                        << " noProgressSec=" << noProgressSecs
+                        << " movingAfter=" << (movingAfter ? 1 : 0)
+                        << " travelStatus=" << (newTravel ? static_cast<uint32>(newTravel->GetStatus()) : 0)
+                        << " rpgTarget=" << (newRpgTarget ? 1 : 0)
+                        << " target=" << (newTarget ? newTarget->GetName() : "none")
+                        << " loot=" << (!newLootTarget.IsEmpty() ? 1 : 0)
+                        << " randomMove=" << (randomMoved ? 1 : 0)
+                        << " idleNudge=" << (idleNudged ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "NoConcreteWorkClear", "", out.str());
+                }
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        sServerFacade.IsInCombat(bot) &&
+        !aiObjectContext->GetValue<bool>("has attackers")->Get() &&
+        !aiObjectContext->GetValue<Unit*>("dps target")->Get())
+    {
+        Unit* currentTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+        LootObject lootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+        const bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(time(0) - actionMetricLastProgress) : 0;
+        const bool staleCombat =
+            !moving &&
+            !bot->GetVictim() &&
+            !currentTarget &&
+            lootTarget.IsEmpty() &&
+            (noProgressSecs >= 5 || actionMetricNoProgressTicks >= 3 || actionMetricSameActionStreak >= 20);
+
+        if (staleCombat)
+        {
+            ObjectGuid attackTarget = aiObjectContext->GetValue<ObjectGuid>("attack target")->Get();
+            aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+            aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+            bot->CombatStop(false);
+            OnCombatEnded();
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "noProgressSec=" << noProgressSecs
+                    << " noProgressTicks=" << actionMetricNoProgressTicks
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " attackTarget=" << (attackTarget ? 1 : 0);
+                sPlayerbotAIConfig.logEvent(this, "CombatIdleNoTargetReset", "", out.str());
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        LootObject lootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+        const bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(time(0) - actionMetricLastProgress) : 0;
+        const bool lootStallAction =
+            actionMetricLastActionName.empty() ||
+            actionMetricLastActionName == "none" ||
+            actionMetricLastActionName == "check values" ||
+            actionMetricLastActionName == "emote" ||
+            actionMetricLastActionName == "jump" ||
+            actionMetricLastActionName == "clean quest log" ||
+            actionMetricLastActionName == "add all loot" ||
+            actionMetricLastActionName == "loot" ||
+            actionMetricLastActionName == "open loot" ||
+            actionMetricLastActionName == "store loot" ||
+            actionMetricLastActionName == "move random" ||
+            actionMetricLastActionName == "move to loot" ||
+            actionMetricLastActionName == "move to travel target" ||
+            actionMetricLastActionName == "move to rpg target" ||
+            actionMetricLastActionName == "choose rpg target" ||
+            actionMetricLastActionName == "choose travel target" ||
+            actionMetricLastActionName == "reset travel target" ||
+            actionMetricLastActionName == "update pve strats" ||
+            actionMetricLastActionName == "accept trade" ||
+            actionMetricLastActionName == "invite nearby" ||
+            actionMetricLastActionName == "rpg work" ||
+            actionMetricLastActionName == "rpg use" ||
+            actionMetricLastActionName == "rpg stay" ||
+            actionMetricLastActionName == "rpg emote" ||
+            actionMetricLastActionName == "rpg duel" ||
+            actionMetricLastActionName == "rpg cancel" ||
+            actionMetricLastActionName == "request quest travel target";
+
+        if (!lootTarget.IsEmpty() &&
+            !moving &&
+            lootStallAction &&
+            noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS &&
+            (actionMetricNoProgressTicks >= 20 || actionMetricSameActionStreak >= 20))
+        {
+            Unit* currentTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+            const bool combatPressure =
+                sServerFacade.IsInCombat(bot) ||
+                aiObjectContext->GetValue<bool>("has attackers")->Get() ||
+                aiObjectContext->GetValue<Unit*>("dps target")->Get() ||
+                (currentTarget && currentTarget->IsInWorld() && !sServerFacade.UnitIsDead(currentTarget));
+            const bool possible = !combatPressure && lootTarget.IsLootPossible(bot);
+            const bool closeEnough = possible && IsLootObjectCloseEnoughToOpen(bot, lootTarget);
+            bool opened = false;
+            bool movedToLoot = false;
+            bool cleared = false;
+            bool clearedTravel = false;
+
+            if (possible)
+            {
+                aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+                aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+
+                TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                if (travelTarget && travelTarget->GetStatus() != TravelStatus::TRAVEL_STATUS_NONE)
+                {
+                    travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    travelTarget->SetForced(false);
+                    aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                    clearedTravel = true;
+                }
+            }
+
+            if (closeEnough)
+                opened = DoSpecificAction("open loot", Event("loot stall fast lane", lootTarget.guid, bot), true);
+            else if (possible)
+                movedToLoot = DoSpecificAction("move to loot", Event("loot stall fast lane", lootTarget.guid, bot), true);
+
+            const bool failedLootRescue =
+                !opened &&
+                !movedToLoot &&
+                (combatPressure ||
+                 !possible ||
+                 noProgressSecs >= 20 ||
+                 actionMetricNoProgressTicks >= 45 ||
+                 actionMetricSameActionStreak >= 45);
+
+            if (failedLootRescue)
+            {
+                DeferLootGuidForBot(bot, lootTarget.guid, combatPressure ? 5 : 20);
+                if (LootObjectStack* availableLoot = aiObjectContext->GetValue<LootObjectStack*>("available loot")->Get())
+                    availableLoot->Remove(lootTarget.guid);
+                aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+
+                TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                if (travelTarget &&
+                    (travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK ||
+                     travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_COOLDOWN))
+                {
+                    travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                    travelTarget->SetForced(false);
+                    aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                }
+
+                cleared = true;
+            }
+
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << (actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName)
+                    << " noProgressSec=" << noProgressSecs
+                    << " noProgressTicks=" << actionMetricNoProgressTicks
+                    << " sameActionStreak=" << actionMetricSameActionStreak
+                    << " combatPressure=" << (combatPressure ? 1 : 0)
+                    << " possible=" << (possible ? 1 : 0)
+                    << " close=" << (closeEnough ? 1 : 0)
+                    << " opened=" << (opened ? 1 : 0)
+                    << " moved=" << (movedToLoot ? 1 : 0)
+                    << " cleared=" << (cleared ? 1 : 0)
+                    << " clearedTravel=" << (clearedTravel ? 1 : 0)
+                    << " guid=" << lootTarget.guid.GetCounter()
+                    << " target=" << (currentTarget ? currentTarget->GetName() : "none");
+                sPlayerbotAIConfig.logEvent(this, "LootStallFastLane", std::to_string(lootTarget.guid.GetCounter()), out.str());
+            }
+
+            if (opened || movedToLoot || cleared)
+            {
+                TrackActionMetrics(false, true, staleReset);
+                return;
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState != BotState::BOT_STATE_DEAD &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+        !sServerFacade.IsInCombat(bot) &&
+        !aiObjectContext->GetValue<bool>("has attackers")->Get() &&
+        !aiObjectContext->GetValue<Unit*>("dps target")->Get())
+    {
+        TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+        if (travelTarget && travelTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_EXPIRED)
+        {
+            TravelDestination* destination = travelTarget->GetDestination();
+            const bool nullDestination = !destination || dynamic_cast<NullTravelDestination*>(destination);
+            travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+            travelTarget->SetForced(false);
+            aiObjectContext->GetValue<bool>("travel target active")->Reset();
+            aiObjectContext->ClearValues("no active travel destinations");
+            aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+            aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
+            aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+
+            Unit* currentTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+            LootObject lootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+            const bool shouldSeedWork = !currentTarget && lootTarget.IsEmpty();
+            bool combatEnded = false;
+            if (nullDestination && IsStateActive(BotState::BOT_STATE_COMBAT) && shouldSeedWork)
+            {
+                OnCombatEnded();
+                combatEnded = true;
+            }
+
+            if (nullDestination)
+            {
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 10) == 1)
+                {
+                    std::ostringstream out;
+                    out << "state=" << static_cast<uint32>(currentState)
+                        << " seedWork=" << (shouldSeedWork ? 1 : 0)
+                        << " combatEnded=" << (combatEnded ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "TravelNullExpiredReset", "", out.str());
+                }
+
+                // Do not return here. Null/expired cleanup is bookkeeping; let
+                // the idle fast lane below assign real work in this same tick.
+            }
+            else
+            {
+                const bool questRequested = shouldSeedWork ? DoSpecificAction("request quest travel target", Event(), true) : false;
+                const bool targetSelected = (!questRequested && shouldSeedWork) ? DoSpecificAction("select new target", Event(), true) : false;
+                const bool randomMoved = (!questRequested && !targetSelected && shouldSeedWork) ? DoSpecificAction("move random", Event("expired travel rescue", "idle rescue", bot), true) : false;
+                Unit* newTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+                LootObject newLootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+                const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool fallbackMovementWork = HasFallbackMovementWork(randomMoved, false, movingAfter);
+                const bool workAssigned =
+                    HasConcreteRecoveryWork(bot, travelTarget, newTarget, newLootTarget, movingAfter, false, false) ||
+                    fallbackMovementWork;
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                {
+                    std::ostringstream out;
+                    out << "state=" << static_cast<uint32>(currentState)
+                        << " destinationPtr=" << (destination ? 1 : 0)
+                        << " seedWork=" << (shouldSeedWork ? 1 : 0)
+                        << " quest=" << (questRequested ? 1 : 0)
+                        << " selectTarget=" << (targetSelected ? 1 : 0)
+                        << " randomMove=" << (randomMoved ? 1 : 0)
+                        << " nudgeOnly=" << (randomMoved && !workAssigned ? 1 : 0)
+                        << " fallbackMove=" << (fallbackMovementWork ? 1 : 0)
+                        << " movingAfter=" << (movingAfter ? 1 : 0)
+                        << " target=" << (newTarget ? newTarget->GetName() : "none")
+                        << " loot=" << (!newLootTarget.IsEmpty() ? 1 : 0)
+                        << " workAssigned=" << (workAssigned ? 1 : 0);
+                    sPlayerbotAIConfig.logEvent(this, "TravelExpiredFastReset", "", out.str());
+                }
+
+                if (workAssigned)
+                {
+                    TrackActionMetrics(false, true, staleReset);
+                    return;
+                }
+            }
+        }
+    }
+
+    if (!minimal &&
+        currentState == BotState::BOT_STATE_NON_COMBAT &&
+        !HasActivePlayerMaster() &&
+        !HasRealPlayerMaster() &&
+        !bot->IsTaxiFlying() &&
+        !bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        Unit* currentTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+        LootObject lootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+        const bool moving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+        const bool combat = sServerFacade.IsInCombat(bot);
+        TravelTarget* travelTarget = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+        GuidPosition existingRpgTarget = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+        const bool movingWithAssignedWork =
+            moving && (IsActiveTravelWork(travelTarget) || IsPreparedTravelWork(travelTarget) || existingRpgTarget);
+
+        if ((!moving || !movingWithAssignedWork) && !combat && !currentTarget && lootTarget.IsEmpty())
+        {
+            TravelDestination* destination = travelTarget ? travelTarget->GetDestination() : nullptr;
+            const TravelStatus status = travelTarget ? travelTarget->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+            const bool nullDestination = !destination || dynamic_cast<NullTravelDestination*>(destination);
+            const bool preparingTravel = status == TravelStatus::TRAVEL_STATUS_PREPARE;
+            const bool movingWithoutAssignedWork = moving && !movingWithAssignedWork;
+            const time_t now = time(0);
+            const uint32 noProgressSecs = actionMetricLastProgress ? static_cast<uint32>(now - actionMetricLastProgress) : 0;
+            const bool recentUnassignedMovement =
+                movingWithoutAssignedWork && noProgressSecs < VISIBLE_IDLE_WARN_SECONDS;
+            const bool idleAction =
+                actionMetricLastActionName.empty() ||
+                actionMetricLastActionName == "none" ||
+                actionMetricLastActionName == "check values" ||
+                actionMetricLastActionName == "update pve strats" ||
+                actionMetricLastActionName == "emote" ||
+                actionMetricLastActionName == "cannibalize" ||
+                actionMetricLastActionName == "drink" ||
+                actionMetricLastActionName == "food" ||
+                actionMetricLastActionName == "clean quest log" ||
+                actionMetricLastActionName == "add all loot" ||
+                actionMetricLastActionName == "loot" ||
+                actionMetricLastActionName == "store loot" ||
+                actionMetricLastActionName == "move random" ||
+                actionMetricLastActionName == "move to travel target" ||
+                actionMetricLastActionName == "move to rpg target" ||
+                actionMetricLastActionName == "choose rpg target" ||
+                actionMetricLastActionName == "choose travel target" ||
+                actionMetricLastActionName == "request quest travel target" ||
+                actionMetricLastActionName == "request named travel target" ||
+                actionMetricLastActionName == "select new target" ||
+                actionMetricLastActionName == "accept invitation" ||
+                actionMetricLastActionName == "invite nearby" ||
+                actionMetricLastActionName == "attack anything" ||
+                actionMetricLastActionName == "attack my target" ||
+                actionMetricLastActionName == "rpg work" ||
+                actionMetricLastActionName == "rpg use" ||
+                actionMetricLastActionName == "rpg stay" ||
+                actionMetricLastActionName == "rpg emote" ||
+                actionMetricLastActionName == "rpg sell" ||
+                actionMetricLastActionName == "rpg cancel" ||
+                actionMetricLastActionName == "reset travel target";
+            const bool aliveNoWorkStall =
+                !recentUnassignedMovement &&
+                (idleAction || movingWithoutAssignedWork) &&
+                (movingWithoutAssignedWork || actionMetricNoProgressTicks >= 2 || noProgressSecs >= 3 || actionMetricSameActionStreak >= 20);
+            const bool cooldownNoWorkStall =
+                travelTarget &&
+                status == TravelStatus::TRAVEL_STATUS_COOLDOWN &&
+                aliveNoWorkStall &&
+                noProgressSecs >= VISIBLE_IDLE_RESCUE_SECONDS;
+            const bool travelWorkStall =
+                travelTarget &&
+                status == TravelStatus::TRAVEL_STATUS_WORK &&
+                actionMetricSameActionStreak >= 20 &&
+                (actionMetricLastActionName == "check values" ||
+                 actionMetricLastActionName == "request quest travel target" ||
+                 actionMetricLastActionName == "reset travel target");
+            const bool staleTravel =
+                !recentUnassignedMovement &&
+                ((preparingTravel && noProgressSecs >= 20) ||
+                (!preparingTravel &&
+                (
+                !travelTarget ||
+                status == TravelStatus::TRAVEL_STATUS_NONE ||
+                status == TravelStatus::TRAVEL_STATUS_EXPIRED ||
+                (nullDestination &&
+                 (status == TravelStatus::TRAVEL_STATUS_TRAVEL ||
+                  status == TravelStatus::TRAVEL_STATUS_WORK)) ||
+                (status == TravelStatus::TRAVEL_STATUS_COOLDOWN && nullDestination) ||
+                cooldownNoWorkStall ||
+                aliveNoWorkStall ||
+                travelWorkStall)));
+
+            if (staleTravel)
+            {
+                if (movingWithoutAssignedWork)
+                    StopMoving();
+
+                if (travelTarget)
+                    travelTarget->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+
+                aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                const bool aliveNoWorkTravelReseed =
+                    aliveNoWorkStall &&
+                    (noProgressSecs >= 3 || actionMetricNoProgressTicks >= 5);
+                const bool shouldClearNoActiveDestinations =
+                    aliveNoWorkTravelReseed ||
+                    travelWorkStall ||
+                    cooldownNoWorkStall ||
+                    status == TravelStatus::TRAVEL_STATUS_EXPIRED ||
+                    (nullDestination &&
+                     (status == TravelStatus::TRAVEL_STATUS_TRAVEL ||
+                      status == TravelStatus::TRAVEL_STATUS_WORK)) ||
+                    (status == TravelStatus::TRAVEL_STATUS_COOLDOWN && !nullDestination);
+                if (shouldClearNoActiveDestinations)
+                {
+                    // Keep known-empty generic travel purposes (especially Grind)
+                    // suppressed; otherwise idle rescue immediately re-requests the
+                    // same empty world scan. Quest gets a targeted retry because
+                    // quest guide/hub state changes frequently and is progression-critical.
+                    aiObjectContext->GetValue<bool>("no active travel destinations", "quest")->Reset();
+
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && aliveNoWorkTravelReseed && urand(1, 10) == 1)
+                    {
+                        std::ostringstream out;
+                        out << "status=" << static_cast<uint32>(status)
+                            << " nullDest=" << (nullDestination ? 1 : 0)
+                            << " movingWithoutWork=" << (movingWithoutAssignedWork ? 1 : 0)
+                            << " noProgressSec=" << noProgressSecs
+                            << " sameActionStreak=" << actionMetricSameActionStreak
+                            << " lastAction=" << actionMetricLastActionName
+                            << " clearedQuestOnly=1";
+                        sPlayerbotAIConfig.logEvent(this, "IdleTravelReseed", "", out.str());
+                    }
+                }
+
+                bool questRequested = false;
+                bool travelChosen = false;
+                bool travelRefreshed = false;
+                bool targetSelected = false;
+                bool attackAnything = false;
+                bool grindRequested = false;
+                bool travelMoved = false;
+                bool rpgChosen = false;
+                bool rpgMoved = false;
+                bool randomMoved = false;
+                bool idleNudged = false;
+
+                const bool pushedVisibleWork = PushVisibleWork(this, aiObjectContext, bot, "idle-work-fast-lane",
+                    questRequested, travelChosen,
+                    targetSelected, attackAnything, grindRequested, travelMoved, rpgChosen, rpgMoved,
+                    randomMoved, idleNudged, true);
+
+                const bool allowIdleFallbackMovement = true;
+                if (allowIdleFallbackMovement &&
+                    !pushedVisibleWork &&
+                    !HasUsefulAssignedWork(bot, travelTarget, aiObjectContext->GetValue<Unit*>("current target")->Get(),
+                        aiObjectContext->GetValue<LootObject>("loot target")->Get(),
+                        sServerFacade.isMoving(bot) || bot->isMovingOrTurning(),
+                        HasDirectedMovementWork(travelTarget, aiObjectContext->GetValue<GuidPosition>("rpg target")->Get(),
+                            travelMoved, rpgMoved, sServerFacade.isMoving(bot) || bot->isMovingOrTurning())))
+                {
+                    travelRefreshed = DoSpecificAction("refresh travel target", Event(), true);
+                    if (travelRefreshed)
+                        travelMoved = MoveAssignedTravelWork(this, aiObjectContext, bot, "idle-work-fast-lane") || travelMoved;
+                }
+
+                TravelTarget* currentTravel = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                TravelDestination* currentDestination = currentTravel ? currentTravel->GetDestination() : nullptr;
+                TravelStatus newStatus = currentTravel ? currentTravel->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+                Unit* newTarget = aiObjectContext->GetValue<Unit*>("current target")->Get();
+                LootObject newLootTarget = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+                GuidPosition newRpgTarget = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+                const bool movingAfter = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                const bool directedMovementWork =
+                    HasDirectedMovementWork(currentTravel, newRpgTarget, travelMoved, rpgMoved, movingAfter);
+                const bool fallbackMovementWork =
+                    HasFallbackMovementWork(randomMoved, idleNudged, movingAfter);
+                const bool workAssigned =
+                    HasConcreteRecoveryWork(bot, currentTravel, newTarget, newLootTarget, movingAfter, travelMoved, false) ||
+                    directedMovementWork ||
+                    fallbackMovementWork;
+
+                if (sPlayerbotAIConfig.hasLog("bot_events.csv") &&
+                    ((workAssigned && urand(1, 10) == 1) || (!workAssigned && urand(1, 20) == 1)))
+                {
+                    std::ostringstream out;
+                    out << "oldStatus=" << static_cast<uint32>(status)
+                        << " newStatus=" << static_cast<uint32>(newStatus)
+                        << " nullDest=" << (nullDestination ? 1 : 0)
+                        << " aliveNoWork=" << (aliveNoWorkStall ? 1 : 0)
+                        << " movingWithoutWork=" << (movingWithoutAssignedWork ? 1 : 0)
+                        << " noProgressSec=" << noProgressSecs
+                        << " workStall=" << (travelWorkStall ? 1 : 0)
+                        << " quest=" << (questRequested ? 1 : 0)
+                        << " choose=" << (travelChosen ? 1 : 0)
+                        << " refresh=" << (travelRefreshed ? 1 : 0)
+                        << " selectTarget=" << (targetSelected ? 1 : 0)
+                        << " attackAnything=" << (attackAnything ? 1 : 0)
+                        << " grindRequest=" << (grindRequested ? 1 : 0)
+                        << " rpgChoose=" << (rpgChosen ? 1 : 0)
+                        << " travelMove=" << (travelMoved ? 1 : 0)
+                        << " rpgMove=" << (rpgMoved ? 1 : 0)
+                        << " randomMove=" << (randomMoved ? 1 : 0)
+                        << " idleNudge=" << (idleNudged ? 1 : 0)
+                        << " nudgeOnly=" << ((randomMoved || idleNudged) && !workAssigned ? 1 : 0)
+                        << " directedMove=" << (directedMovementWork ? 1 : 0)
+                        << " fallbackMove=" << (fallbackMovementWork ? 1 : 0)
+                        << " movingAfter=" << (movingAfter ? 1 : 0)
+                        << " target=" << (newTarget ? newTarget->GetName() : "none")
+                        << " loot=" << (!newLootTarget.IsEmpty() ? 1 : 0)
+                        << " rpgTarget=" << (newRpgTarget ? 1 : 0)
+                        << " workAssigned=" << (workAssigned ? 1 : 0)
+                        << " destinationPtr=" << (currentDestination ? 1 : (destination ? 1 : 0));
+                    sPlayerbotAIConfig.logEvent(this, "IdleWorkFastLane", "", out.str());
+                }
+
+                if (workAssigned)
+                {
+                    TrackActionMetrics(false, true, staleReset);
+                    return;
+                }
+
+                if (sServerFacade.isMoving(bot) || bot->isMovingOrTurning() || newRpgTarget ||
+                    (currentTravel && !IsActiveTravelWork(currentTravel) && !IsPreparedTravelWork(currentTravel)))
+                {
+                    StopMoving();
+                    bot->InterruptMoving(true);
+                    aiObjectContext->GetValue<GuidPosition>("rpg target")->Reset();
+
+                    if (newTarget &&
+                        !bot->IsNonMeleeSpellCasted(true, false, true) &&
+                        !(bot->GetVictim() == newTarget &&
+                          bot->CanReachWithMeleeAutoAttack(newTarget) &&
+                          bot->hasUnitState(UNIT_STAT_MELEE_ATTACKING)))
+                    {
+                        DeferTargetGuidForBot(bot, newTarget->GetObjectGuid(), 12);
+                        ClearCurrentCombatTarget(aiObjectContext, bot, newTarget, false);
+                        ResetStaleTargetState();
+                        ResetTargetScanCaches(aiObjectContext);
+                        newTarget = nullptr;
+                    }
+
+                    if (!newLootTarget.IsEmpty())
+                    {
+                        DeferLootGuidForBot(bot, newLootTarget.guid, 10);
+                        if (LootObjectStack* availableLoot = aiObjectContext->GetValue<LootObjectStack*>("available loot")->Get())
+                            availableLoot->Remove(newLootTarget.guid);
+                        aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+                        newLootTarget = LootObject();
+                    }
+
+                    if (currentTravel && !IsActiveTravelWork(currentTravel) && !IsPreparedTravelWork(currentTravel))
+                    {
+                        currentTravel->SetStatus(TravelStatus::TRAVEL_STATUS_NONE);
+                        currentTravel->SetForced(false);
+                        aiObjectContext->GetValue<bool>("travel target active")->Reset();
+                    }
+
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && urand(1, 4) == 1)
+                    {
+                        std::ostringstream out;
+                        out << "noProgressSec=" << noProgressSecs
+                            << " oldStatus=" << static_cast<uint32>(status)
+                            << " newStatus=" << static_cast<uint32>(newStatus)
+                            << " movingAfter=" << ((sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0)
+                            << " rpgTarget=" << (newRpgTarget ? 1 : 0)
+                            << " target=" << (newTarget ? newTarget->GetName() : "none")
+                            << " loot=" << (!newLootTarget.IsEmpty() ? 1 : 0)
+                            << " destinationPtr=" << (currentDestination ? 1 : (destination ? 1 : 0));
+                        sPlayerbotAIConfig.logEvent(this, "IdleNoConcreteWorkClear", "", out.str());
+                    }
+
+                    bool rescueQuestRequested = false;
+                    bool rescueTravelChosen = false;
+                    bool rescueTargetSelected = false;
+                    bool rescueAttackAnything = false;
+                    bool rescueGrindRequested = false;
+                    bool rescueTravelMoved = false;
+                    bool rescueRpgChosen = false;
+                    bool rescueRpgMoved = false;
+                    bool rescueRandomMoved = false;
+                    bool rescueIdleNudged = false;
+
+                    PushVisibleWork(this, aiObjectContext, bot, "idle-no-concrete-clear",
+                        rescueQuestRequested, rescueTravelChosen, rescueTargetSelected, rescueAttackAnything,
+                        rescueGrindRequested, rescueTravelMoved, rescueRpgChosen, rescueRpgMoved,
+                        rescueRandomMoved, rescueIdleNudged, true, false);
+
+                    TravelTarget* rescueTravel = aiObjectContext->GetValue<TravelTarget*>("travel target")->Get();
+                    LootObject rescueLoot = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+                    GuidPosition rescueRpgTarget = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+                    const bool rescueMoving = sServerFacade.isMoving(bot) || bot->isMovingOrTurning();
+                    const bool rescueDirectedWork =
+                        HasDirectedMovementWork(rescueTravel, rescueRpgTarget, rescueTravelMoved, rescueRpgMoved, rescueMoving);
+                    const bool rescueFallbackWork =
+                        HasFallbackMovementWork(rescueRandomMoved, rescueIdleNudged, rescueMoving);
+                    const bool rescueWorkAssigned =
+                        HasConcreteRecoveryWork(bot, rescueTravel, aiObjectContext->GetValue<Unit*>("current target")->Get(),
+                            rescueLoot, rescueMoving, rescueTravelMoved, false) ||
+                        rescueDirectedWork ||
+                        rescueFallbackWork;
+
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv") && (rescueWorkAssigned || urand(1, 5) == 1))
+                    {
+                        std::ostringstream out;
+                        out << "quest=" << (rescueQuestRequested ? 1 : 0)
+                            << " choose=" << (rescueTravelChosen ? 1 : 0)
+                            << " grindRequest=" << (rescueGrindRequested ? 1 : 0)
+                            << " travelMove=" << (rescueTravelMoved ? 1 : 0)
+                            << " rpgChoose=" << (rescueRpgChosen ? 1 : 0)
+                            << " rpgMove=" << (rescueRpgMoved ? 1 : 0)
+                            << " randomMove=" << (rescueRandomMoved ? 1 : 0)
+                            << " idleNudge=" << (rescueIdleNudged ? 1 : 0)
+                            << " movingAfter=" << (rescueMoving ? 1 : 0)
+                            << " directedMove=" << (rescueDirectedWork ? 1 : 0)
+                            << " fallbackMove=" << (rescueFallbackWork ? 1 : 0)
+                            << " workAssigned=" << (rescueWorkAssigned ? 1 : 0)
+                            << " target=" << (aiObjectContext->GetValue<Unit*>("current target")->Get() ?
+                                aiObjectContext->GetValue<Unit*>("current target")->Get()->GetName() : "none")
+                            << " loot=" << (!rescueLoot.IsEmpty() ? 1 : 0);
+                        sPlayerbotAIConfig.logEvent(this, "IdleNoConcreteWorkRescue", "", out.str());
+                    }
+
+                    if (rescueWorkAssigned)
+                    {
+                        TrackActionMetrics(false, true, staleReset);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    } // end if (kEnableLegacyFastLanes) - calculated mode runs the engine directly
+
+    // Per-tick decision trace (EnableActionLog): the bot's pre-decision state, so
+    // the per-bot log under logs/bots/ shows position/target/flags alongside the
+    // engine's A:<action> lines - enough to spot movement/target thrash & ordering.
+    if (ai::botdiag::IsActionLogEnabled())
+    {
+        Unit* ctTrace = aiObjectContext->GetValue<Unit*>("current target")->Get();
+        LootObject lootTrace = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+        GuidPosition rpgTrace = aiObjectContext->GetValue<GuidPosition>("rpg target")->Get();
+        bool travelActiveTrace = aiObjectContext->GetValue<bool>("travel target active")->Get();
+        ai::botdiag::BotActionLog::Write(this, "STATE",
+            "pos=%.1f,%.1f,%.1f mov=%d combat=%d hp=%u tgt=%s loot=%d rpg=%d travelActive=%d last=%s",
+            bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(),
+            (sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0,
+            sServerFacade.IsInCombat(bot) ? 1 : 0,
+            (uint32)bot->GetHealthPercent(),
+            ctTrace ? ctTrace->GetName() : "none",
+            lootTrace.IsEmpty() ? 0 : 1,
+            rpgTrace ? 1 : 0,
+            travelActiveTrace ? 1 : 0,
+            GetLastExecutedAction(currentState) ? const_cast<Action*>(GetLastExecutedAction(currentState))->getName().c_str() : "none");
+    }
+
+    // COMBAT-STATE RECONCILE (bot-cam evidence): OnCombatStarted() is ACTION-driven -- it only
+    // fires when the bot itself initiates an attack (AttackAction/PullActions). A bot dragged into
+    // combat by a mob aggro or by its own pet's pull therefore stays in the NON-COMBAT engine and
+    // runs RPG busywork (check mail / feed pet / choose rpg target) while being hit -- watched a
+    // hunter "check mail" for 12s mid-fight, HP bleeding 100->59. Force the combat engine whenever
+    // we are genuinely in combat with a live threat. ChangeEngine() only does work on a real
+    // transition (currentEngine != engine), so this is a cheap no-op once we're already in combat.
+    if (bot->IsInCombat() && currentState == BotState::BOT_STATE_NON_COMBAT &&
+        (bot->GetVictim() || !bot->getAttackers().empty()))
+    {
+        OnCombatStarted();
+    }
 
     SC_PHASE("DoNextAction.engineDoNextAction", bot ? bot->GetName() : "(null)");
     MapManager::SetContinentUpdatePhase("bot-engine", bot ? bot->GetGUIDLow() : 0);
@@ -3336,6 +9796,45 @@ void PlayerbotAI::DoNextAction(bool min)
     MapManager::SetContinentUpdatePhase("bot-engine-done", bot ? bot->GetGUIDLow() : 0);
 
     TrackActionMetrics((minimal || min), actionExecuted, staleReset);
+
+    // BOT-CAM: complete per-second snapshot of this bot (my eyes on the watched fleet). Gated by
+    // the action-log flag so it only runs for the small watched fleet, never at 10-15k scale.
+    if (ai::botdiag::IsActionLogEnabled())
+    {
+        WriteBotCam(this, bot);
+        CorrectBotZ(bot);   // snap bots that are stuck UNDER the terrain back to ground (logged)
+    }
+
+    // ABANDON UNREACHABLE LOOT: if we're out of combat and have been chasing a loot corpse we cannot
+    // path to (no NET movement for the window -- e.g. running in place against a fence), defer it so
+    // we stop wasting time and pick something reachable. Only when still FAR from the corpse (>12yd)
+    // so a bot actually standing on a corpse looting it is never interrupted. (See LootPursuitStuck.)
+    if (!bot->IsInCombat() && !bot->GetVictim())
+    {
+        LootObject stuckLoot = aiObjectContext->GetValue<LootObject>("loot target")->Get();
+        if (!stuckLoot.IsEmpty())
+        {
+            WorldObject* lwo = stuckLoot.GetWorldObject(bot);
+            const float lootDist = lwo ? bot->GetDistance(lwo) : 999.0f;
+            if (lootDist > 12.0f && LootPursuitStuck(bot, stuckLoot.guid))
+            {
+                DeferLootGuidForBot(bot, stuckLoot.guid, 60);   // blacklist this unreachable corpse 60s
+                if (LootObjectStack* avail = aiObjectContext->GetValue<LootObjectStack*>("available loot")->Get())
+                    avail->Remove(stuckLoot.guid);
+                aiObjectContext->GetValue<LootObject>("loot target")->Reset();
+            }
+        }
+    }
+
+    // LEARNING: sample (state, action) for combat decisions. RecordCombatDecision
+    // self-gates (in-combat only, ~1/sec/bot) so this is cheap. Joined to the fight's
+    // reward (fightId) -> (state, action, reward) tuples for rotation-policy learning.
+    if (actionExecuted)
+    {
+        const Action* lastExec = GetLastExecutedAction(currentState);
+        if (lastExec)
+            sBotLearningMgr.RecordCombatDecision(this, const_cast<Action*>(lastExec)->getName());
+    }
 
     if (!bot->IsInWorld()) //Teleport out of bg
         return;
@@ -4081,7 +10580,41 @@ void PlayerbotAI::DropQuest(uint32 questIdToDrop)
             bot->SetQuestStatus(questId, QUEST_STATUS_NONE);
             bot->getQuestStatusMap()[questId].m_rewarded = false;
 
-            //TODO should probably also remove quest items?
+            // Clean the quest's collected items out of the bags (the old TODO): dropped/finished
+            // quests otherwise leave orphaned quest items cluttering inventory forever. Only destroy
+            // ITEM_CLASS_QUEST items that NO other still-held quest requires, so we never break a
+            // shared quest item.
+            if (Quest const* dropped = sObjectMgr.GetQuestTemplate(questId))
+            {
+                for (int i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+                {
+                    uint32 reqItem = dropped->ReqItemId[i];
+                    if (!reqItem)
+                        continue;
+
+                    ItemPrototype const* proto = sObjectMgr.GetItemPrototype(reqItem);
+                    if (!proto || proto->Class != ITEM_CLASS_QUEST)
+                        continue;   // only purge quest-bound items; leave normal/usable items alone
+
+                    bool neededElsewhere = false;
+                    for (uint16 s2 = 0; s2 < MAX_QUEST_LOG_SIZE && !neededElsewhere; ++s2)
+                    {
+                        uint32 otherId = bot->GetQuestSlotQuestId(s2);
+                        if (!otherId || otherId == questId)
+                            continue;
+                        if (Quest const* other = sObjectMgr.GetQuestTemplate(otherId))
+                            for (int j = 0; j < QUEST_ITEM_OBJECTIVES_COUNT; ++j)
+                                if (other->ReqItemId[j] == reqItem) { neededElsewhere = true; break; }
+                    }
+
+                    if (!neededElsewhere)
+                    {
+                        uint32 have = bot->GetItemCount(reqItem, true);
+                        if (have)
+                            bot->DestroyItemCount(reqItem, have, true, false);
+                    }
+                }
+            }
 
             return;
         }
@@ -5342,6 +11875,29 @@ uint32 PlayerbotAI::GetSpellCastDuration(Spell* spell)
         {
             spellDuration = globalCooldown;
         }
+
+        // Projectile (traveling) spells -- Fireball, Frostbolt, Shoot, etc. -- deal
+        // their damage only AFTER the missile reaches the target. The core schedules
+        // delivery at floor(dist / speed * 1000) ms (Spell.cpp), but GetCastTime()
+        // does NOT include that travel time. Without accounting for it the bot's next
+        // cast fires ~reactDelay (100ms) after the cast bar ends -- i.e. while the
+        // previous missile is still in flight and BEFORE its damage lands -- and the
+        // engagement restarts before the hit registers. The damage is lost: the bot
+        // burns mana casting into a mob that stays at full HP. This is invisible
+        // against HOSTILE mobs (they aggro the bot on sight, so combat starts without
+        // needing the bot's damage to land) but FATAL against NEUTRAL mobs, which can
+        // ONLY enter combat from the bot's own damage -- measured 82% combat-start
+        // failure for ranged bots vs 1% for melee (instant) bots on the same mobs.
+        // Waiting out the missile travel lets the hit land and start combat first,
+        // exactly like the instant melee swing that succeeds 99% of the time.
+        if (pSpellInfo->speed > 0.0f && bot)
+        {
+            if (Unit* unitTarget = spell->m_targets.getUnitTarget())
+            {
+                float dist = bot->GetDistance(unitTarget);
+                spellDuration += (uint32) floor(dist / pSpellInfo->speed * 1000.0f);
+            }
+        }
     }
 
     return spellDuration + sPlayerbotAIConfig.reactDelay;
@@ -5876,8 +12432,16 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
     if (!bot->IsStandState())
     {
         bot->SetStandState(UNIT_STAND_STATE_STAND);
-        failWithDelay = true;
-        setupFailure = SPELL_FAILED_NOT_STANDING;
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        {
+            std::ostringstream out;
+            out << "spell=" << pSpellInfo->SpellName[0]
+                << " target=" << (target ? target->GetName() : "self")
+                << " immediateAttempt=1";
+            if (target)
+                out << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target);
+            sPlayerbotAIConfig.logEvent(this, "StandForCast", std::to_string(spellId), out.str());
+        }
     }
 
 	ObjectGuid oldSel = bot->GetSelectionGuid();
@@ -5886,8 +12450,9 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
     WorldObject* faceTo = target;
     if (!sServerFacade.IsInFront(bot, faceTo, sPlayerbotAIConfig.sightDistance, CAST_ANGLE_IN_FRONT))
     {
-        sServerFacade.SetFacingTo(bot, faceTo);
-        if (!HasRealPlayerMaster())
+        sServerFacade.SetFacingTo(bot, faceTo, true);
+        bot->SetInFront(target);
+        if (!sServerFacade.IsInFront(bot, faceTo, sPlayerbotAIConfig.sightDistance, CAST_ANGLE_IN_FRONT) && !HasRealPlayerMaster())
         {
             failWithDelay = true;
             if (setupFailure == SPELL_CAST_OK)
@@ -5906,6 +12471,66 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
 
         LogSpellCastFailure(this, bot, target, pSpellInfo, setupFailure, "setup", false, target == bot && IsPositiveSpell(pSpellInfo));
         return false;
+    }
+
+    // THRASH INSTRUMENTATION (phase 1): the cast is about to happen (passed setup/facing).
+    // Count it, detect the bot interrupting its OWN in-progress cast, and detect re-casting
+    // the same heal in a tight window. Read-only of bot state + per-bot timestamps; cheap.
+    {
+        extern std::atomic<uint64_t> g_botCasts;
+        extern std::atomic<uint64_t> g_botCastInterrupts;
+        extern std::atomic<uint64_t> g_botHealCasts;
+        extern std::atomic<uint64_t> g_botHealRecasts;
+        extern std::atomic<uint64_t> g_botHealRecastTight;
+        g_botCasts.fetch_add(1, std::memory_order_relaxed);
+        if (Spell* cur = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL))
+        {
+            if (cur->getState() == SPELL_STATE_CASTING && cur->m_spellInfo && cur->m_spellInfo->Id != spellId)
+                g_botCastInterrupts.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (IsHealSpell(pSpellInfo))
+        {
+            const uint32 nowMs = WorldTimer::getMSTime();
+            g_botHealCasts.fetch_add(1, std::memory_order_relaxed);
+            if (thrashLastHealSpellId == spellId && thrashLastHealCastMs)
+            {
+                const uint32 sinceMs = nowMs - thrashLastHealCastMs;
+                if (sinceMs < 4000)
+                    g_botHealRecasts.fetch_add(1, std::memory_order_relaxed);
+                // CAST-TIME-ACCURATE cancellation signal: re-casting the SAME heal faster than that
+                // heal's own cast time means the previous identical heal could not have completed ->
+                // it was CANCELED (not a completed-then-recast). castMs==0 (instant heals) can't be
+                // canceled, so they're correctly excluded. A high tight_pct here is unambiguous.
+                const uint32 castMs = GetSpellCastTime(pSpellInfo, bot);
+                if (castMs > 0 && sinceMs < castMs)
+                {
+                    g_botHealRecastTight.fetch_add(1, std::memory_order_relaxed);
+                    // TRACE the cancellation context (sampled 1/25) -> logs/heal_cancel.csv. The
+                    // key field is lastAction: what the bot DID between the two heal casts (i.e.
+                    // what canceled the first). genType = active motion generator. This pinpoints
+                    // the mechanism (movement/chase vs something else) instead of guessing.
+                    static std::atomic<uint32> sampCtr{0};
+                    if ((sampCtr.fetch_add(1, std::memory_order_relaxed) % 25) == 0)
+                    {
+                        FILE* hf = fopen("logs/heal_cancel.csv", "a");
+                        if (!hf) hf = fopen("../logs/heal_cancel.csv", "a");
+                        if (hf)
+                        {
+                            fprintf(hf, "%s,lvl=%u,cls=%u,spell=%u,sinceMs=%u,castMs=%u,moving=%d,genType=%u,lastAction=%s,nonMeleeCast=%d,inCombat=%d,hp=%u\n",
+                                bot->GetName(), bot->GetLevel(), bot->getClass(), spellId, sinceMs, castMs,
+                                (sServerFacade.isMoving(bot) || bot->isMovingOrTurning()) ? 1 : 0,
+                                bot->GetMotionMaster() ? (uint32)bot->GetMotionMaster()->GetCurrentMovementGeneratorType() : 999u,
+                                actionMetricLastActionName.empty() ? "none" : actionMetricLastActionName.c_str(),
+                                bot->IsNonMeleeSpellCasted(true, false, true) ? 1 : 0,
+                                bot->IsInCombat() ? 1 : 0, (uint32)bot->GetHealthPercent());
+                            fclose(hf);
+                        }
+                    }
+                }
+            }
+            thrashLastHealSpellId = spellId;
+            thrashLastHealCastMs = nowMs;
+        }
     }
 
     Spell *spell = new Spell(bot, pSpellInfo, false);
@@ -5986,13 +12611,8 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
 
     if (Spell* activeSpell = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL))
     {
-        uint32 activeDelay = activeSpell->GetCastedTime();
-        if (!activeDelay)
-            activeDelay = activeSpell->GetCastTime() > 0 ? static_cast<uint32>(activeSpell->GetCastTime()) : sPlayerbotAIConfig.globalCoolDown;
-
-        activeDelay += sPlayerbotAIConfig.reactDelay + sWorld.GetAverageDiff();
-        activeDelay = std::max<uint32>(activeDelay, 250);
-        activeDelay = std::min<uint32>(activeDelay, 5000);
+        const uint32 activeRemaining = activeSpell->GetCastedTime();
+        uint32 activeDelay = GetSpellInProgressRecheckDelay(activeRemaining);
 
         SetAIInternalUpdateDelay(activeDelay);
         if (outSpellDuration)
@@ -6005,7 +12625,7 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
                 << " activeSpell=" << (activeSpell->m_spellInfo ? activeSpell->m_spellInfo->SpellName[0] : "unknown")
                 << " target=" << (target ? target->GetName() : "self")
                 << " castTime=" << (castTimeSpell ? 1 : 0)
-                << " activeRemainingMs=" << activeSpell->GetCastedTime()
+                << " activeRemainingMs=" << activeRemaining
                 << " deferMs=" << activeDelay
                 << " selfPositive=" << (selfPositiveCast ? 1 : 0)
                 << " moving=" << (sServerFacade.isMoving(bot) ? 1 : 0)
@@ -6022,7 +12642,19 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
     // Fail the cast if the bot is moving and the spell is a casting/channeled spell.
     // Self-heals are the exception: autonomous bots should plant their feet and
     // continue the cast instead of repeatedly stopping, failing, and resuming combat movement.
-    if (sServerFacade.isMoving(bot) && castTimeSpell)
+    //
+    // We must also clear an ACTIVE movement generator (e.g. a ChaseMovementGenerator left
+    // behind by combat reach) even when the bot is momentarily not moving at this instant.
+    // Otherwise that generator keeps repositioning the bot a fraction of a second into the
+    // cast and cancels it -- so the spell never lands, never deals damage, never generates
+    // threat, and the creature (empty threat list) instantly evades and heals back to full
+    // (measured: stuck casts have botThreat=0/threatEmpty=1; working casts have botThreat>0).
+    // This is the dominant cause of "bot fireballs a mob, it resets to full HP, bot OOMs".
+    const bool hasActiveMovementGen =
+        bot->GetMotionMaster() &&
+        bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != IDLE_MOTION_TYPE &&
+        bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != HOME_MOTION_TYPE;
+    if ((sServerFacade.isMoving(bot) || hasActiveMovementGen) && castTimeSpell)
     {
         // always fail when jumping
         if (IsJumping() || bot->IsFalling())
@@ -6036,27 +12668,24 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
         }
 
         StopMoving();
-
-        // fail if not with real player to avoid movement glitches
-        if (!HasActivePlayerMaster() && !selfPositiveCast)
+        if (target && target != bot)
         {
-            SetAIInternalUpdateDelay(waitForSpell ? sPlayerbotAIConfig.globalCoolDown : 250);
-            if (outSpellDuration)
-                *outSpellDuration = waitForSpell ? sPlayerbotAIConfig.globalCoolDown : 250;
-
-            LogSpellCastFailure(this, bot, target, pSpellInfo, SPELL_FAILED_MOVING, "moving-stop", castTimeSpell, selfPositiveCast);
-            spell->cancel();
-            return false;
+            sServerFacade.SetFacingTo(bot, target, true);
+            bot->SetInFront(target);
         }
 
-        if (selfPositiveCast && sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
         {
             std::ostringstream out;
             out << "spell=" << pSpellInfo->SpellName[0]
-                << " target=self"
-                << " health=" << static_cast<uint32>(bot->GetHealthPercent())
-                << " movingStopped=1";
-            sPlayerbotAIConfig.logEvent(this, "SelfHealCastAfterStop", std::to_string(spellId), out.str());
+                << " target=" << (target ? target->GetName() : "self")
+                << " selfPositive=" << (selfPositiveCast ? 1 : 0)
+                << " movingStopped=1"
+                << " immediateAttempt=1";
+            if (target)
+                out << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target);
+            sPlayerbotAIConfig.logEvent(this, selfPositiveCast ? "SelfHealCastAfterStop" : "CombatCastAfterStop",
+                std::to_string(spellId), out.str());
         }
     }
 
@@ -6115,7 +12744,7 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
     {
         if (spellSuccess == SPELL_FAILED_SPELL_IN_PROGRESS)
         {
-            uint32 activeDelay = sPlayerbotAIConfig.globalCoolDown;
+            uint32 activeRemaining = 0;
             std::string activeSpellName = "unknown";
             for (uint32 i = 0; i < CURRENT_MAX_SPELL; ++i)
             {
@@ -6127,14 +12756,10 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
                     activeSpellName = current->m_spellInfo->SpellName[0];
 
                 uint32 currentDelay = current->GetCastedTime();
-                if (!currentDelay && current->GetCastTime() > 0)
-                    currentDelay = static_cast<uint32>(current->GetCastTime());
-                activeDelay = std::max(activeDelay, currentDelay);
+                activeRemaining = std::max(activeRemaining, currentDelay);
             }
 
-            activeDelay += sPlayerbotAIConfig.reactDelay + sWorld.GetAverageDiff();
-            activeDelay = std::max<uint32>(activeDelay, 250);
-            activeDelay = std::min<uint32>(activeDelay, 5000);
+            uint32 activeDelay = GetSpellInProgressRecheckDelay(activeRemaining);
 
             SetAIInternalUpdateDelay(activeDelay);
             if (outSpellDuration)
@@ -6147,6 +12772,7 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
                     << " activeSpell=" << activeSpellName
                     << " target=" << (target ? target->GetName() : "self")
                     << " castTime=" << (castTimeSpell ? 1 : 0)
+                    << " activeRemainingMs=" << activeRemaining
                     << " deferMs=" << activeDelay
                     << " selfPositive=" << (selfPositiveCast ? 1 : 0)
                     << " moving=" << (sServerFacade.isMoving(bot) ? 1 : 0)
@@ -6170,18 +12796,60 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
         return false;
     }
 
-    const bool forcedCombatPrime = ForceHostileSpellCombatPrime(bot, target, pSpellInfo);
-
+    // DO NOT artificially prime combat here. The previous code called
+    // creature->EnterCombatWithTarget(bot) + bot->SetInCombatWith(creature) the instant
+    // a hostile spell BEGAN casting, before any damage landed. That produced "telepathic"
+    // combat: the creature aggroed and ran in with ZERO threat, then on its next AI tick
+    // SelectHostileTarget found no real threat and EVADED (heals to 100%, drops combat) —
+    // the exact bug seen in-game. Real combat must be established by the spell actually
+    // hitting and dealing damage, identical to how a real player engages a mob.
+    // Combat diagnostic: when a bot starts a hostile spell at a creature, capture the
+    // target's REAL state so we can tell why a cast may not establish combat — is the
+    // bot actually hostile to it (faction), is the creature evading (damage-immune), is
+    // its HP dropping (is damage landing?), and is it in combat with the bot. Watching
+    // targetHp across repeated casts at the same entry tells us evade vs faction vs
+    // damage-not-landing without guessing.
     if (target && IsHostileCombatSpellForTarget(bot, target, pSpellInfo) && sPlayerbotAIConfig.hasLog("bot_events.csv"))
     {
+        Creature* diagCreature = target->ToCreature();
         std::ostringstream out;
         out << "spell=" << pSpellInfo->SpellName[0]
             << " target=" << target->GetName()
-            << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target)
-            << " manualPrime=0"
+            << " entry=" << target->GetEntry()
+            << " hostileTo=" << (bot->IsHostileTo(target) ? 1 : 0)
+            << " targetHpPct=" << (diagCreature ? static_cast<int>(diagCreature->GetHealthPercent()) : -1)
+            << " creatureFaction=" << (diagCreature ? diagCreature->GetFactionId() : 0u)
+            << " evadeMode=" << ((diagCreature && diagCreature->IsInEvadeMode()) ? 1 : 0)
+            // Creature-side evade detail: notReachMs is how long the creature has been
+            // unable to path to its victim (>3000 => soft-evade + HP regen; >24000 =>
+            // full evade home). evadeUnreach=1 means it is in the soft-evade/regen window
+            // (the "takes damage then heals back to full" Mode-B loop). homeMotion=1 means
+            // it is running back to spawn. combatResets counts how many times it has been
+            // pulled-then-evaded -- a climbing value at the same creature = bot re-pulling
+            // a mob it can never reach. This shows whether evading creatures RECOVER.
+            << " notReachMs=" << (diagCreature ? diagCreature->m_TargetNotReachableTimer : 0u)
+            << " evadeUnreach=" << ((diagCreature && diagCreature->IsEvadeBecauseTargetNotReachable()) ? 1 : 0)
+            << " homeMotion=" << ((diagCreature && diagCreature->GetMotionMaster() && diagCreature->GetMotionMaster()->GetCurrentMovementGeneratorType() == HOME_MOTION_TYPE) ? 1 : 0)
+            << " combatResets=" << (diagCreature ? diagCreature->GetCombatResetCount() : 0u)
+            // Threat state: does our damage STICK as threat on the creature? botThreat is
+            // this bot's current threat on the creature; threatEmpty=1 means the creature's
+            // threat list is empty (=> on its next AI tick it has no victim and EVADES + heals
+            // to full -- the "boar resets to full" bug). If we keep dealing damage but
+            // botThreat stays 0 / threatEmpty stays 1, threat is not being retained.
+            << " botThreat=" << (diagCreature ? static_cast<int>(sServerFacade.GetThreatManager(diagCreature).getThreat(bot)) : -1)
+            << " threatEmpty=" << ((diagCreature && sServerFacade.GetThreatManager(diagCreature).isThreatListEmpty()) ? 1 : 0)
+            << " targetInCombat=" << (target->IsInCombat() ? 1 : 0)
+            << " targetVictimIsBot=" << ((target->GetVictim() == bot) ? 1 : 0)
+            << " botInCombat=" << (bot->IsInCombat() ? 1 : 0)
             << " ranged=" << (IsRanged(bot) ? 1 : 0)
-            << " forcedCombat=" << (forcedCombatPrime ? 1 : 0);
-        sPlayerbotAIConfig.logEvent(this, "SpellCombatPrime", std::to_string(target->GetGUIDLow()), out.str());
+            << " dist=" << std::fixed << std::setprecision(2) << sServerFacade.GetDistance2d(bot, target)
+            << " los=" << (bot->IsWithinLOSInMap(target, true) ? 1 : 0)
+            // botFloat = how far the bot is ABOVE the ground (botZ - terrain/vmap height).
+            // If the bot floats a few feet, a ground creature reaches the ground BELOW it but
+            // can't melee-reach the floating bot (vertical gap) -> unreachable -> evade + heal.
+            << " botFloat=" << std::fixed << std::setprecision(2)
+            << (bot->GetMap() ? bot->GetPositionZ() - bot->GetMap()->GetHeight(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()) : 0.0f);
+        sPlayerbotAIConfig.logEvent(this, "HostileCastDiag", std::to_string(target->GetEntry()), out.str());
     }
 
     PlayAttackEmote(6);
@@ -6880,10 +13548,79 @@ void PlayerbotAI::InterruptSpell(bool withMeleeAndAuto)
         Spell* currentSpell = bot->GetCurrentSpell((CurrentSpellTypes)type);
         if (currentSpell && currentSpell->CanBeInterrupted())
         {
+            // Protect an out-of-combat hostile PULL cast: a damaging generic spell aimed
+            // at a creature while the bot is not yet in combat. The bot must hold still
+            // and let it land so its damage flags the (often neutral) mob into combat --
+            // exactly like a real player. The engine's frequent re-init / target-reselect
+            // / reaction churn (ReInitCurrentEngine, SelectNewTargetAction, reactions, and
+            // the movement path) was funneling through here and interrupting these casts
+            // every ~0.3s, so for NEUTRAL mobs -- which can ONLY enter combat from the
+            // bot's own damage -- the pull never landed: the mob stayed at full HP and the
+            // bot looped, burned mana, OOM'd, and gave up (measured: ranged bots cast 40+
+            // times with ZERO deliveries; melee, instant with no cast bar, succeeded 99%).
+            // Once the hit lands the bot is in combat and this guard releases, so in-combat
+            // interrupts (kick targets, repositioning, urgent reactions) are unaffected.
+            if (type == CURRENT_GENERIC_SPELL && IsCastingHostilePull(currentSpell))
+                continue;
+
             bot->InterruptSpell((CurrentSpellTypes)type);
             SpellInterrupted(currentSpell->m_spellInfo->Id);
         }
     }
+}
+
+// LOD COLD dormancy. When a bot has no real player in its zone/map it becomes invisible
+// via Greater Invisibility (spell 16380, the same aura GM "gm visible off" uses) and drops
+// combat, so it cannot aggro, fight, or die while its brain runs on the slow COLD interval.
+// VISIBILITY_OFF removes it from the world's visibility/aggro scan (creatures can't see it)
+// but it stays logged in (still in /who, still wandering). Reversed instantly when a player
+// approaches and it promotes to HOT/WARM. Idempotent: only acts on the actual transition.
+void PlayerbotAI::SetColdDormant(bool dormant)
+{
+    // LOD COLD dormancy RE-ENABLED 2026-06-30 for scale (10-15k bots). The previous breakage --
+    // VISIBILITY_OFF bots whose pull-casts couldn't aggro mobs -- is avoided because the dormancy
+    // GATE in UpdateAI now SKIPS the bot's entire AI while dormant, so a dormant bot never tries
+    // to cast/pull while invisible. Only bots with no real player nearby are dormant, so the
+    // invisibility is harmless (nobody is looking). They wake (visible + AI resumes) the instant a
+    // real player approaches. Rollback: AiPlayerbot.LODColdUpdateMs = 0 + restart.
+    if (dormant == coldDormant || !bot || !bot->IsInWorld())
+        return;
+
+    coldDormant = dormant;
+
+    if (dormant)
+    {
+        // Pure invisibility -- NO GM mode (no <GM> tag, no faction swap) and NO aura.
+        // VISIBILITY_OFF removes the bot from the world's visibility scan, so neither
+        // players nor creatures can see it (creatures' target search skips invisible
+        // units -> no aggro). Drop current combat and make existing attackers release
+        // their threat so a mob can't keep swinging at a now-invisible target.
+        bot->CombatStop(true);
+        bot->GetHostileRefManager().deleteReferences();
+        bot->SetVisibility(VISIBILITY_OFF);
+    }
+    else
+    {
+        bot->SetVisibility(VISIBILITY_ON);                       // visible again
+    }
+}
+
+// True when `spell` is an out-of-combat hostile pull: a damaging spell aimed at a
+// creature other than the bot, while the bot is not yet in combat. See the note in
+// PlayerbotAI::InterruptSpell.
+bool PlayerbotAI::IsCastingHostilePull(Spell* spell)
+{
+    if (!spell || !spell->m_spellInfo || !bot || bot->IsInCombat())
+        return false;
+
+    bool isDamage = false;
+    for (int i = 0; i < MAX_EFFECT_INDEX; ++i)
+        if (spell->m_spellInfo->Effect[i] == SPELL_EFFECT_SCHOOL_DAMAGE) { isDamage = true; break; }
+    if (!isDamage)
+        return false;
+
+    Unit* target = spell->m_targets.getUnitTarget();
+    return target && target->GetTypeId() == TYPEID_UNIT && target->GetObjectGuid() != bot->GetObjectGuid();
 }
 
 bool PlayerbotAI::RemoveAura(const std::string& name)
@@ -8057,7 +14794,7 @@ std::string PlayerbotAI::HandleRemoteCommand(std::string command)
             out << target->GetGroupmember().GetPlayer()->GetName() << "'s ";
 
         if (target->GetDestination()) {
-            out << "Target: " << target->GetDestination()->GetTitle();
+            out << "Target: destinationPtr=1";
         }
 
         if (target->GetStatus() != TravelStatus::TRAVEL_STATUS_NONE)
@@ -8097,7 +14834,7 @@ std::string PlayerbotAI::HandleRemoteCommand(std::string command)
         if (target->GetDestination()) {
             out << target->GetDestination()->GetShortName() << " travel target";
 
-            out << "\nTarget: " << target->GetDestination()->GetTitle();
+            out << "\nTarget: destinationPtr=1";
 
             out << "\nDistance " << round(target->GetDestination()->DistanceTo(bot)) << "y";
 
@@ -9969,6 +16706,10 @@ void PlayerbotAI::StopMoving()
         bot->GetMotionMaster()->Clear(false, true);
         bot->GetMotionMaster()->MoveIdle();
     }
+
+    // Interrupt-stops freeze the bot at the last mid-spline Z (often ~0.5-1y above ground: navmesh
+    // pad) and no gravity ever drops it -> the visible "floats when standing still". Settle now.
+    SettleToGround(bot);
 }
 
 bool PlayerbotAI::IsInRealGuild()
@@ -10001,15 +16742,15 @@ bool PlayerbotAI::HasPlayerRelation()
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
         return true;
 
-    for (auto& p : sRandomPlayerbotMgr.GetPlayers())
-    {
-        if (p.second && p.second->GetSocial()->HasFriend(bot->GetObjectGuid()))
-        {
-            SetPlayerFriend(true);
-            return true;
-        }
-    }
-
+    // NOTE: we deliberately do NOT scan sRandomPlayerbotMgr.GetPlayers() here and dereference each
+    // real Player to read its social/friend list. This runs on parallel map-update worker threads,
+    // and a real player logging out (main thread) frees its Player object -> dereferencing the
+    // (snapshotted) pointer segfaulted in Player::GetSocial() (the recurring SIGSEGV under
+    // AcceptInvitationAction/AcceptDuelAction->ResetStrategies). A snapshot copy can't fix it: it
+    // pins the map structure, not the lifetime of the Player objects it points at. The friend
+    // relationship is already established at login (OnBotLogin queries character_social and calls
+    // SetPlayerFriend) and is read above via IsPlayerFriend(); a mid-session friend add is picked
+    // up on the bot's next login. Correctness cost is negligible; the crash is eliminated.
     return false;
 }
 

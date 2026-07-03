@@ -1,5 +1,12 @@
 #include "playerbot/strategy/Action.h"
 #include "ChooseTargetActions.h"
+#include <atomic>
+
+// Target-churn counters (defined at global scope in PlayerbotAI.cpp). Declared here at GLOBAL
+// file scope so the out-of-line ai::SelectNewTargetAction::Execute body (which lives in namespace
+// ai) references the GLOBAL symbols via :: rather than declaring ai::-scoped ones (link error).
+extern std::atomic<uint64_t> g_botSelectNewTarget;
+extern std::atomic<uint64_t> g_botSelectNewTargetAlive;
 #include "Movement/MovementGenerator.h"
 #include "AI/CreatureAI.h"
 #include "playerbot/TravelMgr.h"
@@ -128,6 +135,23 @@ namespace
             return nullptr;
 
         std::list<ObjectGuid> possibleTargets = possibleTargetsValue->Get();
+
+        // Threat-aware quest-objective selection (autonomous bots): prefer the
+        // LEAST-packed instance of the objective mob so the bot peels a kill off
+        // the edge of a camp instead of beelining into the middle of a pack and
+        // dying (the "Hogger / Kobold Tunneler deep in a gnoll pack" case).
+        const bool packAwareObjective =
+            !ai->HasActivePlayerMaster() && !ai->HasRealPlayerMaster() &&
+            possibleTargets.size() <= 40;
+        std::vector<std::pair<float, float>> objHostilePositions;
+        if (packAwareObjective)
+        {
+            objHostilePositions.reserve(possibleTargets.size());
+            for (ObjectGuid const& hg : possibleTargets)
+                if (Unit* hu = ai->GetUnit(hg))
+                    objHostilePositions.emplace_back(hu->GetPositionX(), hu->GetPositionY());
+        }
+
         for (ObjectGuid const& guid : possibleTargets)
         {
             if (!guid.IsCreature() || !objectiveEntries.count(guid.GetEntry()))
@@ -181,9 +205,17 @@ bool DpsAssistAction::isUseful()
     return true;
 }
 
-bool AttackAnythingAction::isUseful() 
+bool AttackAnythingAction::isUseful()
 {
     if (!bot->IsInCombat() && AI_VALUE(bool, "has available loot"))
+        return false;
+
+    // Don't START a new fight badly hurt. Bots revived at ~50% HP were instantly engaging fresh
+    // 100% mobs ("attack anything" rel 5.0 beats "food" rel 3.0) and losing the race -- watched
+    // Thuskey die 16x in 13 min re-engaging at 52% HP every revive. A real player eats first.
+    // Only gates STARTING fights; being attacked / already in combat is unaffected.
+    if (!ai->HasRealPlayerMaster() && !bot->IsInCombat() && bot->getAttackers().empty() &&
+        bot->GetHealthPercent() < 55.0f)
         return false;
 
     Unit* questObjectiveTarget = FindVisibleQuestObjectiveTarget(ai, bot);
@@ -245,7 +277,13 @@ bool AttackAnythingAction::isUseful()
     if(!target->IsPlayer() && bot->isInFront(target,target->GetAttackDistance(bot)*1.5f, M_PI_F*0.5f) && target->CanAttackOnSight(bot) && target->GetLevel() < bot->GetLevel() + 3.0) //Attack before being attacked.
         return true;
 
-    if (!questObjectiveTarget && AI_VALUE(bool, "travel target traveling") && CanFreeMoveValue::CanFreeMoveTo(ai, *AI_VALUE(TravelTarget*,"travel target")->GetPosition())) //Bot is traveling
+    // Distance-aware traveling veto: the blanket veto discarded the grind value's sanctioned
+    // en-route mob (45y opportunisticPathKill) one layer up, so TRAVEL-status bots never fought
+    // anything (measured 164k bot-seconds stalled with a live target <=40y). A path-local kill is
+    // firm: GrindTargetValue already rejects far non-quest mobs for travelers -- kill, resume.
+    if (!questObjectiveTarget && AI_VALUE(bool, "travel target traveling") &&
+        CanFreeMoveValue::CanFreeMoveTo(ai, *AI_VALUE(TravelTarget*,"travel target")->GetPosition()) &&
+        (!target || sServerFacade.GetDistance2d(bot, target) > 45.0f)) //Bot is traveling with no path-local kill
         return false;
 
     return true;
@@ -372,6 +410,69 @@ bool AttackEnemyFlagCarrierAction::isUseful()
 bool SelectNewTargetAction::Execute(Event& event)
 {
     Unit* target = AI_VALUE(Unit*, "current target");
+
+    // HEAL-CAST GUARD: this action calls ai->InterruptSpell() + AttackStop() below, which CANCELS
+    // an in-flight heal -> the heal-recast-death loop (a bot at low HP would tear down its target,
+    // cancel its life-saving heal, recast, repeat, die). If the bot is mid-cast on a HEAL, do NOT
+    // run: keep the target, let the heal land. (Belt-and-suspenders vs. the combat-preempt delay
+    // hold -- covers the reaction-engine path too.) See [[bot-heal-recast-thrash]].
+    if (bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        if (Spell* gcast = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL))
+            if (gcast->m_spellInfo && PlayerbotAI::IsHealSpell(gcast->m_spellInfo))
+                return false;
+    }
+
+    // SURVIVAL FALLBACK -- the single biggest killer. bot-cam death analysis: 46% of bots that die
+    // do so in the "idle select-new-target loop" -- a bot with LIVE attackers but an invalid current
+    // target spins this action doing ZERO damage and bleeds out (lvl-12 Ilikluc: 47 ticks of it with
+    // 2 mobs on it -> dead). The assist/teardown logic below does NOT guarantee re-engagement: group
+    // assist can return true without yielding a fightable target, and the solo path picks nothing.
+    // So BEFORE any of that: if we are in combat and our current target is invalid but something
+    // alive is attacking us, COMMIT to the nearest such attacker, START the attack, and return FALSE
+    // so the engine runs the attack rotation on the now-valid target THIS SAME tick. (Returning true
+    // here would consume the tick and block the attack -- that was an earlier regression.) Applies to
+    // ALL bots (grouped included) -- fighting back when attacked is never wrong. A valid current
+    // target is left untouched, so this never fights the normal assist/commit behaviour.
+    if (bot->IsInCombat() &&
+        (!target || !sServerFacade.IsAlive(target) ||
+         !bot->IsWithinDistInMap(target, sPlayerbotAIConfig.sightDistance)))
+    {
+        Unit* engage = bot->GetVictim();
+        if (!engage || !sServerFacade.IsAlive(engage) || sServerFacade.IsFriendlyTo(bot, engage) ||
+            !bot->IsWithinDistInMap(engage, sPlayerbotAIConfig.sightDistance))
+            engage = nullptr;
+        if (!engage)
+        {
+            float best = 100000.0f;
+            for (const ObjectGuid& g : AI_VALUE(std::list<ObjectGuid>, "attackers"))
+            {
+                Unit* atk = ai->GetUnit(g);
+                if (!atk || !sServerFacade.IsAlive(atk) || sServerFacade.IsFriendlyTo(bot, atk))
+                    continue;
+                if (!bot->IsWithinDistInMap(atk, sPlayerbotAIConfig.sightDistance))
+                    continue;
+                float d = sServerFacade.GetDistance2d(bot, atk);
+                if (d < best) { best = d; engage = atk; }
+            }
+        }
+        if (engage)
+        {
+            SET_AI_VALUE(Unit*, "current target", engage);
+            bot->SetSelectionGuid(engage->GetObjectGuid());
+            bot->Attack(engage, !ai->IsRanged(bot));   // start engaging now (melee swing for melee classes)
+            return false;                              // let the rotation act on it THIS tick
+        }
+    }
+
+    // TARGET-CHURN instrumentation: count target teardown+re-pick, and whether the old target was
+    // still alive (= switching off a live mob = potential oscillation).
+    {
+        ::g_botSelectNewTarget.fetch_add(1, std::memory_order_relaxed);
+        if (target && !sServerFacade.UnitIsDead(target))
+            ::g_botSelectNewTargetAlive.fetch_add(1, std::memory_order_relaxed);
+    }
+
     if (target && sServerFacade.UnitIsDead(target))
     {
         // Save the dead target for later looting

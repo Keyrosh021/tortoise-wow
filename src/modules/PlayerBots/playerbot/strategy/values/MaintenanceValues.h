@@ -160,6 +160,14 @@ namespace ai
         ShouldDrinkValue(PlayerbotAI* ai) : BoolCalculatedValue(ai, "should drink", 2) {}
         virtual bool Calculate() override
         {
+            // Never sit and drink while a mob is attacking the bot. The bot's own
+            // combat flag flickers off when a passive (drinking) bot stops fighting
+            // back, which let it re-sit-and-drink while a bear kept hitting it -
+            // "stuck drinking mid-combat". "attackers count" reflects units actually
+            // attacking the bot and stays set through the flicker.
+            if (bot->IsInCombat() || AI_VALUE(uint8, "attackers count") > 0)
+                return false;
+
             if (!bot->HasMana())
                 return false;
 

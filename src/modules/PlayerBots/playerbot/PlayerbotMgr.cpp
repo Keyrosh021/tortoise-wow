@@ -385,9 +385,28 @@ void PlayerbotHolder::MovePlayerBot(uint32 guid, PlayerbotHolder* newHolder)
     }
 }
 
+void PlayerbotHolder::QueueBotLogout(uint32 guid)
+{
+    std::lock_guard<std::mutex> guard(m_pendingLogoutsLock);
+    m_pendingBotLogouts.push_back(guid);
+}
+
+void PlayerbotHolder::DrainQueuedBotLogouts()
+{
+    std::vector<uint32> pending;
+    {
+        std::lock_guard<std::mutex> guard(m_pendingLogoutsLock);
+        pending.swap(m_pendingBotLogouts);
+    }
+    for (uint32 guid : pending)
+        LogoutPlayerBot(guid);
+}
+
 void PlayerbotHolder::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
     sBotLearningMgr.FlushTelemetry();
+    DrainQueuedBotLogouts();
+    DrainQueuedBotLogouts();
 
     std::vector<CompletedBotLogin> completedBotLogins;
     {
@@ -1474,6 +1493,15 @@ void PlayerbotMgr::OnBotLoginInternal(Player * const bot)
 {
     bot->GetPlayerbotAI()->SetMaster(master);
     bot->GetPlayerbotAI()->ResetStrategies();
+
+    // Catch up the bot's FULL class spellbook on login. Existing random bots leveled
+    // before AutoLearn was enabled and are missing most of their kit (measured: only
+    // 5/95 lvl-10+ druids knew Bear Form), which caps every class AND the learned
+    // policy (it can't use IMPOSSIBLE actions). Gated to random bots so we never alter
+    // a real player's alt. Staggered across logins, so the per-bot trainer scan is cheap.
+    if (bot && sRandomPlayerbotMgr.IsRandomBot(bot))
+        PlayerbotFactory(bot, bot->GetLevel()).LearnClassTrainerSpells();
+
     sLog.outDebug("Bot %s logged in", bot->GetName());
 }
 

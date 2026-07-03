@@ -13,6 +13,14 @@ void FollowMasterStrategy::InitNonCombatTriggers(std::list<TriggerNode*> &trigge
     triggers.push_back(new TriggerNode(
         "update follow",
         NextAction::array(0, new NextAction("follow", ACTION_IDLE), NULL)));
+
+    // PROACTIVE GROUP ASSIST: when a fellow group member is fighting and there's a mob in reach,
+    // assist (pick + engage the target) at a relevance ABOVE follow (ACTION_HIGH) so the follower
+    // JOINS the fight and closes on the target instead of passively trailing the leader. The
+    // GroupAssistTrigger gates this to autonomous bot-led groups with a real nearby mob.
+    triggers.push_back(new TriggerNode(
+        "group assist needed",
+        NextAction::array(0, new NextAction("dps assist", ACTION_HIGH + 5), NULL)));
 }
 
 void FollowMasterStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)

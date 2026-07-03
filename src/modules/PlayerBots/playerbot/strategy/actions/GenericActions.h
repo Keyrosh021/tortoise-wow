@@ -7,12 +7,25 @@
 
 namespace ai
 {
-    class MeleeAction : public AttackAction 
+    class MeleeAction : public AttackAction
     {
     public:
         MeleeAction(PlayerbotAI* ai) : AttackAction(ai, "melee") {}
         virtual std::string GetTargetName() override { return "current target"; }
         virtual bool isUseful() override;
+    };
+
+    // Class-aware disengage: cast the best AVAILABLE escape tool for the bot's class
+    // (root / stun / slow / blink / bubble / fear / vanish / feign death) so a fleeing
+    // bot can actually break away instead of just running while the mob follows.
+    // Pushed by panic/outnumbered at a relevance ABOVE the plain "flee" run, so the
+    // bot CCs/blinks THEN runs; each CastSpell self-gates on cooldown/known-spell, and
+    // when nothing is available Execute returns false so the engine falls through to flee.
+    class UseEscapeAbilityAction : public Action
+    {
+    public:
+        UseEscapeAbilityAction(PlayerbotAI* ai) : Action(ai, "use escape ability") {}
+        bool Execute(Event& event) override;
     };
 
     class UseLightwellAction : public MovementAction

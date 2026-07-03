@@ -444,6 +444,12 @@ public:
     void SpellInterrupted(uint32 spellid);
     int32 CalculateGlobalCooldown(uint32 spellid);
     void InterruptSpell(bool withMeleeAndAuto = true);
+    bool IsCastingHostilePull(Spell* spell);
+    // LOD COLD dormancy: make a far-from-any-player bot invisible (Greater Invisibility,
+    // spell 16380) + drop combat, so it can't aggro/fight/die while its brain runs on the
+    // slow COLD interval. Idempotent; reversed instantly on promotion (player approaches).
+    void SetColdDormant(bool dormant);
+    bool IsColdDormant() const { return coldDormant; }
     bool RemoveAura(const std::string& name);
     void RemoveShapeshift();
     void WaitForSpellCast(Spell *spell);
@@ -589,6 +595,9 @@ public:
     // so the sync code can't tell what level to match. We watch from the
     // tick path and run once master becomes available.
     bool scboteLevelSyncPending = false;
+
+    // LOD COLD dormancy state (invisible + combat-dropped). See SetColdDormant.
+    bool coldDormant = false;
 
     // One-shot "teleport bot to master on first available tick" flag. Set
     // by OnBotSummoned; cleared by TickHeartbeat after the teleport runs.
@@ -787,9 +796,13 @@ private:
     bool UpdateAIReaction(uint32 elapsed, bool minimal, bool isStunned);
     void UpdateFaceTarget(uint32 elapsed, bool minimal);
     void ResetStaleTargetState();
+    bool ClearExpiredTravelAfterStaleTargetReset();
     bool DetectAndClearStaleTarget();
+    void ResetTravelNoMotionState();
+    bool RecoverTravelNoMotion(time_t now);
     void TrackActionMetrics(bool minimal, bool actionExecuted, bool staleReset);
     void LogActionMetricsSnapshot(time_t now);
+    void LogBotStatsSnapshot(time_t now, uint32 apm, uint32 decisionTpm, uint32 sinceProgressSec);
     void LogVisibleActivitySnapshot(time_t now);
     void LogDecisionStallSnapshot(time_t now, const std::string& loopReason);
     std::string BuildCurrentTaskSummary();
@@ -832,6 +845,7 @@ protected:
     float staleTargetLastZ = 0.0f;
     float staleTargetLastDistance = 0.0f;
     uint32 staleTargetLastTargetHealth = 0;
+    uint32 staleTargetRecoveries = 0;
     time_t actionMetricWindowStart = 0;
     time_t actionMetricLastProgress = 0;
     time_t actionMetricLastSnapshot = 0;
@@ -846,12 +860,43 @@ protected:
     uint32 actionMetricTargetTicks = 0;
     uint32 actionMetricTravelTicks = 0;
     uint32 actionMetricQuestTravelTicks = 0;
+    uint32 actionMetricMoveProgressTicks = 0;
     uint32 actionMetricStaleResets = 0;
     uint32 actionMetricNoProgressTicks = 0;
     uint32 actionMetricSameActionStreak = 0;
+    bool actionMetricHasLastMovePosition = false;
+    uint32 actionMetricLastMoveMap = 0;
+    float actionMetricLastMoveX = 0.0f;
+    float actionMetricLastMoveY = 0.0f;
+    float actionMetricLastMoveZ = 0.0f;
+    uint32 travelNoMotionRetries = 0;
+    time_t travelNoMotionNextRetry = 0;
+    int32 travelNoMotionEntry = 0;
+    uint32 travelNoMotionMap = 0;
+    float travelNoMotionX = 0.0f;
+    float travelNoMotionY = 0.0f;
+    float travelNoMotionZ = 0.0f;
+    ObjectGuid targetFastLaneGuid;
+    time_t targetFastLaneNextRetry = 0;
+    uint32 targetFastLaneFailures = 0;
+    time_t deadFastLaneNextRetry = 0;
+    uint32 deadFastLaneRetries = 0;
+    // Gravity enforcement: next time to check whether an idle bot is hovering above the
+    // ground and should be dropped down (server bots get no client physics/gravity).
+    time_t nextGroundEnforceCheck = 0;
     uint32 expensivePlannerNextAllowedMs = 0;
     uint32 pressureWorkNextAllowedMs[5] = {};
     std::string actionMetricLastActionName;
+    // Decision-thrash instrumentation (phase 1) + commitment-arbiter state (phase 2).
+    // Per-bot, only touched on the bot's own update thread (no locking needed). The thrash
+    // counters themselves are global atomics (g_botCasts etc. in PlayerbotAI.cpp); these are
+    // the per-bot bits needed to classify an event (heal recast within a window) and to hold a
+    // commitment so an in-progress cast/heal/pull isn't preempted every tick (the "interrupts
+    // its own heal" root). See [[bot-decision-thrash]] TODO E.
+    uint32 thrashLastHealSpellId = 0;
+    uint32 thrashLastHealCastMs = 0;
+    std::string committedActionName;   // action the bot is currently committed to ("" = none)
+    uint32 committedUntilMs = 0;        // WorldTimer ms until which the commitment holds
     BotCheatMask cheatMask = BotCheatMask::none;
     WorldPosition jumpDestination;
     uint32 jumpTime;

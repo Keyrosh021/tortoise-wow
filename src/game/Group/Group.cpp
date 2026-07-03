@@ -2365,6 +2365,11 @@ void Group::RewardGroupAtKill(Unit* pVictim, Player* pPlayerTap)
         bool is_dungeon = PvP ? false : sMapStorage.LookupEntry<MapEntry>(pVictim->GetMapId())->IsDungeon();
         float group_rate = MaNGOS::XP::xp_in_group_rate(count, is_raid);
 
+        // diagnostics: mark the tapper so KilledMonsterCredit can tell group-shared credit
+        // (non-tapper members) apart from the killer's own credit.
+        extern thread_local Player* g_killCreditTapper;
+        g_killCreditTapper = pPlayerTap;
+
         for (GroupReference *itr = GetFirstMember(); itr != nullptr; itr = itr->next())
         {
             Player* pGroupGuy = itr->getSource();
@@ -2387,6 +2392,8 @@ void Group::RewardGroupAtKill(Unit* pVictim, Player* pPlayerTap)
             if (pPlayerTap->IsAtGroupRewardDistance(pVictim))
                 RewardGroupAtKill_helper(pPlayerTap, pVictim, count, PvP, group_rate, sum_level, is_dungeon, not_gray_member_with_max_level, member_with_max_level, xp);
         }
+
+        g_killCreditTapper = nullptr;
     }
 }
 

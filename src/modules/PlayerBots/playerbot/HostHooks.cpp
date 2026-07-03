@@ -88,6 +88,14 @@ void Player::CreatePlayerbotMgr()
 {
     if (!m_playerbotMgr)
         m_playerbotMgr = new PlayerbotMgr(this);
+
+    // Register this real player with the random-bot manager so bots can detect them
+    // (HasPlayerNearby / LOD wake / near-player prioritization all scan
+    // sRandomPlayerbotMgr.GetPlayers()). The matching RandomPlayerbotMgr::OnPlayerLogin
+    // was dead code -- never called anywhere -- so the tracked-players list stayed empty
+    // and NO bot ever saw a real player. This is the one login-time, world-thread,
+    // real-player-only hook, so it's the correct (and low-race) place to wire it.
+    sRandomPlayerbotMgr.OnPlayerLogin(this);
 }
 
 void Player::RemovePlayerbotMgr()

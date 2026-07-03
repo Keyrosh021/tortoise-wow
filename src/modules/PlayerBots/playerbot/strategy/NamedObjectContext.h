@@ -415,7 +415,16 @@ namespace ai
         {
             for (typename std::list<NamedObjectContext<T>*>::iterator i = contexts.begin(); i != contexts.end(); i++)
             {
-                (*i)->Erase(name);
+                // NEVER erase (delete) from a SHARED context. Shared value objects are owned
+                // globally and used CONCURRENTLY by every bot on every map-update thread. A
+                // single bot's ClearExpiredValues()/expiry deciding to delete a shared value
+                // frees its recursive_mutex out from under another thread mid-lock -> that
+                // thread throws std::system_error("Invalid argument") -> std::terminate ->
+                // SIGABRT (the ~7min crash-loop). Mirror Update(), which already skips shared.
+                // Shared values are only reclaimed when the shared context itself is destroyed
+                // (server shutdown, single-threaded).
+                if (!(*i)->IsShared())
+                    (*i)->Erase(name);
             }
         }
 

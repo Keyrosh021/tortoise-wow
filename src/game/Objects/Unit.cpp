@@ -20,6 +20,9 @@
 
 #include "Unit.h"
 #include "Log.h"
+#include <cstdio>     // bot-death diagnostics (logs/bot_deaths.csv)
+#include <ctime>
+#include <mutex>
 #include "Opcodes.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
@@ -1114,6 +1117,75 @@ uint32 Unit::DealDamage(Unit* pVictim, uint32 damage, CleanDamage const* cleanDa
     return damage;
 }
 
+// --- Bot-death diagnostics (read-only observability) -------------------------
+// Logs every playerbot death with killer context to logs/bot_deaths.csv so we can
+// answer "why are bots dying too much?". Gated to bot victims only (one pointer
+// check for the overwhelmingly-common non-bot kill). Thread-safe (Unit::Kill runs
+// on per-map update threads). Columns documented in tools/bot_deaths_report.py.
+namespace {
+void LogBotDeath(Unit* killer, Player* victim, SpellEntry const* spellProto)
+{
+    static std::mutex s_mx;
+    std::lock_guard<std::mutex> lock(s_mx);
+    static FILE* f = nullptr;
+    static bool tried = false;
+    if (!f)
+    {
+        if (tried) return;
+        tried = true;
+        f = fopen("logs/bot_deaths.csv", "a");
+        if (!f) f = fopen("../logs/bot_deaths.csv", "a");
+        if (!f) return;
+    }
+
+    const char* killerType = "unknown";
+    char const* killerName = "?";
+    uint32 killerEntry = 0, killerLevel = 0, killerElite = 0;
+    int32 levelDelta = 0;
+    float dist = 0.0f;
+    if (!killer || killer == victim)
+    {
+        killerType = "self/environment";   // EnvironmentalDamage deals self-damage (drown/fall/lava/fire)
+    }
+    else
+    {
+        dist = victim->GetDistance(killer);
+        killerLevel = killer->GetLevel();
+        levelDelta = (int32)killerLevel - (int32)victim->GetLevel();
+        killerName = killer->GetName();
+        if (Creature* c = killer->ToCreature())
+        {
+            killerType = c->IsWorldBoss() ? "boss" : (c->IsElite() ? "elite" : "creature");
+            killerEntry = c->GetEntry();
+            killerElite = c->IsElite() ? 1 : 0;
+        }
+        else if (Player* p = killer->ToPlayer())
+            killerType = p->GetPlayerbotAI() ? "bot-pvp" : "player-pvp";
+        else
+            killerType = "other";
+    }
+
+    uint32 attackers = (uint32)victim->getAttackers().size();
+    uint32 grp = 0;
+    if (Group* g = victim->GetGroup()) grp = g->GetMembersCount();
+
+    time_t now = time(nullptr);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
+
+    // ts,victim,guid,vlvl,vclass,map,zone,x,y,z,killerType,killerName,kentry,klvl,kelite,lvlDelta,spellId,fleeing,attackers,group,dist
+    fprintf(f, "%s,%s,%u,%u,%u,%u,%u,%.0f,%.0f,%.0f,%s,%s,%u,%u,%u,%d,%u,%u,%u,%u,%.0f\n",
+        ts, victim->GetName(), victim->GetGUIDLow(), victim->GetLevel(), victim->getClass(),
+        victim->GetMapId(), victim->GetZoneId(),
+        victim->GetPositionX(), victim->GetPositionY(), victim->GetPositionZ(),
+        killerType, killerName ? killerName : "?", killerEntry, killerLevel, killerElite, levelDelta,
+        spellProto ? spellProto->Id : 0,
+        victim->HasUnitState(UNIT_STAT_FLEEING) ? 1 : 0,
+        attackers, grp, dist);
+    fflush(f);
+}
+} // namespace
+
 void Unit::Kill(Unit* pVictim, SpellEntry const *spellProto, bool durabilityLoss)
 {
     // Prevent killing unit twice (and giving reward from kill twice)
@@ -1133,6 +1205,10 @@ void Unit::Kill(Unit* pVictim, SpellEntry const *spellProto, bool durabilityLoss
     Creature* pCreatureVictim = pVictim->ToCreature();
     Player* pPlayerVictim = pVictim->ToPlayer();
     Group *pGroupTap = nullptr;
+
+    // Bot-death diagnostics: record playerbot deaths with killer context (read-only).
+    if (pPlayerVictim && pPlayerVictim->GetPlayerbotAI())
+        LogBotDeath(this, pPlayerVictim, spellProto);
 
     // in creature kill case group/player tap stored for pCreatureVictim
     if (pCreatureVictim)
@@ -8251,7 +8327,7 @@ bool Unit::SelectHostileTarget()
 
     // enter in evade mode in other case
     OnLeaveCombat();
-    
+
     if (m_isCreatureLinkingTrigger)
         GetMap()->GetCreatureLinkingHolder()->DoCreatureLinkingEvent(LINKING_EVENT_EVADE, (Creature*)this);
 
@@ -11363,6 +11439,22 @@ void Unit::UpdateSplineMovement(uint32 t_diff)
     }
     if (!MaNGOS::IsValidMapCoord(loc.x, loc.y, loc.z))
         return;
+
+    // A server-moved PLAYERBOT has no game client, hence no gravity: when its movement spline ENDS it
+    // is left sitting at the final path point, which the navmesh returns as poly-height + 0.5f -- i.e.
+    // slightly ABOVE the terrain. A real player's client would immediately settle it onto the ground;
+    // a bot just hovers there until it moves again, and that off-ground Z then breaks its next
+    // pathfind ("tgt=... ->No destination"). So the ROOT of "bots float only when standing still" is
+    // the unsettled spline endpoint. On arrival, settle a grounded bot to the walkable surface exactly
+    // like gravity would (UpdateAllowedPositionZ is the same clamp the core already trusts, and it
+    // respects WMO floors/bridges + water level). Gate on flags so taxi/flying/swimming/transported
+    // bots -- legitimately off the ground -- are untouched.
+    if (arrived && IsPlayer() && ((Player*)this)->GetPlayerbotAI() &&
+        !IsTaxiFlying() && !IsFlying() && !IsInWater() &&
+        !HasUnitMovementFlag(MOVEFLAG_SWIMMING) && !GetTransport())
+    {
+        UpdateAllowedPositionZ(loc.x, loc.y, loc.z);
+    }
 
     if (IsPlayer())
         ((Player*)this)->SetPosition(loc.x, loc.y, loc.z, loc.orientation);

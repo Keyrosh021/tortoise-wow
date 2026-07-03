@@ -651,11 +651,13 @@ uint32 DialogStatusValue::getDialogStatus(Player* bot, int32 questgiver, uint32 
 				if (bot->SatisfyQuestLevel(pQuest, false))
 				{
 					int32 lowLevelDiff = sWorld.getConfig(CONFIG_INT32_QUEST_LOW_LEVEL_HIDE_DIFF);
+					if (lowLevelDiff < 0)
+						lowLevelDiff = 4 + (int32)bot->GetLevel() / 10; // vanilla gray boundary (see DropQuestAction)
 					if (pQuest->IsAutoComplete() || (pQuest->IsRepeatable() && bot->getQuestStatusMap()[itr->second].m_rewarded))
 					{
 						dialogStatusNew = DIALOG_STATUS_REWARD_REP;
 					}
-                    else if (lowLevelDiff < 0 || bot->GetLevel() <= bot->GetQuestLevelForPlayer(pQuest) + uint32(lowLevelDiff) || pQuest->GetRequiredClasses())
+                    else if (bot->GetLevel() <= bot->GetQuestLevelForPlayer(pQuest) + uint32(lowLevelDiff) || pQuest->GetRequiredClasses())
 					{
 						dialogStatusNew = DIALOG_STATUS_AVAILABLE;
 					}

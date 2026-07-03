@@ -24,7 +24,11 @@ bool PullRequestAction::Execute(Event& event)
         return false;
     }
 
-    const float maxPullDistance = sPlayerbotAIConfig.reactDistance * 3;
+    // Solo autonomous bots pull what's NEARBY. reactDistance*3 = 450y let a grinder pull-chase a mob
+    // 70y+ through populated terrain, aggro 2 adds en route, and die to an L8 boar at L14 (watched
+    // Willane). A real solo player pulls from ~spell range; long walk-pulls are a group tactic.
+    const bool soloAutonomous = !ai->HasRealPlayerMaster() && !bot->GetGroup();
+    const float maxPullDistance = soloAutonomous ? 30.0f : sPlayerbotAIConfig.reactDistance * 3;
     const float distanceToPullTarget = target->GetDistance(ai->GetBot());
     if (distanceToPullTarget > maxPullDistance)
     {
@@ -89,6 +93,16 @@ bool PullStartAction::Execute(Event& event)
     PullStrategy* strategy = PullStrategy::Get(ai);
     if (strategy)
     {
+        // ABORT the pull choreography the moment something is already BEATING on us mid-pull (adds
+        // aggroed during the approach). Watched Willane stand in "pull start" for 20+ seconds at
+        // melee range with two mobs on her, not fighting back, and die. When attacked, the pull is
+        // moot -- end it and let the normal combat engine fight.
+        if (!ai->HasRealPlayerMaster() && !bot->getAttackers().empty())
+        {
+            strategy->OnPullEnded();
+            return false;
+        }
+
         Unit* target = strategy->GetTarget();
         if (target)
         {

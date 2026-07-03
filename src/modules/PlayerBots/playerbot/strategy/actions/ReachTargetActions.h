@@ -94,6 +94,28 @@ namespace ai
                     sPlayerbotAIConfig.logEvent(ai, "ReachTargetTrace", std::to_string(target->GetGUIDLow()), out.str());
                 }
 
+                // RELOCATE-TO-UNREACHABLE-TARGET: if the target creature has been unable to PATH
+                // to us (it is in unreachable-evade, m_TargetNotReachableTimer > 3s), holding at
+                // range lets that timer reach 24s -> the creature evades and HEALS TO FULL, then
+                // the bot re-pulls and the loop repeats (the "bot fireballs a mob, it resets to
+                // full, bot OOMs" behavior). Root cause (confirmed via core trace): the bot is
+                // standing where a ground creature cannot reach it -- on elevated terrain/a
+                // structure it can't climb (measured botZ up to ~80y above the creature), or the
+                // bot wandered off. Instead of holding, walk to the creature and get on its ground
+                // (ChaseTo melee) to continue combat -- exactly what a player does. Ranged+hostile
+                // creatures only; melee bots already chase into melee.
+                Creature* reachCreature = target->ToCreature();
+                if (!isFriend && ai->IsRanged(bot) && reachCreature &&
+                    reachCreature->IsEvadeBecauseTargetNotReachable())
+                {
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                        sPlayerbotAIConfig.logEvent(ai, "ReachCloseUnreachable",
+                            std::to_string(target->GetGUIDLow()), "reason=target-cannot-reach");
+                    bot->SetTarget(target);
+                    bot->Attack(target, true);
+                    return ChaseTo(target, 0.0f, bot->GetAngle(target));
+                }
+
                 if (!isFriend && ai->IsRanged(bot) && range > 0.0f && inLos &&
                     !sServerFacade.IsDistanceGreaterThan(distanceToTarget, range + sPlayerbotAIConfig.contactDistance))
                 {
@@ -139,8 +161,33 @@ namespace ai
                     if (!bot->IsNonMeleeSpellCasted(true, false, true))
                     {
                         // Check if the spell for which the reach action is used for can be casted
-                        if (!spellName.empty() && !ai->CanCastSpell(spellName, target, true, nullptr, true, true, true))
+                        SpellCastResult reachCheck = SPELL_CAST_OK;
+                        if (!spellName.empty() && !ai->CanCastSpell(spellName, target, true, nullptr, true, true, true, &reachCheck))
                         {
+                            // DIAG: this early-out is the prime suspect for the watched "caster stands
+                            // idle with a far hostile target and never closes" stall (Eliney). Log WHICH
+                            // SpellCastResult kills the reach chain (always-on, throttled 5s/bot).
+                            {
+                                static std::mutex diagMx;
+                                static std::unordered_map<uint32, uint32> lastDiagMs;
+                                const uint32 nowMs = WorldTimer::getMSTime();
+                                std::lock_guard<std::mutex> lk(diagMx);
+                                uint32& t = lastDiagMs[bot->GetGUIDLow()];
+                                if (!t || nowMs - t >= 5000)
+                                {
+                                    t = nowMs;
+                                    FILE* f = fopen("logs/reach_diag.csv", "a");
+                                    if (!f) f = fopen("../logs/reach_diag.csv", "a");
+                                    if (f)
+                                    {
+                                        fprintf(f, "%s,%s,spell=%s,target=%s,dist=%.0f,result=%u\n",
+                                            sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(),
+                                            spellName.c_str(), target->GetName(),
+                                            sServerFacade.GetDistance2d(bot, target), (uint32)reachCheck);
+                                        fclose(f);
+                                    }
+                                }
+                            }
                             return false;
                         }
 

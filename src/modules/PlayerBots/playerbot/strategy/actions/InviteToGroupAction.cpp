@@ -133,6 +133,81 @@ namespace ai
             return entries;
         }
 
+        // True if `player` has an INCOMPLETE kill-quest objective for creature `entry`.
+        // Travel-state independent (scans the quest log directly), unlike
+        // GetActiveQuestObjectiveKey which only resolves in READY/TRAVEL/WORK. This lets a
+        // bot match a co-located player who needs the same mob even while that player is
+        // idle/cooldown standing at the camp -> raises group COVERAGE at contested spawns.
+        bool PlayerNeedsKillEntry(Player* player, uint32 entry)
+        {
+            if (!player || !entry)
+                return false;
+
+            QuestStatusMap& questStatusMap = player->getQuestStatusMap();
+            for (auto const& [questId, questStatus] : questStatusMap)
+            {
+                if (questStatus.m_status != QUEST_STATUS_INCOMPLETE)
+                    continue;
+
+                Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
+                if (!quest)
+                    continue;
+
+                for (uint32 objective = 0; objective < QUEST_OBJECTIVES_COUNT; ++objective)
+                {
+                    if (quest->ReqCreatureOrGOId[objective] > 0 &&
+                        uint32(quest->ReqCreatureOrGOId[objective]) == entry &&
+                        questStatus.m_creatureOrGOcount[objective] < quest->ReqCreatureOrGOCount[objective])
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        // The kill creature entry of a quest objective this bot is CAMPING right now: an
+        // incomplete kill objective with an ALIVE instance within sight (the bot is parked at the
+        // spawn, typically because the mob is tapped/contested). 0 if the bot isn't at a quest mob.
+        // This is what lets WAITING bots form a same-kill group of up to 5 regardless of their
+        // GrouperType/level cap, so a camp coalesces into groups that each work one mob = ~5x.
+        // Bounded loop (<=8 objectives) + short-circuit keep the grid cost small.
+        uint32 CampingQuestKillEntry(Player* bot)
+        {
+            if (!bot)
+                return 0;
+
+            uint32 checked = 0;
+            QuestStatusMap& questStatusMap = bot->getQuestStatusMap();
+            for (auto const& [questId, questStatus] : questStatusMap)
+            {
+                if (questStatus.m_status != QUEST_STATUS_INCOMPLETE)
+                    continue;
+
+                Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
+                if (!quest)
+                    continue;
+
+                for (uint32 objective = 0; objective < QUEST_OBJECTIVES_COUNT; ++objective)
+                {
+                    if (quest->ReqCreatureOrGOId[objective] <= 0)
+                        continue;
+                    if (questStatus.m_creatureOrGOcount[objective] >= quest->ReqCreatureOrGOCount[objective])
+                        continue;
+
+                    if (++checked > 8)
+                        return 0;
+
+                    uint32 entry = uint32(quest->ReqCreatureOrGOId[objective]);
+                    std::list<Creature*> insts;
+                    bot->GetCreatureListWithEntryInGrid(insts, entry, sPlayerbotAIConfig.sightDistance);
+                    for (Creature* c : insts)
+                        if (c && c->IsAlive())
+                            return entry;
+                }
+            }
+            return 0;
+        }
+
         bool HasVisibleQuestObjectiveTarget(PlayerbotAI* ai, Player* bot)
         {
             if (!ai || !bot || !bot->IsInWorld() || !ai->GetAiObjectContext())
@@ -466,6 +541,9 @@ namespace ai
         }
 
         ActiveQuestObjectiveKey botObjective = GetActiveQuestObjectiveKey(bot);
+        // The kill mob we're camping (quest-log based, works even when idle/cooldown with no
+        // active-objective key) -> used to match co-located bots who need the SAME mob.
+        const uint32 campEntry = CampingQuestKillEntry(bot);
         Player* bestPlayer = nullptr;
         int32 bestScore = std::numeric_limits<int32>::min();
         float bestDistance = std::numeric_limits<float>::max();
@@ -506,9 +584,18 @@ namespace ai
 
             PlayerbotAI* botAi = player->GetPlayerbotAI();
             ActiveQuestObjectiveKey playerObjective = GetActiveQuestObjectiveKey(player);
-            const bool sameQuestObjective = botObjective.Matches(playerObjective);
+            // Match on the strict active-objective key OR (coverage) on the target simply
+            // NEEDING the same kill mob, even if either bot is idle/cooldown at the camp with no
+            // active travel-target key. campEntry covers the waiting-at-a-tapped-mob case (the
+            // inviter has no valid objective key but is standing at a quest spawn it needs).
+            const bool sameQuestObjective = botObjective.Matches(playerObjective) ||
+                (botObjective.IsValid() && botObjective.entry > 0 &&
+                    PlayerNeedsKillEntry(player, uint32(botObjective.entry))) ||
+                (campEntry > 0 && PlayerNeedsKillEntry(player, campEntry));
 
-            if (botObjective.IsValid() && botObjective.entry > 0 && !sameQuestObjective)
+            // Only hard-require a same objective when WE have a concrete one (valid key or a camp
+            // mob); otherwise fall through to the generic proximity grouping below.
+            if (((botObjective.IsValid() && botObjective.entry > 0) || campEntry > 0) && !sameQuestObjective)
                 continue;
 
             if (botAi)
@@ -570,10 +657,25 @@ namespace ai
                     std::map<std::string, std::string> placeholders;
                     placeholders["%player"] = bestPlayer->GetName();
 
-                    if (group && group->IsRaidGroup())
-                        bot->Say(BOT_TEXT2("join_raid", placeholders), (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
-                    else
-                        bot->Say(BOT_TEXT2("join_group", placeholders), (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                    // Quest-directed invite: if the inviter is on a kill quest, name the mob and
+                    // quest so the invite reads like real coordination ("need X for Y") instead of
+                    // a generic "wanna group?". botObjective is the inviter's active kill objective.
+                    bool questDirected = false;
+                    if (botObjective.IsValid() && botObjective.entry > 0)
+                    {
+                        CreatureInfo const* ci = sObjectMgr.GetCreatureTemplate(uint32(botObjective.entry));
+                        Quest const* q = sObjectMgr.GetQuestTemplate(botObjective.questId);
+                        if (ci && q)
+                        {
+                            placeholders["%mob"] = ci->name;
+                            placeholders["%quest"] = q->GetTitle();
+                            questDirected = true;
+                        }
+                    }
+
+                    const char* textKey = (group && group->IsRaidGroup()) ? "join_raid"
+                                        : (questDirected ? "join_group_quest" : "join_group");
+                    bot->Say(BOT_TEXT2(textKey, placeholders), (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
                 }
             }
 
@@ -616,7 +718,16 @@ namespace ai
         GrouperType grouperType = ai->GetGrouperType();
 
         ActiveQuestObjectiveKey botObjective = GetActiveQuestObjectiveKey(bot);
-        if (grouperType == GrouperType::SOLO || (grouperType == GrouperType::MEMBER && !botObjective.IsValid()))
+
+        // A bot parked at a contested quest mob always tries to build a same-kill group of up to 5
+        // (overriding its GrouperType/level cap and the SOLO/MEMBER "don't lead" rule). This runs
+        // ALONGSIDE the central manager: keeping per-bot invites gives the best total throughput
+        // (measured credits_min ~10 vs ~5 when deferring entirely to the manager).
+        const uint32 campEntry = CampingQuestKillEntry(bot);
+        const bool questCamping = campEntry > 0;
+
+        if (!questCamping &&
+            (grouperType == GrouperType::SOLO || (grouperType == GrouperType::MEMBER && !botObjective.IsValid())))
             return false;
 
         Group* group = bot->GetGroup();
@@ -631,10 +742,9 @@ namespace ai
 
             uint32 memberCount = group->GetMembersCount();
 
-            if (botObjective.IsValid() && memberCount >= 5)
-                return false;
-
-            if (memberCount >= uint8(grouperType))
+            // Cap = 5 when camping a quest kill or working a real objective; else GrouperType pref.
+            const uint32 cap = (questCamping || botObjective.IsValid()) ? 5u : uint32(uint8(grouperType));
+            if (memberCount >= cap)
                 return false;
         }
 

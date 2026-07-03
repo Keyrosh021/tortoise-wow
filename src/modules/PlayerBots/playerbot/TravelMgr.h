@@ -408,6 +408,12 @@ namespace ai
 		uint32 extendRetryCount = 0;
 		uint32 moveRetryCount = 0;
 
+		// Hysteresis for travel "conditions" (e.g. "need quest objective::{q,o}"), which
+		// blink false transiently between grid scans. 0 = conditions currently active;
+		// otherwise the time() they first went inactive. We only cool down + re-plan once
+		// they have stayed inactive past a short grace window, killing the flicker churn.
+		time_t m_conditionsInactiveSince = 0;
+
 		TravelDestination* tDestination = nullptr;
 		std::vector<std::string> travelConditions = {};
 		WorldPosition* wPosition = nullptr;
@@ -497,6 +503,10 @@ namespace ai
 		GatherTravelDestination fishMap;
 		std::list<AsyncGuidPosition> fishPoints;
 		std::unordered_map<uint32, int32> areaLevels;
+		// Guards areaLevels: GetAreaLevel() reads+writes this cache and runs on the
+		// async travel workers (and recursively for sub-areas). Concurrent map writes
+		// were a heap-corruption source. Recursive because GetAreaLevel calls itself.
+		std::recursive_mutex areaLevelsMutex;
 
 		std::mutex getDestinationMutex;
 		std::condition_variable getDestinationVar;

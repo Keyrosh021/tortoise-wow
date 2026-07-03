@@ -1029,6 +1029,10 @@ class Creature : public Unit
         // Tested on retail 5.4.0: Creatures evade after 3 seconds (but does not return to home position)
         bool IsEvadeBecauseTargetNotReachable() const { return m_TargetNotReachableTimer > 3000; }
         uint32 m_TargetNotReachableTimer;
+        // How many times this creature has been combat-reset (evaded) without a clean
+        // out-of-combat reset. High + climbing => it keeps getting pulled then evading
+        // (e.g. a rooted ranged bot it can never reach). Exposed for bot diagnostics.
+        uint32 GetCombatResetCount() const { return m_combatResetCount; }
 
         std::shared_ptr<time_t> const& GetLastLeashExtensionTimePtr() const;
         void SetLastLeashExtensionTimePtr(std::shared_ptr<time_t> const& timer);

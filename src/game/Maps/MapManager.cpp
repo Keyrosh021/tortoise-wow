@@ -32,6 +32,7 @@
 #include "ZoneScriptMgr.h"
 #include "Map.h"
 #include "ThreadPool.h"
+#include "Config/Config.h"
 #include "MoveMap.h"
 #include "ChannelBroadcaster.h"
 #include "PerformanceMonitor.h"
@@ -465,7 +466,24 @@ void MapManager::Update(uint32 diff)
         s_continentUpdateActiveDetail[i].store(0);
     }
 
-    if (!m_continentThreads || m_continentThreads->size() < continentsUpdaters.size())
+    // (A) Zero-crash experiment: force ALL continent updates onto ONE worker so bot AI
+    // never runs concurrently across continents -- the dominant pre-existing heap-corruption
+    // race (bots on different continents touching shared singletons: TravelMgr, visibility).
+    // A 1-thread pool runs the continent jobs sequentially; the future/wait/stall logic below
+    // is unchanged. Pair with MapUpdate.ObjectsUpdate.MaxThreads=1 and Instanced.UpdateThreads=0
+    // (instances run inline) to make the whole world update single-threaded. Toggle live via
+    // MapUpdate.Continents.SingleThread, no rebuild. CPU has headroom (~30-50%) and the LOD
+    // frequency split keeps the serialized load affordable.
+    const bool serializeContinents = sConfig.GetIntDefault("MapUpdate.Continents.SingleThread", 0) != 0;
+    if (serializeContinents)
+    {
+        if (!m_continentThreads || m_continentThreads->size() != 1)
+        {
+            m_continentThreads.reset(new ThreadPool(1, "ContinentUpdate"));
+            m_continentThreads->start<>();
+        }
+    }
+    else if (!m_continentThreads || m_continentThreads->size() < continentsUpdaters.size())
     {
         m_continentThreads.reset(new ThreadPool(continentsUpdaters.size(), "ContinentUpdate"));
         m_continentThreads->start<>();

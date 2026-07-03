@@ -314,6 +314,15 @@ bool HammerOfJusticeOnEnemyTrigger::IsActive()
     if (selfHP < sPlayerbotAIConfig.lowHealth && selfMP > 10)
         return true;
 
+    // PROACTIVE: in melee combat with a creature, stun it on cooldown to cut the
+    // damage we take (every ~60s while engaged). The Hammer of Justice action's own
+    // cooldown/range/mana checks gate the actual cast, so this just says "use it
+    // whenever it's up while toe-to-toe with a mob" - paladins were never using HoJ
+    // vs normal PvE mobs (it was gated to interrupts / fleeing players / sub-10% HP).
+    if (target && !target->IsPlayer() && bot->IsInCombat() &&
+        bot->CanReachWithMeleeAutoAttack(target))
+        return true;
+
     return false;
 }
 

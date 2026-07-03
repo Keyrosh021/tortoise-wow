@@ -167,6 +167,47 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
     std::unordered_map<uint32, bool> needForQuestCache;
 
+    // Threat-aware target selection (autonomous bots): precompute the positions of
+    // all visible hostiles once, so for each candidate we can cheaply estimate how
+    // "packed" it is and avoid beelining into the middle of a mob cluster — a top
+    // cause of bot deaths (they pick a target deep in a pack, pull everything, die).
+    std::vector<std::pair<float, float>> hostilePositions;
+    const bool useThreatAwareSelection = autonomousRandomBot && possibleTargetCount > 0 && possibleTargetCount <= 40;
+    if (useThreatAwareSelection)
+    {
+        hostilePositions.reserve(possibleTargetCount);
+        for (const ObjectGuid& hg : targets)
+            if (Unit* hu = ai->GetUnit(hg))
+                hostilePositions.emplace_back(hu->GetPositionX(), hu->GetPositionY());
+    }
+
+    // GRIND-WHILE-WAITING setup: is any CLAIMABLE quest mob available right now? (the candidates
+    // here are already claimable possible-targets, so a needForQuest one == claimable quest mob.)
+    // If a bot is parked at its quest KILL camp (working a QuestObjective) with NONE claimable,
+    // we let it grind a nearby xp mob instead of idling -- it gains xp and cycles shared spawn
+    // points toward its target. A quest mob, the instant one becomes claimable, is in this same
+    // list and outranks the grind pick (quest mobs are preferred), so quest kills keep priority.
+    bool anyClaimableQuestMob = false;
+    for (const ObjectGuid& qg : targets)
+    {
+        Unit* qu = ai->GetUnit(qg);
+        if (!qu) continue;
+        uint32 qe = qu->GetEntry();
+        if (!qe) continue;
+        auto qit = needForQuestCache.find(qe);
+        bool qnfq;
+        if (qit != needForQuestCache.end()) qnfq = qit->second;
+        else { qnfq = AI_VALUE2(bool, "need for quest", std::to_string(qe)); needForQuestCache[qe] = qnfq; }
+        if (qnfq) { anyClaimableQuestMob = true; break; }
+    }
+    // Fires for any autonomous bot that HAS kill objectives, is NOT mid-travel (so it's at/near
+    // a camp, not en route to a quest), and has NO claimable quest mob right now. This catches the
+    // big COOLDOWN-thrashing waiting population (not just the ~30 in WORK status). Still strictly
+    // subordinate: the instant a quest mob is claimable, anyClaimableQuestMob flips true and the
+    // quest mob (preferred in selection) wins; travelling bots keep travelling.
+    const bool grindWhileWaiting =
+        autonomousRandomBot && hasQuestObjectivesPending && !travelTargetTraveling && !anyClaimableQuestMob;
+
     for (std::list<ObjectGuid>::iterator tIter = skipGrindTargetScan ? targets.end() : targets.begin(); tIter != targets.end(); tIter++)
     {
         Unit* unit = ai->GetUnit(*tIter);
@@ -271,7 +312,11 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             continue;
         }
 
-        if (!bot->InBattleGround() && (int)unit->GetLevel() - (int)bot->GetLevel() > 4 && !unit->GetObjectGuid().IsPlayer())
+        // +2 cap for SOLO autonomous grinding (was +4): the death log shows a fat band of deaths to
+        // +3/+4 mobs (48 of 300) -- a solo bot picking oranges loses often. Real players solo-grind
+        // green/yellow (-2..+2) and only take orange with a group; grouped/mastered bots keep +4.
+        const int levelCapAbove = (autonomousRandomBot && !bot->GetGroup()) ? 2 : 4;
+        if (!bot->InBattleGround() && (int)unit->GetLevel() - (int)bot->GetLevel() > levelCapAbove && !unit->GetObjectGuid().IsPlayer())
         {
             ++rejectStats.highLevel;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
@@ -286,6 +331,19 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             ++rejectStats.elite;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (can not fight elites currently).");
+            continue;
+        }
+
+        // Never grind a target the bot cannot plausibly KILL: TWoW's custom Training Dummies are
+        // rank-0 LEVEL-1 creatures with 1.1M-110M HP, so they pass every level/elite filter -- and
+        // nearest-first selection then locks bots onto them FOREVER (watched Rogerolan melee an
+        // Apprentice Training Dummy for 20+ minutes, zero XP). Grinding exists to gain XP; a mob
+        // with >40x the bot's max health is not a grind target, it's a time sink.
+        if (creature && bot->GetMaxHealth() > 0 && creature->GetMaxHealth() > 40u * bot->GetMaxHealth())
+        {
+            ++rejectStats.impossible;
+            if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
+                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (unkillable hp pool).");
             continue;
         }
 
@@ -305,7 +363,12 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             continue;
         }
 
-        if (creature && creature->IsCritter() && urand(0, 10))
+        // Never autonomously grind critters. They give no xp, are passive, and bots
+        // were getting stuck perpetually casting at rabbits/hares that never die. The
+        // old probabilistic gate (urand(0,10)) let ~9% through, which was enough to
+        // trap a bot for minutes. NOTE: only catches creature-type CRITTER; passive
+        // type-0 wildlife (Toad/Squirrel/Sheep/Rat) is handled by the no-xp gate below.
+        if (creature && creature->IsCritter())
         {
             ++rejectStats.critter;
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
@@ -367,20 +430,30 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             }
             else if (creature && !MaNGOS::XP::Gain(bot, creature))
             {
-                if (!autonomousRandomBot && urand(0, 50))
+                // No-xp, non-quest creature: either a passive critter (Toad/Squirrel/
+                // Sheep/Rat/Rabbit) or a gray (too-low-level) mob. Grinding these is
+                // pointless and bots were getting stuck PERPETUALLY casting at passive
+                // wildlife that never dies (measured: ~10k stuck casts/run, bots rooted
+                // for minutes nuking a single toad). A real player never farms rabbits;
+                // reject so the bot moves on / travels to level-appropriate mobs.
+                //
+                // Mostly-reject rather than always: a bot genuinely boxed in by only
+                // gray mobs keeps a heavily-penalized last resort instead of hard-idling.
+                // Previously autonomous bots KEPT these as cheap fallback (the bug).
+                const bool rejectNoXp = autonomousRandomBot ? (urand(0, 6) != 0) : (urand(0, 50) != 0);
+                if (rejectNoXp)
                 {
                     ++rejectStats.noXp;
                     if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
                         if (travelTargetTraveling && !isGrindTravelDest)
-                            ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (not xp and not needed for quest).");
+                            ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (no xp / critter).");
 
                     continue;
                 }
 
-                // For autonomous random bots, keep activity high: prefer better mobs,
-                // but still allow low/zero-xp targets as a fallback instead of idling.
+                // Heavy distance penalty so any real mob is always preferred.
                 ++rejectStats.noXp;
-                newdistance += autonomousRandomBot ? 6.0f : 12.0f;
+                newdistance += autonomousRandomBot ? 30.0f : 12.0f;
             }
             else if (urand(0, 100) < 75)
             {
@@ -396,6 +469,29 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             // travel target. Favor spreading out by penalizing short-hop fallback grinding.
             if (autonomousRandomBot && !travelTargetTraveling && newdistance < 12.0f)
                 newdistance += (12.0f - newdistance) * 2.5f;
+        }
+
+        // Pack/adds penalty: prefer isolated mobs over ones surrounded by other
+        // hostiles, so the bot peels mobs off the edge of a cluster one at a time
+        // instead of pulling the whole pack and dying. Soft (distance) penalty, and
+        // scaled down when the bot is hurt (be more cautious at low HP). A genuinely
+        // needed quest mob in a pack is still chosen if nothing safer exists, since
+        // fallbackResult guarantees the bot never idles for lack of a target.
+        if (useThreatAwareSelection)
+        {
+            const float packRadius = 10.0f;
+            const float ux = unit->GetPositionX(), uy = unit->GetPositionY();
+            int nearbyHostiles = -1; // discount the candidate itself (it is in the list)
+            for (const auto& hp : hostilePositions)
+            {
+                const float dx = hp.first - ux, dy = hp.second - uy;
+                if (dx * dx + dy * dy <= packRadius * packRadius && ++nearbyHostiles >= 6)
+                    break;
+            }
+            const uint32 healthPct = AI_VALUE2(uint8, "health", "self target");
+            const int safeAdds = healthPct >= 80 ? 2 : (healthPct >= 50 ? 1 : 0);
+            if (nearbyHostiles > safeAdds)
+                newdistance += (nearbyHostiles - safeAdds) * 18.0f;
         }
 
         int targetingPlayerCount = GetTargetingPlayerCount(unit);

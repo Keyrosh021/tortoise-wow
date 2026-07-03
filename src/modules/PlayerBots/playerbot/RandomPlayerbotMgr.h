@@ -7,6 +7,7 @@
 #include "playerbot/PlayerbotAIConfig.h"
 #include "WorldPosition.h"
 #include <atomic>
+#include <mutex>
 #include <map>
 #include <list>
 #include <thread>
@@ -123,7 +124,26 @@ public:
         void OnPlayerLoginError(uint32 bot);
         Player* GetRandomPlayer();
         PlayerBotMap& GetPlayers() { return players; };
+        // Thread-safe snapshot of the players map. The map is mutated on the main thread
+        // (OnPlayerLogin/Logout/MovePlayerBot) while bot AI on parallel map-update worker
+        // threads iterates it (e.g. HasPlayerRelation) -> a concurrent erase frees a Player*
+        // mid-iteration -> SIGSEGV in Player::GetSocial(). The map is tiny (real players +
+        // rare transfers), so copying it under the lock is cheap. Readers on worker threads
+        // MUST use this, not the raw GetPlayers() reference. Writers lock playersMutex too.
+        PlayerBotMap GetPlayersCopy() { std::lock_guard<std::mutex> lock(playersMutex); return players; }
+        std::mutex& GetPlayersMutex() { return playersMutex; }
         Player* GetPlayer(uint32 playerGuid);
+        // Live census: for each REAL player online, tally what the bots within render
+        // distance are doing (fighting/moving/idle/dead/...) -> logs/nearby_census.csv.
+        // Read it with tools/nearby_census.py. Called on a ~3s timer from UpdateAIInternal.
+        void LogNearbyCensus();
+        // Fleet-wide per-bot diagnostics (every ~60s): one aggregate row to
+        // logs/bot_fleet.csv + a per-bot detail row to logs/bot_diag.csv, so we can
+        // study WHY bots are stuck (no goal vs travel-not-moving vs cooldown/expired)
+        // and correlate with deaths. Main-thread, race-tolerant reads only.
+        void LogBotDiagSample();
+        // PROOF: top quest mobs idle bots starve on + map-wide alive count + bot clustering.
+        void LogStuckMobReport();
         void PrintStats(uint32 requesterGuid);
         double GetBuyMultiplier(Player* bot);
         double GetSellMultiplier(Player* bot);
@@ -257,6 +277,7 @@ public:
         static uint64 GetWatchdogSteadyMs();
 
         PlayerBotMap players;
+        mutable std::mutex playersMutex;
         int processTicks;
         size_t processBotCursor = 0;
         size_t loginBotCursor = 0;
@@ -271,6 +292,9 @@ public:
         BarGoLink* loginProgressBar;
         std::list<uint32> currentBots;
         std::list<uint32> arenaTeamMembers;
+        uint32 m_nextCensusMs = 0;   // throttle LogNearbyCensus to ~3s
+        uint32 m_nextDiagMs = 0;     // throttle LogBotDiagSample to ~60s
+        uint32 m_nextStuckMs = 0;    // throttle LogStuckMobReport to ~5min (heavy)
         uint32 bgBotsCount;
         uint32 playersLevel = 0;
         uint32 botCount = 0;

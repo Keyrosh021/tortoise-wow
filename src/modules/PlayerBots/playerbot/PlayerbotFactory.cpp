@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/PlayerbotFactory.h"
 #include "playerbot/PerformanceMonitor.h"
+#include <mutex>
 
 #include "Database/SQLStorages.h"
 #include "Objects/ItemPrototype.h"
@@ -11,6 +12,7 @@
 #include "SharedDefines.h"
 #include "RandomItemMgr.h"
 #include "RandomPlayerbotFactory.h"
+#include "playerbot/BotLearningMgr.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/AiFactory.h"
 #include "Guild/GuildMgr.h"
@@ -2533,6 +2535,16 @@ void PlayerbotFactory::InitTalentsTree(bool incremental)
         uint32 p2 = p1 + sPlayerbotAIConfig.specProbability[cls][1];
 
         specNo = (point < p1 ? 0 : (point < p2 ? 1 : 2));
+
+        // LEARNED SPEC BIAS: the learning loop aggregates fight reward per class+spec from the
+        // fleet's own combat samples (BotLearningMgr, recomputed ~5 min). When it knows a best
+        // spec for this class, take it 60% of the time; the other 40% keeps the config roll so
+        // every spec continues generating comparison data (explore/exploit). This is the
+        // "theorycraft specs from simulated data" loop: each run refines which builds win.
+        const int learnedSpec = sBotLearningMgr.GetLearnedBestSpec(cls);
+        if (learnedSpec >= 0 && urand(0, 99) < 60)
+            specNo = (uint32)learnedSpec;
+
         sRandomPlayerbotMgr.SetValue(bot, "specNo", specNo + 1);
     }
 
@@ -4284,11 +4296,107 @@ void PlayerbotFactory::SetRandomSkill(uint16 id)
         bot->SetSkill(id, value, maxValue);
 }
 
+// Per-class cache of class-trainer spells. The expensive part of learning a bot's kit is
+// scanning all ~50k creatures to find that class's trainers. The trainer roster never
+// changes at runtime, so scan ONCE per class and cache the resulting TrainerSpell* list
+// (pointers into sObjectMgr storage are stable for the server lifetime). With this, the
+// per-bot catch-up below is just a few hundred GREEN-checks instead of a 50k creature scan,
+// which makes it cheap enough to run for every online bot (see ProcessBot catch-up).
+namespace
+{
+    std::mutex s_classTrainerSpellsMutex;
+    std::map<uint8, std::vector<TrainerSpell const*>> s_classTrainerSpells;
+
+    const std::vector<TrainerSpell const*>& GetClassTrainerSpells(uint8 cls)
+    {
+        std::lock_guard<std::mutex> guard(s_classTrainerSpellsMutex);
+        auto it = s_classTrainerSpells.find(cls);
+        if (it != s_classTrainerSpells.end())
+            return it->second;
+
+        std::vector<TrainerSpell const*>& list = s_classTrainerSpells[cls];
+        for (uint32 id = 0; id < sCreatureStorage.GetMaxEntry(); ++id)
+        {
+            CreatureInfo const* co = sCreatureStorage.LookupEntry<CreatureInfo>(id);
+            if (!co || co->TrainerType != TRAINER_TYPE_CLASS || co->TrainerClass != cls)
+                continue;
+
+            uint32 trainerId = co->TrainerTemplateId ? co->TrainerTemplateId : co->Entry;
+            TrainerSpellData const* trainerSpells = sObjectMgr.GetNpcTrainerTemplateSpells(trainerId);
+            if (!trainerSpells)
+                trainerSpells = sObjectMgr.GetNpcTrainerSpells(trainerId);
+            if (!trainerSpells)
+                continue;
+
+            for (TrainerSpellMap::const_iterator itr = trainerSpells->spellList.begin(); itr != trainerSpells->spellList.end(); ++itr)
+            {
+                TrainerSpell const* tSpell = &itr->second;
+                if (tSpell)
+                    list.push_back(tSpell);
+            }
+        }
+        return list;
+    }
+}
+
+void PlayerbotFactory::LearnClassTrainerSpells()
+{
+    // Learn every GREEN (level-appropriate, not yet known) class-trainer spell = the full kit
+    // at max available rank. Uses the cached per-class trainer roster (see GetClassTrainerSpells)
+    // so this is cheap to run per bot at randomize, login AND the online catch-up sweep.
+    const std::vector<TrainerSpell const*>& classSpells = GetClassTrainerSpells(bot->getClass());
+    for (TrainerSpell const* tSpell : classSpells)
+    {
+        uint32 reqLevel = tSpell->isProvidedReqLevel ? tSpell->reqLevel : tSpell->reqLevel;
+        if (bot->GetTrainerSpellState(tSpell, reqLevel) != TRAINER_SPELL_GREEN)
+            continue;
+
+        SpellEntry const* proto = sServerFacade.LookupSpellInfo(tSpell->spell);
+        if (!proto)
+            continue;
+
+        bool learned = false;
+        for (int j = 0; j < 3; ++j)
+        {
+            if (proto->Effect[j] == SPELL_EFFECT_LEARN_SPELL)
+            {
+                bot->learnSpell(proto->EffectTriggerSpell[j], false);
+                learned = true;
+            }
+        }
+        if (!learned && tSpell->learnedSpell)
+            bot->learnSpell(tSpell->learnedSpell, false);
+        else if (!learned)
+            bot->learnSpell(tSpell->spell, false);
+    }
+
+    // Some core class abilities are QUEST-learned (not sold by trainers) so the loop
+    // above can't grant them. Druid FORMS are the big one: Bear Form is a level-10 quest
+    // in vanilla/Turtle, so bots never got it -> druids had NO survival tool and were the
+    // worst class. Grant the forms (and other quest staples) by level.
+    if (bot->getClass() == CLASS_DRUID)
+    {
+        auto grant = [this](uint32 spell, uint32 lvl)
+        { if (bot->GetLevel() >= lvl && !bot->HasSpell(spell)) bot->learnSpell(spell, false); };
+        grant(5487, 10);   // Bear Form
+        grant(1066, 16);   // Aquatic Form
+        grant(768, 20);    // Cat Form
+        grant(783, 30);    // Travel Form
+        grant(9634, 40);   // Dire Bear Form
+    }
+}
+
 void PlayerbotFactory::InitAvailableSpells()
 {
     auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "PlayerbotFactory_Spells1");
     bot->learnDefaultSpells();
     bot->learnClassLevelSpells(true);
+
+    // learnDefaultSpells()/learnClassLevelSpells() are STUBS in this fork, so without
+    // this bots only ever got a handful of hardcoded spells + LOW ranks. Learn the full
+    // class-trainer spellbook (all ranks <= level). Also called on bot LOGIN so existing
+    // bots that leveled before AutoLearn catch up their whole kit.
+    LearnClassTrainerSpells();
 
 #ifndef MANGOSBOT_TWO
     if (bot->getClass() == CLASS_PALADIN)

@@ -129,5 +129,9 @@ namespace ai
     public:
 		bool testMode;
         bool initMode = true;
+        // Learned-policy state cached once per DoNextAction tick (so the per-action
+        // policy lookup in MultiplyAndPush stays off the hot path): 0 = <=1 attacker,
+        // 1 = outnumbered (2+).
+        uint8 policyAttackerBucket = 0;
     };
 }

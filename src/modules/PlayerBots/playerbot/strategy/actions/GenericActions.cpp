@@ -6,6 +6,67 @@
 
 using namespace ai;
 
+bool UseEscapeAbilityAction::Execute(Event& event)
+{
+    Unit* enemy = AI_VALUE(Unit*, "current target");
+
+    // Ordered best->fallback per class. Enemy-targeted CC uses `enemy`; self/AoE/
+    // mobility casts use `bot`. CastSpell returns false if unknown / on cooldown /
+    // not castable, so we try the next; returning false overall lets plain flee run.
+    switch (bot->getClass())
+    {
+        case CLASS_MAGE:
+            if (ai->CastSpell("frost nova", bot)) return true;                 // root attackers in melee
+            if (ai->CastSpell("blink", bot)) return true;                      // instant gap
+            if (ai->CastSpell("ice block", bot)) return true;                  // last-ditch immunity
+            break;
+        case CLASS_PALADIN:
+            if (enemy && ai->CastSpell("hammer of justice", enemy)) return true; // stun then run
+            if (ai->CastSpell("blessing of freedom", bot)) return true;        // snare immunity to run
+            if (ai->CastSpell("divine shield", bot)) return true;              // bubble and run
+            break;
+        case CLASS_WARRIOR:
+            if (ai->CastSpell("intimidating shout", bot)) return true;         // fear nearby attackers
+            if (ai->CastSpell("piercing howl", bot)) return true;              // AoE slow
+            if (enemy && ai->CastSpell("hamstring", enemy)) return true;       // slow the target
+            break;
+        case CLASS_ROGUE:
+            if (ai->CastSpell("vanish", bot)) return true;                     // drop combat entirely
+            if (ai->CastSpell("sprint", bot)) return true;                     // speed away
+            if (enemy && ai->CastSpell("blind", enemy)) return true;           // blind the attacker
+            break;
+        case CLASS_HUNTER:
+            if (enemy && ai->CastSpell("wing clip", enemy)) return true;       // slow (melee range)
+            if (enemy && ai->CastSpell("concussive shot", enemy)) return true; // slow at range
+            if (ai->CastSpell("feign death", bot)) return true;                // drop combat
+            break;
+        case CLASS_DRUID:
+            if (enemy && ai->CastSpell("entangling roots", enemy)) return true;// root then run
+            if (ai->CastSpell("dash", bot)) return true;                       // cat-form sprint
+            if (ai->CastSpell("travel form", bot)) return true;                // fast travel form
+            break;
+        case CLASS_WARLOCK:
+            if (enemy && ai->CastSpell("fear", enemy)) return true;            // fear the target
+            if (ai->CastSpell("howl of terror", bot)) return true;             // AoE fear
+            if (enemy && ai->CastSpell("curse of exhaustion", enemy)) return true; // slow
+            break;
+        case CLASS_PRIEST:
+            if (ai->CastSpell("psychic scream", bot)) return true;             // AoE fear
+            if (ai->CastSpell("power word: shield", bot)) return true;         // shield then run
+            if (ai->CastSpell("fade", bot)) return true;                       // shed threat
+            break;
+        case CLASS_SHAMAN:
+            if (enemy && ai->CastSpell("frost shock", enemy)) return true;     // slow the target
+            if (ai->CastSpell("earthbind totem", bot)) return true;            // AoE slow
+            if (ai->CastSpell("ghost wolf", bot)) return true;                 // speed away
+            break;
+        default:
+            break;
+    }
+    return false;
+}
+
+
 bool MeleeAction::isUseful()
 {
     // do not allow if can't attack from vehicle

@@ -548,7 +548,14 @@ bool ChooseRpgTargetAction::isUseful()
 
     GuidPosition guidP = AI_VALUE(GuidPosition, "rpg target");
 
-    if (guidP && guidP.distance(bot) < sPlayerbotAIConfig.reactDistance * 2)
+    // COMMITMENT: if we already have an rpg target, do NOT re-roll a brand-new
+    // random one every tick while still travelling to it. The old gate only
+    // stopped re-rolling once basically on top of the target (< reactDistance*2),
+    // so a bot walking to an NPC kept picking a different NPC/object each tick -
+    // the "run into building, run out, run to another NPC, reverse" confusion.
+    // MoveToRpgTargetAction clears the rpg target when it becomes invalid /
+    // unreachable / arrived-and-done, and only THEN do we choose a new one.
+    if (guidP)
         return false;
 
     if (AI_VALUE(bool, "travel target traveling"))

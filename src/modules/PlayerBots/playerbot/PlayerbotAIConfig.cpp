@@ -542,6 +542,10 @@ bool PlayerbotAIConfig::Initialize()
     playerbotsXPrate = config.GetFloatDefault("AiPlayerbot.XPRate", 1.0f);
     disableBotOptimizations = config.GetBoolDefault("AiPlayerbot.DisableBotOptimizations", false);
     disableActivityPriorities = config.GetBoolDefault("AiPlayerbot.DisableActivityPriorities", false);
+    lodColdUpdateMs = (uint32)config.GetIntDefault("AiPlayerbot.LODColdUpdateMs", 15000);
+    lodColdRange = config.GetFloatDefault("AiPlayerbot.LODColdRange", 250.0f);
+    supervisorMode = config.GetBoolDefault("AiPlayerbot.SupervisorMode", false);
+    supervisorMode = config.GetBoolDefault("AiPlayerbot.SupervisorMode", false);
     forceActiveWhenNearPlayer = config.GetBoolDefault("AiPlayerbot.ForceActiveWhenNearPlayer", false);
     limitCombatActivity = config.GetBoolDefault("AiPlayerbot.LimitCombatActivity", false);
     guildOrderAlwaysActive = config.GetBoolDefault("AiPlayerbot.GuildOrderAlwaysActive", true);
@@ -577,6 +581,8 @@ bool PlayerbotAIConfig::Initialize()
     inviteChat = config.GetBoolDefault("AiPlayerbot.InviteChat", true);
     botsSilent = config.GetBoolDefault("AiPlayerbot.BotsSilent", false);
     enableActionLog = config.GetBoolDefault("AiPlayerbot.EnableActionLog", false);
+    learnedPolicyEnabled = config.GetBoolDefault("AiPlayerbot.LearnedPolicyEnabled", true);
+    learnedPolicyEnabled = config.GetBoolDefault("AiPlayerbot.LearnedPolicyEnabled", true);
     enableOffSpecStrategies = config.GetBoolDefault("AiPlayerbot.EnableOffSpecStrategies", true);
     useWanderAsDefaultFollowStrategy = config.GetBoolDefault("AiPlayerbot.UseWanderAsDefaultFollowStrategy", true);
     defaultFormation = config.GetStringDefault("AiPlayerbot.DefaultFormation", "near");
@@ -1158,6 +1164,39 @@ void PlayerbotAIConfig::log(std::string fileName, const char* str, ...)
 
 bool PlayerbotAIConfig::shouldLogBotEvent(const std::string& eventName) const
 {
+    // Whitelist: only emit the events we actively use right now. The large legacy set
+    // of diagnostic/force-path traces (from already-solved issues) is suppressed to keep
+    // bot_events.csv small and focused. Add a name here when a new investigation needs it.
+    // The excludedBotEvents config blacklist still applies on top, so an operator can
+    // additionally suppress a whitelisted event.
+    static const char* const kept[] = {
+        "BotStatsSnapshot",     // per-bot metrics consumed by tools/bot_scorecard.py
+        "HostileCastDiag",      // current combat/cast investigation
+        "SpellCastFailedTrace", // real spell-cast failures
+        // Active APM/anti-idle investigation (2026-07): prove each fix actually fires.
+        "TravelFrozenAbandoned",   // travel freeze-breaker fired
+        "PostReviveSafetyHop",     // post-revive death-loop breaker fired
+        "FleeStraightLineEscape",  // flee straight-line fallback fired
+        "MovementPathRejected",    // a move path was rejected (why a bot can't travel)
+        "RpgTargetPathRejectedDrop",
+        "TravelStrandedRescue",    // unpathable-position unstick (travel context)
+        "FleeStrandedRescue",      // unpathable-position unstick (combat-flee context)
+        "LootOpenGivenUp",         // bounded loot-retry gave up on a corpse (dispatch-gate mismatch guard)
+        "LootOpenError",           // core refused CMSG_LOOT (SendLootError); err= codes from LootError enum
+    };
+
+    bool whitelisted = false;
+    for (const char* k : kept)
+    {
+        if (eventName == k)
+        {
+            whitelisted = true;
+            break;
+        }
+    }
+    if (!whitelisted)
+        return false;
+
     return std::find(excludedBotEvents.begin(), excludedBotEvents.end(), eventName) == excludedBotEvents.end();
 }
 

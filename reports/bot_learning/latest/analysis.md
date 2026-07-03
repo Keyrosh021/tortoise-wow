@@ -1,0 +1,195 @@
+# Bot Learning Run Report
+
+- events: `logs/bot_events.csv`
+- perf: `logs/server_perf.csv`
+- bot event rows: 54438
+- bots observed: 994
+- window: 2026-06-21T01:05:58+00:00 to 2026-06-21T01:10:23+00:00
+
+## Server Perf
+- rows: 8
+- uptime_start: 55.00
+- uptime_end: 265.00
+- tick_avg_ms: 38.90
+- tick_max_ms: 101.73
+- map_avg_ms: 37.96
+- map_max_ms: 100.98
+- playerbots_avg_ms: 2.93
+- playerbots_max_ms: 3099.00
+- corpses_delta: 277.00
+- travel_quest_requests: 6141.00
+- travel_quest_request_ms: 672.00
+- bot_pressure_deferred_path: 0.00
+- bot_pressure_deferred_quest: 57327.00
+
+## Loud Events
+- VisibleBotActivityTrace: 8287
+- RequestQuestTravelTargetAction: 6942
+- QuestFetchPlan: 6941
+- QuestRescueFetchPlan: 2353
+- IdleWorkFastLane: 2303
+- BotStatsSnapshot: 2230
+- SpellCastDeferredInProgress: 2184
+- QuestTravelSelected: 2056
+- QuestAsyncResult: 2043
+- BotHealthLow: 1623
+- DeadFastLaneRecovery: 1389
+- DeadCorpseReclaimForced: 1350
+- StaleTargetRecover: 1305
+- AttackForceChase: 920
+- LootOpenDispatch: 735
+- TargetFastLaneAttack: 716
+- TravelTargetSelectFailed: 551
+- TravelEmptyFallback: 550
+- QuestObjectiveVisibleAttack: 545
+- RespawnAccel: 544
+- RpgTargetPathRejectedDrop: 484
+- DeadCorpseMetricStall: 399
+- MovementPathRejected: 383
+- DeadRecoveryRouteDecision: 379
+- HumanLikePause: 344
+
+## Worst Bot Pain
+- Teriana: pain=155 progress=0.0 net=-155.0 lvl=6->6 xp+=0 money+=0 apm~=19.2 events=67 maxNoProgress=0s
+- Cega: pain=150 progress=0.0 net=-150.0 lvl=6->6 xp+=0 money+=0 apm~=28.6 events=110 maxNoProgress=0s
+- Carreo: pain=128 progress=0.0 net=-128.0 lvl=12->12 xp+=0 money+=0 apm~=21.1 events=80 maxNoProgress=1s
+- Pencank: pain=126 progress=0.0 net=-126.0 lvl=7->7 xp+=0 money+=0 apm~=18.3 events=81 maxNoProgress=0s
+- Domenel: pain=124 progress=0.0 net=-124.0 lvl=2->2 xp+=0 money+=0 apm~=19.1 events=80 maxNoProgress=0s
+- Uhku: pain=120 progress=0.0 net=-120.0 lvl=9->9 xp+=0 money+=0 apm~=20.1 events=79 maxNoProgress=0s
+- Sando: pain=119 progress=0.0 net=-119.0 lvl=8->8 xp+=0 money+=0 apm~=51.2 events=193 maxNoProgress=0s
+- Tazis: pain=112 progress=0.0 net=-112.0 lvl=9->9 xp+=0 money+=0 apm~=44.4 events=168 maxNoProgress=0s
+- Sikro: pain=106 progress=0.0 net=-106.0 lvl=8->8 xp+=0 money+=0 apm~=49.3 events=212 maxNoProgress=0s
+- Melanie: pain=106 progress=0.0 net=-106.0 lvl=10->10 xp+=0 money+=0 apm~=18.3 events=70 maxNoProgress=0s
+- Krongur: pain=100 progress=0.0 net=-100.0 lvl=9->9 xp+=0 money+=0 apm~=10.9 events=43 maxNoProgress=0s
+- Suatumu: pain=94 progress=0.0 net=-94.0 lvl=8->8 xp+=0 money+=5 apm~=22.4 events=92 maxNoProgress=0s
+- Kruthulugg: pain=93 progress=0.0 net=-93.0 lvl=8->8 xp+=0 money+=0 apm~=42.4 events=154 maxNoProgress=0s
+- Horrom: pain=92 progress=3.0 net=-89.0 lvl=8->8 xp+=0 money+=0 apm~=16.0 events=69 maxNoProgress=0s
+- Knithongeso: pain=92 progress=0.0 net=-92.0 lvl=9->9 xp+=0 money+=0 apm~=16.0 events=62 maxNoProgress=0s
+- Soorow: pain=88 progress=0.0 net=-88.0 lvl=8->8 xp+=0 money+=0 apm~=16.3 events=61 maxNoProgress=0s
+- Roxanne: pain=84 progress=0.0 net=-84.0 lvl=10->10 xp+=0 money+=0 apm~=14.5 events=60 maxNoProgress=0s
+- Ibalas: pain=80 progress=0.0 net=-80.0 lvl=9->9 xp+=0 money+=0 apm~=14.2 events=57 maxNoProgress=0s
+- Gingor: pain=80 progress=0.0 net=-80.0 lvl=7->7 xp+=0 money+=0 apm~=49.9 events=188 maxNoProgress=0s
+- Feriela: pain=80 progress=0.0 net=-80.0 lvl=11->11 xp+=0 money+=0 apm~=17.3 events=64 maxNoProgress=0s
+- Denria: pain=78 progress=0.0 net=-78.0 lvl=9->9 xp+=0 money+=0 apm~=13.9 events=56 maxNoProgress=0s
+- Koth: pain=74 progress=0.0 net=-74.0 lvl=9->9 xp+=0 money+=0 apm~=14.7 events=55 maxNoProgress=0s
+- Yhvezil: pain=74 progress=0.0 net=-74.0 lvl=9->9 xp+=0 money+=0 apm~=15.7 events=59 maxNoProgress=0s
+- Iristina: pain=74 progress=0.0 net=-74.0 lvl=9->9 xp+=0 money+=0 apm~=15.7 events=59 maxNoProgress=0s
+- Gernis: pain=74 progress=0.0 net=-74.0 lvl=9->9 xp+=0 money+=0 apm~=14.9 events=54 maxNoProgress=0s
+
+## Best Bot Progress
+- Gontsi: progress=102.0 pain=5 lvl=8->9 xp+=0 money+=0 apm~=41.1
+- Drustuho: progress=100.0 pain=12 lvl=8->9 xp+=0 money+=-308 apm~=32.6
+- Yldreas: progress=100.0 pain=8 lvl=6->7 xp+=0 money+=0 apm~=10.9
+- Amastino: progress=100.0 pain=2 lvl=8->9 xp+=0 money+=0 apm~=39.1
+- Drakno: progress=51.0 pain=0 lvl=8->8 xp+=0 money+=0 apm~=35.8
+- Theranie: progress=33.0 pain=4 lvl=9->9 xp+=0 money+=0 apm~=56.6
+- Thini: progress=27.0 pain=44 lvl=9->9 xp+=0 money+=0 apm~=25.5
+- Sitia: progress=25.3 pain=8 lvl=10->10 xp+=27 money+=0 apm~=20.5
+- Veriane: progress=25.0 pain=16 lvl=2->2 xp+=0 money+=0 apm~=43.2
+- Hiara: progress=25.0 pain=4 lvl=9->9 xp+=0 money+=0 apm~=136.7
+- Soohno: progress=23.0 pain=28 lvl=7->7 xp+=98 money+=0 apm~=31.8
+- Krorrorm: progress=22.6 pain=8 lvl=7->7 xp+=450 money+=50 apm~=20.5
+- Darcelia: progress=21.5 pain=0 lvl=9->9 xp+=630 money+=175 apm~=30.5
+- Liwheissan: progress=21.0 pain=30 lvl=9->9 xp+=0 money+=0 apm~=21.7
+- Taralt: progress=21.0 pain=0 lvl=2->2 xp+=0 money+=0 apm~=17.1
+- Deleona: progress=20.0 pain=12 lvl=10->10 xp+=0 money+=20 apm~=28.5
+- Susana: progress=20.0 pain=2 lvl=8->8 xp+=0 money+=0 apm~=58.6
+- Tres: progress=18.0 pain=24 lvl=7->7 xp+=0 money+=0 apm~=25.5
+- Shemah: progress=18.0 pain=16 lvl=7->7 xp+=0 money+=0 apm~=27.6
+- Issanne: progress=17.6 pain=28 lvl=9->9 xp+=160 money+=8 apm~=27.8
+
+## Bot Stat Snapshots
+- Melitas: samples=2 moving=50.0% dead=100.0% low_apm=100.0% maxNoProgress=111s quests=4 complete=0 rewardReady=0
+- Sandelio: samples=3 moving=0.0% dead=66.7% low_apm=100.0% maxNoProgress=95s quests=1 complete=1 rewardReady=1
+- Botakni: samples=3 moving=33.3% dead=66.7% low_apm=100.0% maxNoProgress=90s quests=4 complete=0 rewardReady=0
+- Bleenna: samples=3 moving=0.0% dead=66.7% low_apm=100.0% maxNoProgress=85s quests=2 complete=0 rewardReady=0
+- Norenia: samples=3 moving=0.0% dead=100.0% low_apm=100.0% maxNoProgress=79s quests=4 complete=0 rewardReady=0
+- Elio: samples=3 moving=0.0% dead=66.7% low_apm=100.0% maxNoProgress=63s quests=4 complete=2 rewardReady=2
+- Isu: samples=1 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=58s quests=3 complete=1 rewardReady=1
+- Duamudrica: samples=3 moving=33.3% dead=0.0% low_apm=100.0% maxNoProgress=57s quests=9 complete=2 rewardReady=2
+- Mericharo: samples=3 moving=0.0% dead=66.7% low_apm=100.0% maxNoProgress=57s quests=1 complete=0 rewardReady=0
+- Feldreas: samples=3 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=34s quests=3 complete=0 rewardReady=0
+- Elaim: samples=3 moving=0.0% dead=100.0% low_apm=100.0% maxNoProgress=20s quests=0 complete=0 rewardReady=0
+- Tigrarmeg: samples=1 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=19s quests=3 complete=0 rewardReady=0
+- Alvino: samples=3 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=12s quests=2 complete=1 rewardReady=1
+- Camdurm: samples=4 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=6s quests=1 complete=0 rewardReady=0
+- Lenelle: samples=3 moving=33.3% dead=100.0% low_apm=100.0% maxNoProgress=6s quests=3 complete=0 rewardReady=0
+- Twallann: samples=1 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=5s quests=9 complete=2 rewardReady=2
+- Oihaacu: samples=3 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=4s quests=3 complete=0 rewardReady=0
+- Dethaan: samples=2 moving=50.0% dead=0.0% low_apm=100.0% maxNoProgress=1s quests=3 complete=0 rewardReady=0
+- Jessu: samples=1 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=0s quests=4 complete=0 rewardReady=0
+- Gugderm: samples=2 moving=0.0% dead=0.0% low_apm=100.0% maxNoProgress=0s quests=3 complete=1 rewardReady=1
+
+## Learned Candidates
+- [medium] path_blackspot map=1 `-9175,-4350` count=15 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [medium] path_blackspot map=1 `-9675,-4125` count=13 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [medium] path_blackspot map=1 `-8975,-3275` count=13 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [medium] path_blackspot map=0 `625,-9800` count=10 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [medium] path_blackspot map=1 `-9225,-4525` count=10 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [medium] path_blackspot map=0 `-75,-5525` count=8 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [medium] path_blackspot map=0 `-425,-6075` count=8 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=0 `450,-5700` count=7 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-9500,-4350` count=7 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-9675,-4100` count=7 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-15175,6125` count=6 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-9375,-4475` count=5 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=0 `-25,-5675` count=5 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-14725,6250` count=5 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-9125,-3875` count=4 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-12675,-6525` count=4 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=0 `-700,2475` count=4 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-9225,-4175` count=4 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=0 `-300,-5900` count=4 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=0 `875,-5175` count=4 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-9250,-3875` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=0 `-1500,2375` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-12750,-6675` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-6125,-3775` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=0 `175,-5675` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=0 `-425,-6150` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-12600,-6750` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-9675,-4075` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-15025,5925` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [low] path_blackspot map=1 `-9050,-3900` count=3 reason=steep-local-slope -> Apply learned destination penalty or choose alternate point for this objective/area.
+- [medium] destination_blackspot map=1 `-675,-4500` count=11 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [medium] destination_blackspot map=1 `-875,-4475` count=9 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [medium] destination_blackspot map=1 `-400,-4000` count=8 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [medium] destination_blackspot map=1 `-400,-4025` count=8 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [medium] destination_blackspot map=0 `-6075,425` count=8 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `-5525,100` count=7 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `350,-4700` count=6 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-675,-4150` count=6 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-2875,-1000` count=5 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-450,-4025` count=5 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `9800,1500` count=5 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-650,-4475` count=4 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `9600,1350` count=4 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `2500,700` count=4 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-500,-4375` count=4 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `-5900,300` count=4 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `-9150,-425` count=4 reason=move to travel target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `-5675,-175` count=3 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-3075,-1200` count=3 reason=move to travel target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `350,-4675` count=3 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `375,-4700` count=3 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `9975,1075` count=3 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `-5250,-1000` count=3 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `2350,1475` count=2 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `8550,1025` count=2 reason=move to travel target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-2975,-925` count=2 reason=move to rpg target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-200,-4550` count=2 reason=move to travel target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `-5675,-275` count=2 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=0 `2525,700` count=2 reason=find corpse:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+- [low] destination_blackspot map=1 `-425,-4600` count=2 reason=move to travel target:steep-local-slope -> Lower travel score for this destination bucket until a known-good route or alternate landing point exists.
+
+## Current Telemetry Gaps
+- XP, money, quest-log state, movement, death, and per-window APM snapshots are now present via BotStatsSnapshot.
+- true quest completion/hour still needs quest reward/complete delta events, not only current quest-log state
+- gold/hour can now be estimated from BotStatsSnapshot money deltas, but loot-source attribution still needs loot gold events
+
+## Next Bot-Brain Actions
+- import high-confidence path and destination blackspots into learned memory
+- train rankers against BotStatsSnapshot deltas: XP gain, money gain, low-APM time, dead time, and no-progress time
+- make the quest/travel scorer subtract learned penalties before broad fallback searches
+- train the first ranker on guide-hub choices after enough run summaries exist
+

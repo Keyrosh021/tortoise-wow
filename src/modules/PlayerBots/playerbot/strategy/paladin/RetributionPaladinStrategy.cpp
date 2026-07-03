@@ -69,9 +69,17 @@ void RetributionPaladinStrategy::InitCombatTriggers(std::list<TriggerNode*>& tri
         NextAction::array(0, new NextAction("divine shield", ACTION_EMERGENCY + 1), 
                              new NextAction("holy light", ACTION_EMERGENCY), NULL)));
 
+    // At low health IN COMBAT: stun first (Hammer of Justice), then heal while the
+    // target is stunned so the 2.5s Holy Light isn't pushed back, then resume
+    // attacking once healed. Previously this cast Holy Light only, at a priority
+    // that outranks all offense AND Hammer of Justice, so a melee'd paladin stood
+    // there re-casting a pushback-interrupted heal forever and slowly lost. HoJ at
+    // MEDIUM_HEAL+1 is tried first; when it's on cooldown this falls back to the heal.
     triggers.push_back(new TriggerNode(
-        "low health",
-        NextAction::array(0, new NextAction("holy light", ACTION_MEDIUM_HEAL), NULL)));
+        "paladin low health",
+        NextAction::array(0,
+            new NextAction("hammer of justice", ACTION_MEDIUM_HEAL + 1),
+            new NextAction("holy light", ACTION_MEDIUM_HEAL), NULL)));
 
     triggers.push_back(new TriggerNode(
         "low mana",
