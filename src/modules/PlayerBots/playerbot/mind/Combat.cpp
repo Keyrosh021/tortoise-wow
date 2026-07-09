@@ -33,13 +33,37 @@ namespace mind
             return false;
 
         const uint32 now = WorldTimer::getMSTime();
-        lastProductiveAt = now;   // fighting IS productive terrain
 
         Unit* target = bot->GetVictim();
         if (!target || !sServerFacade.IsAlive(target))
             target = context->GetValue<Unit*>("current target")->Get();
         if (!target || !sServerFacade.IsAlive(target))
             return false;                       // no live target -> engine acquires one
+
+        // NEVER CHASE PLAYERS (the cross-faction chase-lock sink): the mind
+        // refuses player targets in its own scan, but aggro/engine-acquired
+        // player targets got chased here forever — a fleeing player keeps
+        // producing "progress" so the stuck guard never breaks (measured:
+        // chase pinned at 4-6k/min while everything else decayed). Grinders
+        // defend in melee range only; a player farther than that is let go.
+        if (Unit* pvpTgt = target)
+        {
+            Player* vp = pvpTgt->GetCharmerOrOwnerPlayerOrPlayerItself();
+            if (vp && vp != bot && bot->GetDistance(pvpTgt) > 15.0f)
+            {
+                AddBlacklist(pvpTgt->GetObjectGuid(), now, 60000);
+                bot->AttackStop();
+                targetGuid = ObjectGuid();
+                context->GetValue<Unit*>("current target")->Set(nullptr);
+                ai->SetAIInternalUpdateDelay(600);
+                *executed = true;
+                return true;
+            }
+        }
+
+        // Fighting CREATURES is productive terrain; pvp chases are not.
+        if (target->GetTypeId() == TYPEID_UNIT)
+            lastProductiveAt = now;
 
         // A target we already gave up on (unreachable) that the engine
         // re-acquired: refuse the chase cycle — stop, clear, cool off.
