@@ -127,6 +127,11 @@ namespace mind
         // relocates to level-matched content (unseen only).
         uint32 lastProductiveAt = 0;
 
+        // social: how long we've been holding next to an idle leader, and
+        // whether this tick is leashed (local activity ok, no journeying off)
+        uint32 socialHoldSince = 0;
+        bool socialLeashed = false;
+
         // errands
         ObjectGuid errandNpc;
         uint32 errandStageAt = 0;

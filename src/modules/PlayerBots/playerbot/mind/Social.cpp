@@ -49,6 +49,10 @@ namespace mind
             return { true, true, 1500 };
         }
 
+        // Leader is doing something (moving/fighting) -> normal group flow.
+        if (lv || sServerFacade.isMoving(leader))
+            socialHoldSince = 0;
+
         // FOLLOW: run to the leader when spread out; hold when close.
         if (sameMap && ld > 12.0f && !bot->IsInCombat())
         {
@@ -57,7 +61,20 @@ namespace mind
         }
 
         if (!bot->IsInCombat())
-            return { true, false, 800 };   // close & leader idle -> hold near leader
+        {
+            // Close & leader idle. Waiting is human for a while — 26 bots
+            // statued on one graveyard coordinate is not (observed live).
+            // After 45s of dead leader, LIVE A LITTLE: fall through to local
+            // activity (fight/loot/errand nearby) but stay leashed — the
+            // arbiter won't journey a leashed bot away from its group.
+            if (!socialHoldSince)
+                socialHoldSince = now;
+            if (now - socialHoldSince < 45000)
+                return { true, false, 800 };
+
+            socialLeashed = true;
+            return { false, false, 0 };
+        }
 
         return { false, false, 0 };        // in combat -> CombatStep/engine own the tick
     }

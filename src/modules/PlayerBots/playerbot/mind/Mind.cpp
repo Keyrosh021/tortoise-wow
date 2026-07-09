@@ -117,6 +117,8 @@ namespace mind
         // Priorities are the bot's INTENT order, top-down. First executor
         // that takes the tick owns it; each holds its goal via its own
         // commitment state, so this order only decides ties.
+        socialLeashed = false;
+
         Verdict v = StepLoot(now);          // the kill isn't done until it's looted
         if (v.handled) return v;
 
@@ -128,6 +130,12 @@ namespace mind
 
         v = StepCombatChase(now);           // a usable mob nearby -> take it
         if (v.handled) return v;
+
+        // Leashed to an idle group leader: local activity only — do NOT
+        // journey off and abandon the group. Idle near them like a person
+        // (re-check soon; loot/mobs/errands above still fire when present).
+        if (socialLeashed)
+            return { true, false, 1200 };
 
         return StepJourney(now);            // otherwise: be somewhere better (always handles)
     }
