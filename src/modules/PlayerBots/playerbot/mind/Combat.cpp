@@ -205,6 +205,7 @@ namespace mind
         {
             // The engage refused (immune, evade, tap raced away). Blacklist
             // briefly and walk on rather than standing on an unattackable mob.
+            Log().engageRefused.fetch_add(1, std::memory_order_relaxed);
             AddBlacklist(target->GetObjectGuid(), now, 10000);
             targetGuid = ObjectGuid();
             context->GetValue<Unit*>("current target")->Set(nullptr);

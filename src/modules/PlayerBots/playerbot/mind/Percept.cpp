@@ -120,6 +120,10 @@ namespace mind
         MaNGOS::UnitListSearcher<MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck> searcher(candidates, check);
         Cell::VisitAllObjects(bot, searcher, KILL_SCAN_RANGE);
 
+        Log().scans.fetch_add(1, std::memory_order_relaxed);
+        if (candidates.empty())
+            Log().scanEmpty.fetch_add(1, std::memory_order_relaxed);
+
         // SITUATIONAL AWARENESS ("what's around me? is this pull safe?"):
         // a real player picks the isolated/edge mob and skirts the pack; a
         // bot that B-lines to a far mob THROUGH a camp body-pulls 5 adds and
@@ -131,7 +135,10 @@ namespace mind
         for (Unit* u : candidates)
         {
             if (!IsUsableKillTarget(u) || IsBlacklisted(u->GetObjectGuid(), now))
+            {
+                Log().rejUsable.fetch_add(1, std::memory_order_relaxed);
                 continue;
+            }
 
             const float ux = u->GetPositionX(), uy = u->GetPositionY();
             const float dx = ux - bx, dy = uy - by;
@@ -166,7 +173,10 @@ namespace mind
 
             // A 4+ linked pull is suicide solo, quest or not. Walk on.
             if (pack >= 3 && !bot->GetGroup() && !questNeed)
+            {
+                Log().rejPack.fetch_add(1, std::memory_order_relaxed);
                 continue;
+            }
 
             float score = dist + pack * 30.0f + corridor * 45.0f;
             if (questNeed)
@@ -179,7 +189,10 @@ namespace mind
         }
 
         if (best)
+        {
             targetGuid = best->GetObjectGuid();
+            Log().scanFound.fetch_add(1, std::memory_order_relaxed);
+        }
         return best;
     }
 
