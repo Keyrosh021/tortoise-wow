@@ -31,9 +31,18 @@ namespace mind
         std::atomic<uint32> scans{0};        // scans run
         std::atomic<uint32> scanEmpty{0};    // grid returned zero candidates
         std::atomic<uint32> scanFound{0};    // scan pinned a target
-        std::atomic<uint32> rejUsable{0};    // IsUsableKillTarget said no (xp/level/tap/elite)
+        std::atomic<uint32> rejUsable{0};    // IsUsableKillTarget said no (sum of below + misc)
         std::atomic<uint32> rejPack{0};      // pack >= 3 links (solo, non-quest)
         std::atomic<uint32> engageRefused{0};// "attack" action declined the pinned target
+
+        // rejUsable split (why candidates die):
+        std::atomic<uint32> rejNotCreature{0}; // player/pet/totem
+        std::atomic<uint32> rejInvalid{0};     // IsValidAttackTarget false
+        std::atomic<uint32> rejLevel{0};       // > bot level + 2
+        std::atomic<uint32> rejNoXp{0};        // grey/no-xp, no quest credit
+        std::atomic<uint32> rejTapped{0};      // someone else's tap
+        std::atomic<uint32> rejFighting{0};    // fighting another player's fight
+        std::atomic<uint32> rejEliteCrit{0};   // elite (solo) or critter
     };
 
     Counters& Log();

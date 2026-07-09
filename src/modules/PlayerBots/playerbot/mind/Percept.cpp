@@ -47,31 +47,47 @@ namespace mind
         if (!u || !u->IsInWorld() || u->GetMapId() != bot->GetMapId() || !u->IsAlive())
             return false;
 
-        if (!bot->IsValidAttackTarget(u))
-            return false;
-
         Creature* c = u->ToCreature();
-        if (!c)
+        if (!c || c->IsPet())
+        {
+            Log().rejNotCreature.fetch_add(1, std::memory_order_relaxed);
             return false;   // the mind grinds creatures; pvp stays a legacy-engine feature
+        }
 
-        if (c->IsCritter() || c->IsPet())
+        if (!bot->IsValidAttackTarget(u))
+        {
+            Log().rejInvalid.fetch_add(1, std::memory_order_relaxed);
             return false;
+        }
 
-        // Solo bots don't pull elites; a dead bot generates nothing but a death stat.
-        if (!bot->GetGroup() && c->GetCreatureInfo() && c->GetCreatureInfo()->Rank > CREATURE_ELITE_NORMAL)
+        if (c->IsCritter() ||
+            (!bot->GetGroup() && c->GetCreatureInfo() && c->GetCreatureInfo()->Rank > CREATURE_ELITE_NORMAL))
+        {
+            // Critters give nothing; solo elites give a death stat.
+            Log().rejEliteCrit.fetch_add(1, std::memory_order_relaxed);
             return false;
+        }
 
         // Don't chase mobs meaningfully above us (orange/red-mob deaths).
         if ((int32)c->GetLevel() > (int32)bot->GetLevel() + 2)
+        {
+            Log().rejLevel.fetch_add(1, std::memory_order_relaxed);
             return false;
+        }
 
         // Grey/no-xp mobs are pointless UNLESS a quest needs them (Goal 2).
         if (!MaNGOS::XP::Gain(bot, c) && !KillHelpsQuest(c->GetEntry()))
+        {
+            Log().rejNoXp.fetch_add(1, std::memory_order_relaxed);
             return false;
+        }
 
         // Tapped by someone who isn't us: their kill, their loot. Move on.
         if (c->GetLootRecipientGuid() && !c->IsTappedBy(bot))
+        {
+            Log().rejTapped.fetch_add(1, std::memory_order_relaxed);
             return false;
+        }
 
         // Already fighting someone else's fight (don't pile onto another
         // player's mob unless it is fighting us or our group).
@@ -79,7 +95,10 @@ namespace mind
         {
             Player* vp = victim->GetCharmerOrOwnerPlayerOrPlayerItself();
             if (vp && vp != bot && (!bot->GetGroup() || !vp->GetGroup() || vp->GetGroup() != bot->GetGroup()))
+            {
+                Log().rejFighting.fetch_add(1, std::memory_order_relaxed);
                 return false;
+            }
         }
 
         return true;
