@@ -383,7 +383,7 @@ void WorldSession::HandleMovementOpcodes(WorldPacket& recvData)
 
     if (pPlayerMover)
     {
-        if (!m_antiCheat->Movement(movementInfo, recvData))
+        if (m_antiCheat && !m_antiCheat->Movement(movementInfo, recvData))
         {
             m_moveRejectTime = WorldTimer::getMSTime();
             return;
@@ -580,7 +580,8 @@ void WorldSession::HandleForceSpeedChangeAckOpcodes(WorldPacket& recvData)
     MovementPacketSender::SendSpeedChangeToObservers(pMover, move_type, speedReceived);
 
     if (_player->IsSelfMover())
-        m_antiCheat->SpeedChangeAck(movementInfo, recvData, speedReceived);
+        if (m_antiCheat)
+            m_antiCheat->SpeedChangeAck(movementInfo, recvData, speedReceived);
 }
 
 /*
@@ -660,7 +661,7 @@ void WorldSession::HandleMovementFlagChangeToggleAck(WorldPacket& recvData)
 
         if (pPlayerMover)
         {
-            if (!m_antiCheat->Movement(movementInfo, recvData))
+            if (m_antiCheat && !m_antiCheat->Movement(movementInfo, recvData))
             {
                 m_moveRejectTime = WorldTimer::getMSTime();
                 break;
@@ -757,7 +758,7 @@ void WorldSession::HandleMoveRootAck(WorldPacket& recvData)
 
         if (pPlayerMover)
         {
-            if (!m_antiCheat->Movement(movementInfo, recvData))
+            if (m_antiCheat && !m_antiCheat->Movement(movementInfo, recvData))
             {
                 m_moveRejectTime = WorldTimer::getMSTime();
                 break;
@@ -831,7 +832,7 @@ void WorldSession::HandleMoveKnockBackAck(WorldPacket& recvData)
 
     if (Player* pPlayerMover = pMover->ToPlayer())
     {
-        if (!m_antiCheat->Movement(movementInfo, recvData))
+        if (m_antiCheat && !m_antiCheat->Movement(movementInfo, recvData))
         {
             m_moveRejectTime = WorldTimer::getMSTime();
             return;
@@ -965,7 +966,7 @@ void WorldSession::HandleMoveNotActiveMoverOpcode(WorldPacket& recvData)
     
     if (pPlayerMover)
     {
-        if (!m_antiCheat->Movement(movementInfo, recvData))
+        if (m_antiCheat && !m_antiCheat->Movement(movementInfo, recvData))
         {
             m_moveRejectTime = WorldTimer::getMSTime();
             return;
@@ -1021,6 +1022,7 @@ void WorldSession::HandleMoveTimeSkippedOpcode(WorldPacket& recvData)
 
     if (pMover->m_movementInfo.ctime)
     {
+        if (m_antiCheat)
         m_antiCheat->TimeSkipped(guid, lag);
         pMover->m_movementInfo.stime += lag;
         pMover->m_movementInfo.ctime += lag;
