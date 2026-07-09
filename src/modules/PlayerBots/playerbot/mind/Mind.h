@@ -78,6 +78,7 @@ namespace mind
         void  AddBlacklist(const ObjectGuid& g, uint32 now, uint32 forMs);
 
         bool SeenByPlayer(float range) const;      // Journey.cpp; gates every teleport/blink
+        bool QuestObjectiveDest(uint32 now, float& outX, float& outY, float& outZ); // Journey.cpp
 
         // ---- movement (Move.cpp)
         bool MoveTowards(float x, float y, float z, uint32 now);  // pathfinding step-walk (far dests hop)
@@ -121,6 +122,15 @@ namespace mind
         // journey
         float destX = 0.f, destY = 0.f, destZ = 0.f;
         uint32 destPickAt = 0;
+        bool destIsObjective = false;  // current dest aims at a quest objective area (telemetry)
+        // objective-directed journey cache: nearest unfinished quest-objective
+        // area (same map, walkable range). Resolving walks the immutable
+        // travel destination map for every quest in the log, so the answer is
+        // cached and re-resolved at most every ~45s per bot.
+        float questDestX = 0.f, questDestY = 0.f, questDestZ = 0.f;
+        uint32 questDestMapId = 0;
+        uint32 questDestResolveAt = 0;
+        bool questDestFound = false;
         // productivity clock: last time this bot did something that earns
         // xp/loot/quests. A journeying bot that stays unproductive too long
         // is in dead terrain (grey mobs / only enemy bots around) and

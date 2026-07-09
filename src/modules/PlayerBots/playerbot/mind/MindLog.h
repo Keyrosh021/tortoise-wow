@@ -19,6 +19,7 @@ namespace mind
         std::atomic<uint32> social{0};       // follow/assist ticks
         std::atomic<uint32> errands{0};      // quest/town NPC interactions started
         std::atomic<uint32> journey{0};      // walking-to-content ticks
+        std::atomic<uint32> questJourney{0}; // journey ticks aimed at a quest objective area
         std::atomic<uint32> arrivals{0};     // journey destinations reached
         std::atomic<uint32> stucks{0};       // stuck-detector breaks
         std::atomic<uint32> blacklists{0};   // objects given up on
