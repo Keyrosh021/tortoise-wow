@@ -40,9 +40,16 @@ namespace mind
     public:
         BotMind(PlayerbotAI* ai, Player* bot);
 
-        // Non-combat proactive step. Called AFTER the (slimmed) non-combat
-        // engine tick found nothing reactive to do. Always handles: sets the
-        // AI update delay and returns whether an action was executed.
+        // Busy hold: taxi / teleport / mid-cast. When true the caller skips
+        // BOTH the engine pass and the mind step this tick (re-running the
+        // engine mid-cast cancels the cast — the FSM's short-circuit, kept).
+        bool BusyHold();
+
+        // Non-combat proactive step. Called every non-busy tick, AFTER the
+        // slimmed engine's reactive pass. Owns the update delay outright:
+        // engine bookkeeping actions set multi-second action durations as
+        // their anti-rerun mechanism, and honoring them put the fleet to
+        // sleep (measured 61% idle) — the mind is the tempo authority.
         bool Step(bool minimal);
 
         // Combat step. Returns true when the mind handled the tick (chase /

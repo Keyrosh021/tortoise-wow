@@ -42,9 +42,27 @@ namespace mind
         return forMs;
     }
 
-    // The one non-combat decision per tick. Called AFTER the slimmed engine's
-    // reactive pass declined the tick. Every exit sets the update delay — a
-    // bot that decided something SLEEPS until the decision can have visibly
+    bool BotMind::BusyHold()
+    {
+        if (!bot->IsInWorld() || !bot->IsAlive())
+            return false;
+
+        if (bot->IsTaxiFlying() || bot->IsBeingTeleported())
+        {
+            ai->SetAIInternalUpdateDelay(1000);
+            return true;
+        }
+        if (bot->IsNonMeleeSpellCasted(true, false, true))
+        {
+            ai->SetAIInternalUpdateDelay(300);
+            return true;
+        }
+        return false;
+    }
+
+    // The one non-combat decision per tick. Runs every non-busy tick, after
+    // the slimmed engine's reactive pass. Every exit sets the update delay —
+    // a bot that decided something SLEEPS until the decision can have visibly
     // progressed (this is the apm-explosion fix, kept from the FSM).
     bool BotMind::Step(bool minimal)
     {
@@ -55,29 +73,17 @@ namespace mind
         FlushLogIfDue(now);
         Log().steps.fetch_add(1, std::memory_order_relaxed);
 
-        // Never SHORTEN a delay the engine pass just set — its actions size
-        // their delay to in-flight casts/consumption, and re-ticking early
-        // re-runs the engine, which cancels them.
+        // Plain overwrite: the mind is the tempo authority (see Mind.h).
         auto sleep = [&](uint32 ms) {
-            const uint32 wanted = std::max<uint32>(ms, sPlayerbotAIConfig.reactDelay);
-            ai->SetAIInternalUpdateDelay(std::max<uint32>(wanted, ai->GetAIInternalUpdateDelay()));
+            ai->SetAIInternalUpdateDelay(std::max<uint32>(ms, sPlayerbotAIConfig.reactDelay));
         };
 
-        // BUSY: state where deciding anything would be wrong.
-        if (bot->IsTaxiFlying() || bot->IsBeingTeleported())
-        {
-            sleep(1000);
-            return true;
-        }
         if (!bot->IsStandState())
         {
-            // Sitting = the engine's food/drink is doing its job. Let it finish.
+            // Sitting = the engine's food/drink is doing its job. Hold still,
+            // re-check on a human cadence; the engine pass keeps running so
+            // packet features (invites, rolls) stay responsive while resting.
             sleep(600);
-            return true;
-        }
-        if (bot->IsNonMeleeSpellCasted(true, false, true))
-        {
-            sleep(300);
             return true;
         }
 

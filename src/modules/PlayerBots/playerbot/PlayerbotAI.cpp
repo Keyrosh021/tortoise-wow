@@ -11076,16 +11076,21 @@ void PlayerbotAI::DoNextAction(bool min)
             botMind.reset(new mind::BotMind(this, bot));
         if (currentState == BotState::BOT_STATE_NON_COMBAT)
         {
-            // DUAL PASS, disjoint domains: the slimmed engine handles its
-            // stationary/reactive features (it owns no movement strategies),
-            // then the mind takes its proactive step EVERY tick — engine
-            // bookkeeping actions (check values etc.) must never starve the
-            // bot's actual intent. The mind's busy gates (sitting, casting)
-            // keep it from disturbing anything the engine just started, and
-            // its sleep never shortens an engine-set delay.
-            const bool engineActed = currentEngine->DoNextAction(NULL, 0, (minimal || min), bot->IsTaxiFlying());
-            const bool mindActed = botMind->Step(minimal || min);
-            actionExecuted = engineActed || mindActed;
+            // BUSY HOLD first (mid-cast/taxi): skip BOTH passes — re-running
+            // the engine mid-cast cancels the cast (the FSM's short-circuit).
+            // Otherwise DUAL PASS, disjoint domains: the slimmed engine
+            // handles stationary/reactive features (it owns no movement
+            // strategies), then the mind takes its proactive step and OWNS
+            // the update delay — engine bookkeeping actions set multi-second
+            // durations that would otherwise put the fleet to sleep.
+            if (botMind->BusyHold())
+                actionExecuted = true;
+            else
+            {
+                const bool engineActed = currentEngine->DoNextAction(NULL, 0, (minimal || min), bot->IsTaxiFlying());
+                const bool mindActed = botMind->Step(minimal || min);
+                actionExecuted = engineActed || mindActed;
+            }
         }
         else
         {

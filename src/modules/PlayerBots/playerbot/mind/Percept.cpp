@@ -10,6 +10,9 @@
 #include "Formulas.h"
 #include "QuestDef.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace mind
 {
     // How far the mind scans for kill targets / owed corpses. Kept inside
@@ -58,8 +61,8 @@ namespace mind
         if (!bot->GetGroup() && c->GetCreatureInfo() && c->GetCreatureInfo()->Rank > CREATURE_ELITE_NORMAL)
             return false;
 
-        // Don't chase mobs meaningfully above us (red-mob deaths) — cap at +3.
-        if ((int32)c->GetLevel() > (int32)bot->GetLevel() + 3)
+        // Don't chase mobs meaningfully above us (orange/red-mob deaths).
+        if ((int32)c->GetLevel() > (int32)bot->GetLevel() + 2)
             return false;
 
         // Grey/no-xp mobs are pointless UNLESS a quest needs them (Goal 2).
@@ -117,6 +120,12 @@ namespace mind
         MaNGOS::UnitListSearcher<MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck> searcher(candidates, check);
         Cell::VisitAllObjects(bot, searcher, KILL_SCAN_RANGE);
 
+        // SITUATIONAL AWARENESS ("what's around me? is this pull safe?"):
+        // a real player picks the isolated/edge mob and skirts the pack; a
+        // bot that B-lines to a far mob THROUGH a camp body-pulls 5 adds and
+        // dies. Score = distance + pack pressure around the target + hostiles
+        // near the straight-line approach corridor, minus quest need.
+        const float bx = bot->GetPositionX(), by = bot->GetPositionY();
         Unit* best = nullptr;
         float bestScore = 1e9f;
         for (Unit* u : candidates)
@@ -124,8 +133,40 @@ namespace mind
             if (!IsUsableKillTarget(u) || IsBlacklisted(u->GetObjectGuid(), now))
                 continue;
 
-            float score = sServerFacade.GetDistance2d(bot, u);
-            if (KillHelpsQuest(u->GetEntry()))
+            const float ux = u->GetPositionX(), uy = u->GetPositionY();
+            const float dx = ux - bx, dy = uy - by;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+
+            // Pack pressure at the target + adds along the approach corridor.
+            int pack = 0, corridor = 0;
+            for (Unit* o : candidates)
+            {
+                if (o == u || !o->IsAlive())
+                    continue;
+                const float ox = o->GetPositionX() - ux, oy = o->GetPositionY() - uy;
+                if (ox * ox + oy * oy < 12.0f * 12.0f)
+                    ++pack;
+                // Distance of o from the segment bot->target (2d projection).
+                if (dist > 1.0f)
+                {
+                    const float t = std::max(0.0f, std::min(1.0f,
+                        ((o->GetPositionX() - bx) * dx + (o->GetPositionY() - by) * dy) / (dist * dist)));
+                    const float px = bx + t * dx - o->GetPositionX();
+                    const float py = by + t * dy - o->GetPositionY();
+                    if (px * px + py * py < 10.0f * 10.0f)
+                        ++corridor;
+                }
+            }
+            corridor = std::max(0, corridor - pack);   // don't double-count the pack itself
+
+            const bool questNeed = KillHelpsQuest(u->GetEntry());
+
+            // A 3+ mob pack is not a solo pull, quest or not. Walk on.
+            if (pack >= 3 && !bot->GetGroup())
+                continue;
+
+            float score = dist + pack * 30.0f + corridor * 45.0f;
+            if (questNeed)
                 score -= 40.0f;   // quest credit beats proximity (Goal 1: quests/hr)
             if (score < bestScore)
             {

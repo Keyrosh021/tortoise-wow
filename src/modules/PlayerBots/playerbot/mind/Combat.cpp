@@ -40,6 +40,17 @@ namespace mind
         if (!target || !sServerFacade.IsAlive(target))
             return false;                       // no live target -> engine acquires one
 
+        // A target we already gave up on (unreachable) that the engine
+        // re-acquired: refuse the chase cycle — stop, clear, cool off.
+        if (IsBlacklisted(target->GetObjectGuid(), now))
+        {
+            bot->AttackStop();
+            context->GetValue<Unit*>("current target")->Set(nullptr);
+            ai->SetAIInternalUpdateDelay(800);
+            *executed = true;
+            return true;
+        }
+
         // Pin: the rotation, the chase and the mind all agree on ONE target.
         targetGuid = target->GetObjectGuid();
         context->GetValue<Unit*>("current target")->Set(target);
@@ -169,6 +180,17 @@ namespace mind
     // the tick to CombatStep + the combat engine.
     Verdict BotMind::StepCombatChase(uint32 now)
     {
+        // PULL DISCIPLINE ("am I ready for a fight?"): a real player doesn't
+        // start a fresh pull at half health or on an empty mana bar — they
+        // sit and recover first. HOLD here (don't fall through to Journey,
+        // which would march a hungry bot into the next camp); the engine's
+        // food/drink strategy and out-of-combat regen do the recovering.
+        const bool lowHp = bot->GetHealthPercent() < 55.0f;
+        const bool lowMana = bot->GetPowerType() == POWER_MANA && bot->GetMaxPower(POWER_MANA) > 0 &&
+            bot->GetPower(POWER_MANA) * 100 < bot->GetMaxPower(POWER_MANA) * 35;
+        if (lowHp || lowMana)
+            return { true, false, 1000 };
+
         Unit* target = PinnedOrBestTarget(now);
         if (!target)
             return { false, false, 0 };
