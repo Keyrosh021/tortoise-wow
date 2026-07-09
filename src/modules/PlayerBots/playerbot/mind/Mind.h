@@ -121,6 +121,11 @@ namespace mind
         // journey
         float destX = 0.f, destY = 0.f, destZ = 0.f;
         uint32 destPickAt = 0;
+        // productivity clock: last time this bot did something that earns
+        // xp/loot/quests. A journeying bot that stays unproductive too long
+        // is in dead terrain (grey mobs / only enemy bots around) and
+        // relocates to level-matched content (unseen only).
+        uint32 lastProductiveAt = 0;
 
         // errands
         ObjectGuid errandNpc;

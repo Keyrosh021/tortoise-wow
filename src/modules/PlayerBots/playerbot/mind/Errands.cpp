@@ -95,7 +95,10 @@ namespace mind
                     Event e("rpg action", p);
                     const bool acted = ai->DoSpecificAction("talk to quest giver", e, true);
                     if (acted)
+                    {
+                        lastProductiveAt = now;
                         Log().errands.fetch_add(1, std::memory_order_relaxed);
+                    }
                     return { true, acted, 1200 };
                 }
 
@@ -156,6 +159,7 @@ namespace mind
             return { false, false, 0 };
 
         SetGoal(Goal::Errand, now);
+        lastProductiveAt = now;
         errandNpc = best->GetObjectGuid();
         errandStageAt = 0;
         ResetStuck(now);

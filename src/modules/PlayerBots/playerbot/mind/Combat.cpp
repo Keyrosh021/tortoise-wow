@@ -33,6 +33,7 @@ namespace mind
             return false;
 
         const uint32 now = WorldTimer::getMSTime();
+        lastProductiveAt = now;   // fighting IS productive terrain
 
         Unit* target = bot->GetVictim();
         if (!target || !sServerFacade.IsAlive(target))
@@ -141,6 +142,7 @@ namespace mind
         }
 
         SetGoal(Goal::Loot, now);
+        lastProductiveAt = now;
         Log().lootRuns.fetch_add(1, std::memory_order_relaxed);
 
         // Give up on corpses we cannot path to instead of orbiting them.
@@ -213,6 +215,7 @@ namespace mind
         }
 
         Log().engage.fetch_add(1, std::memory_order_relaxed);
+        lastProductiveAt = now;
         ResetStuck(now);
         Commit(now, 2500);
         return { true, true, 500 };

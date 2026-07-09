@@ -42,6 +42,23 @@ namespace mind
         SetGoal(Goal::Journey, now);
         Log().journey.fetch_add(1, std::memory_order_relaxed);
 
+        // UNPRODUCTIVE-TERRAIN RELOCATE: measured live (run 7): 59% of scan
+        // candidates around journeying bots are other bot players, 30% grey
+        // mobs — walking on this map earns nothing. If nothing productive
+        // (engage/loot/errand/combat) happened for 150s, jump to
+        // level-matched content instead of hiking through dead country.
+        if (!lastProductiveAt)
+            lastProductiveAt = now;
+        if (now - lastProductiveAt > 150000 && !SeenByPlayer(180.0f) && !bot->IsInCombat())
+        {
+            lastProductiveAt = now;
+            destX = destY = destZ = 0.f;
+            destPickAt = 0;
+            sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), 0, 0.f, 0.f, 0.f, /*forLevel*/ true);
+            Log().teleports.fetch_add(1, std::memory_order_relaxed);
+            return { true, true, 1500 };
+        }
+
         const float bx = bot->GetPositionX(), by = bot->GetPositionY();
         const bool haveDest = (destX != 0.f || destY != 0.f);
         const float dxd = destX - bx, dyd = destY - by;
