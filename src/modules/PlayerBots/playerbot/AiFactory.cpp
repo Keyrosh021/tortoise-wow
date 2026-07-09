@@ -1,5 +1,6 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/AiFactory.h"
+#include "playerbot/mind/Mind.h"
 #include "strategy/AiObjectContext.h"
 #include "strategy/ReactionEngine.h"
 
@@ -1149,9 +1150,23 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
 #endif
         }
     }
+
+    // MIND: autonomous random bots run the mind intent layer (mind/ module),
+    // which owns every locomotion/pursuit decision. Strip the proactive
+    // movement strategies so the engine can never fight the mind for the
+    // bot's legs; everything stationary/reactive stays (buffs, food, packet
+    // features, rolls, lfg, bg). Not applied in battlegrounds — BG play keeps
+    // its dedicated strategy stack.
+    if (sPlayerbotAIConfig.mindEnabled && !player->InBattleGround()
+        && sRandomPlayerbotMgr.IsRandomBot(player)
+        && !facade->HasRealPlayerMaster() && !facade->HasActivePlayerMaster())
+    {
+        for (const char** s = mind::BotMind::StrippedNonCombatStrategies(); *s; ++s)
+            nonCombatEngine->removeStrategy(*s, false);
+    }
 }
 
-Engine* AiFactory::createNonCombatEngine(Player* player, PlayerbotAI* const facade, AiObjectContext* AiObjectContext) 
+Engine* AiFactory::createNonCombatEngine(Player* player, PlayerbotAI* const facade, AiObjectContext* AiObjectContext)
 {
 	Engine* nonCombatEngine = new Engine(facade, AiObjectContext, BotState::BOT_STATE_NON_COMBAT);
     AddDefaultNonCombatStrategies(player, facade, nonCombatEngine);

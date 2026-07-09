@@ -29,6 +29,11 @@ file(GLOB Playerbot_Source ${CMAKE_CURRENT_SOURCE_DIR}/playerbot/*.cpp ${CMAKE_C
       ${CMAKE_CURRENT_SOURCE_DIR}/playerbot/BotLearningMgr.h
     )
 
+#The mind: bot intent layer (decision-making rewrite)
+file(GLOB Playerbot_Mind ${CMAKE_CURRENT_SOURCE_DIR}/playerbot/mind/*.cpp ${CMAKE_CURRENT_SOURCE_DIR}/playerbot/mind/*.h)
+    source_group("Player Bot\\Mind" FILES ${Playerbot_Mind})
+    LIST(APPEND Playerbot_Source ${Playerbot_Mind})
+
 file(GLOB AHbot_Source ${CMAKE_CURRENT_SOURCE_DIR}/ahbot/*.cpp ${CMAKE_CURRENT_SOURCE_DIR}/ahbot/*.h)
     source_group("AH Bot" FILES ${AHbot_Source})
 

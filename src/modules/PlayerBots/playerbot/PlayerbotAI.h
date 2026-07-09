@@ -314,6 +314,8 @@ enum ActivityType
     MAX_ACTIVITY_TYPE
 };
 
+namespace mind { class BotMind; }
+
 class PacketHandlingHelper
 {
 public:
@@ -845,6 +847,10 @@ protected:
     // the world thread at the top of HandleCommands. Never re-queued -> no translation loops.
     std::mutex translatedCommandsMutex;
     std::queue<std::pair<std::string, uint32>> translatedCommands;   // command, master guidLow
+    // The bot intent layer (mind/ module). Created lazily on the first
+    // mind-owned tick for autonomous random bots; owns locomotion/pursuit
+    // decisions while the engine keeps stationary features + rotations.
+    std::unique_ptr<mind::BotMind> botMind;
     PacketHandlingHelper botOutgoingPacketHandlers;
     PacketHandlingHelper masterIncomingPacketHandlers;
     PacketHandlingHelper masterOutgoingPacketHandlers;

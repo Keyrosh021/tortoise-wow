@@ -322,6 +322,11 @@ public:
     // that never executes). Issues ONE concrete action then COMMITS (suppresses re-decision until
     // the action's observable effect resolves or a break event fires). Rollback: set to 0.
     bool autonomousFsm;
+    // MIND: the bot intent layer (mind/ module) — owns every locomotion/pursuit
+    // decision for autonomous random bots; the engine keeps stationary features
+    // (buffs, food, loot dance, quest dialogs, packet reactions) + in-range combat
+    // rotation. Supersedes AutonomousFSM + CombatDirector when on. Rollback: 0.
+    bool mindEnabled;
     // COMBAT DIRECTOR: snappy "stick to your target" for autonomous random bots in combat. Fixes the
     // measured chase-stall (68% of in-combat bots not moving) + over-thinking (apm median 283, max 916)
     // by forcing a healthy melee bot that is out of range to CHASE its target (persistent MoveChase)

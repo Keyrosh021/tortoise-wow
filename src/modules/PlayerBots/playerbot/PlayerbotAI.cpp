@@ -1,5 +1,6 @@
 #include "PlayerbotMgr.h"
 #include "playerbot/playerbot.h"
+#include "playerbot/mind/Mind.h"
 #include "playerbot/PerformanceMonitor.h"
 #include "PerfStats.h"
 #include "MapManager.h"
@@ -11056,7 +11057,46 @@ void PlayerbotAI::DoNextAction(bool min)
     // when genuinely fighting, so the FSM gate below is false and the combat engine runs as before.
     bool actionExecuted;
     bool fsmExecuted = false;
-    if (sPlayerbotAIConfig.autonomousFsm
+    // MIND (the decision-making rewrite): autonomous random bots run the
+    // intent layer. Non-combat: the slimmed engine gets a reactive pass first
+    // (packet features: store loot, invites, trade, buffs, food) and the mind
+    // owns the proactive decision when the engine declines. Combat: the mind
+    // pins the target, chases and queues the next task; the engine runs the
+    // in-range rotation. Supersedes the inline FSM branches below (which
+    // remain the AiPlayerbot.Mind=0 rollback path).
+    const bool mindOwned = sPlayerbotAIConfig.mindEnabled
+        && sRandomPlayerbotMgr.IsRandomBot(bot)
+        && !HasRealPlayerMaster()
+        && !HasActivePlayerMaster()
+        && bot->IsAlive()
+        && !bot->InBattleGround();   // BG bots keep the dedicated BG strategy stack
+    if (mindOwned && (currentState == BotState::BOT_STATE_NON_COMBAT || currentState == BotState::BOT_STATE_COMBAT))
+    {
+        if (!botMind)
+            botMind.reset(new mind::BotMind(this, bot));
+        if (currentState == BotState::BOT_STATE_NON_COMBAT)
+        {
+            // DUAL PASS, disjoint domains: the slimmed engine handles its
+            // stationary/reactive features (it owns no movement strategies),
+            // then the mind takes its proactive step EVERY tick — engine
+            // bookkeeping actions (check values etc.) must never starve the
+            // bot's actual intent. The mind's busy gates (sitting, casting)
+            // keep it from disturbing anything the engine just started, and
+            // its sleep never shortens an engine-set delay.
+            const bool engineActed = currentEngine->DoNextAction(NULL, 0, (minimal || min), bot->IsTaxiFlying());
+            const bool mindActed = botMind->Step(minimal || min);
+            actionExecuted = engineActed || mindActed;
+        }
+        else
+        {
+            bool mindExecuted = false;
+            if (botMind->CombatStep((minimal || min), &mindExecuted))
+                actionExecuted = mindExecuted;
+            else
+                actionExecuted = currentEngine->DoNextAction(NULL, 0, (minimal || min), bot->IsTaxiFlying());
+        }
+    }
+    else if (sPlayerbotAIConfig.autonomousFsm && !sPlayerbotAIConfig.mindEnabled
         && currentState == BotState::BOT_STATE_NON_COMBAT
         && sRandomPlayerbotMgr.IsRandomBot(bot)
         && !HasRealPlayerMaster()
@@ -11065,7 +11105,7 @@ void PlayerbotAI::DoNextAction(bool min)
     {
         actionExecuted = fsmExecuted;
     }
-    else if (sPlayerbotAIConfig.combatDirector
+    else if (sPlayerbotAIConfig.combatDirector && !sPlayerbotAIConfig.mindEnabled
         && currentState == BotState::BOT_STATE_COMBAT
         && sRandomPlayerbotMgr.IsRandomBot(bot)
         && !HasRealPlayerMaster()

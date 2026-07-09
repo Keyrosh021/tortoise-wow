@@ -571,6 +571,7 @@ bool PlayerbotAIConfig::Initialize()
     supervisorMode = config.GetBoolDefault("AiPlayerbot.SupervisorMode", false);
     supervisorMode = config.GetBoolDefault("AiPlayerbot.SupervisorMode", false);
     autonomousFsm = config.GetBoolDefault("AiPlayerbot.AutonomousFSM", true);
+    mindEnabled = config.GetBoolDefault("AiPlayerbot.Mind", true);
     combatDirector = config.GetBoolDefault("AiPlayerbot.CombatDirector", true);
     autonomousParties = config.GetBoolDefault("AiPlayerbot.AutonomousParties", true);
     forceActiveWhenNearPlayer = config.GetBoolDefault("AiPlayerbot.ForceActiveWhenNearPlayer", false);
