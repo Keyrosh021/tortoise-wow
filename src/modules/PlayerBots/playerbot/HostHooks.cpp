@@ -16,6 +16,7 @@
 #include "World.h"
 #include "playerbot/RandomPlayerbotMgr.h"
 #include "playerbot/RandomPlayerbotFactory.h"
+#include "playerbot/PlayerbotFactory.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/TravelMgr.h"
 #include "BotDiagnostics.h"
@@ -49,6 +50,16 @@ namespace
     {
         if (!bot || !ai)
             return false;
+
+        // COLD-DORMANT SKIP (the 10k responsiveness fix): a parked bot that is NOT in the active
+        // brain set doesn't need a per-tick hook. Process it at most every ~2s so the map's
+        // per-tick budget goes to the ~200 active bots + real players -- otherwise the cycle is
+        // diluted across all 10k and the active bots near a player tick every ~2s and look frozen.
+        // Active-cohort bots and any bot in combat/attacked are never deferred (instant wake kept).
+        if (ai->IsColdDormant() && bot->IsInWorld() && !bot->IsInCombat() && bot->getAttackers().empty()
+            && sRandomPlayerbotMgr.IsRandomBot(bot)
+            && !sRandomPlayerbotMgr.IsActiveCohort(bot->GetGUIDLow()))
+            return accumulatedDiff < 2000u;
 
         const uint32 pressure = PerfStats::GetBotPressureLevel();
         if (pressure == PerfStats::BOT_PRESSURE_NORMAL)
@@ -264,4 +275,184 @@ void Player_DispatchBotChatCommand(Player* master, uint32 type, std::string cons
         mgr->HandleCommand(type, msg, lang);
 
     sRandomPlayerbotMgr.HandleCommand(type, msg, *master, "", master->GetTeam(), lang);
+}
+
+// ---------------- Turtle LFG bot-fill hooks ----------------
+// Called from TurtleLFGMgr::Update on the world thread only (GetAllBots iteration is not
+// thread-safe elsewhere). Selects idle, level-appropriate random bots by their real spec role,
+// ordered tank, healer, dps, and preps them to follow the queuing player.
+
+#include "LFG/TurtleLFGMgr.h"
+#include "playerbot/AiFactory.h"
+
+std::vector<ObjectGuid> Playerbot_SelectLfgFill(uint32 minLevel, uint32 maxLevel,
+    uint32 needTank, uint32 needHeal, uint32 needDps, std::vector<ObjectGuid> const& exclude)
+{
+    // Endgame fills (raids, raidfill at 60) take LEVEL-CAP bots ONLY — a 55-60 band let
+    // L57s into MC. Raising the floor here covers both the pick-existing path below and
+    // the promotion fallback (which then levels+T2-gears candidates to exactly 60).
+    if (maxLevel >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
+        minLevel = maxLevel;
+
+    std::vector<ObjectGuid> tanks, heals, dps;
+
+    sRandomPlayerbotMgr.ForEachPlayerbot([&](Player* bot)
+    {
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+            return;
+        if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+            return;
+        if (bot->GetGroup() || bot->IsInCombat() || bot->InBattleGround() || bot->InBattleGroundQueue())
+            return;
+        if (bot->GetLevel() < minLevel || bot->GetLevel() > maxLevel)
+            return;
+        if (bot->IsHardcore())
+            return;
+        if (std::find(exclude.begin(), exclude.end(), bot->GetObjectGuid()) != exclude.end())
+            return;
+        if (!bot->GetPlayerbotAI() || bot->GetPlayerbotAI()->HasRealPlayerMaster())
+            return;
+
+        BotRoles roles = AiFactory::GetPlayerRoles(bot);
+        if ((roles & BOT_ROLE_TANK) && tanks.size() < needTank + 2)
+            tanks.push_back(bot->GetObjectGuid());
+        else if ((roles & BOT_ROLE_HEALER) && heals.size() < needHeal + 2)
+            heals.push_back(bot->GetObjectGuid());
+        else if ((roles & BOT_ROLE_DPS) && dps.size() < needDps + 4)
+            dps.push_back(bot->GetObjectGuid());
+    });
+
+    if (tanks.size() < needTank || heals.size() < needHeal || dps.size() < needDps)
+    {
+        // ON-DEMAND PROMOTION: a real player is waiting and the bracket has no suitable bots
+        // (fleet may be all low-level). Promote idle bots to the dungeon's band with a full
+        // factory randomize (level+gear+spells+talents). Promotion is permanent — it organically
+        // builds the high-level pool. Class-filtered per missing role; role verified post-roll.
+        // Endgame content (raids: MC/BWL/Ony/AQ/Naxx all cap at 60) must fill with LEVEL 60
+        // bots only — min+2 put L57s into MC. Leveling dungeons keep filling at the bracket
+        // floor (+2) so a L17 SFK group gets L17-19 bots, not 60s.
+        const uint32 maxPlayerLevel = sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
+        const uint32 targetLevel = (maxLevel >= maxPlayerLevel)
+            ? maxPlayerLevel
+            : std::min(maxLevel, minLevel + 2);
+        auto tryPromote = [&](uint32 needed, std::vector<ObjectGuid>& bucket, uint32 roleBit,
+                              std::initializer_list<uint8> classes)
+        {
+            if (bucket.size() >= needed)
+                return;
+            std::vector<Player*> candidates;
+            sRandomPlayerbotMgr.ForEachPlayerbot([&](Player* bot)
+            {
+                if (candidates.size() >= (needed + 3) * 3)
+                    return;
+                if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+                    return;
+                if (!sRandomPlayerbotMgr.IsRandomBot(bot) || bot->GetGroup() || bot->IsInCombat() ||
+                    bot->InBattleGround() || bot->InBattleGroundQueue() || bot->IsHardcore())
+                    return;
+                if (!bot->GetPlayerbotAI() || bot->GetPlayerbotAI()->HasRealPlayerMaster())
+                    return;
+                if (std::find(exclude.begin(), exclude.end(), bot->GetObjectGuid()) != exclude.end())
+                    return;
+                if (std::find(classes.begin(), classes.end(), bot->getClass()) == classes.end())
+                    return;
+                candidates.push_back(bot);
+            });
+            for (Player* bot : candidates)
+            {
+                if (bucket.size() >= needed)
+                    break;
+                // DisableRandomLevels guards natural fleet leveling; an on-demand fill promotion
+                // is intentional — set the level explicitly, then roll the kit for it.
+                if (bot->GetLevel() < targetLevel)
+                {
+                    bot->GiveLevel(targetLevel);
+                    bot->InitTalentForLevel();
+                }
+                PlayerbotFactory factory(bot, targetLevel);
+                factory.Randomize(false, false, true);
+                if (targetLevel >= 60)
+                {
+                    // raid fills must arrive raid-ready: deterministic T2 kit, not random rolls
+                    std::string gearFails;
+                    const uint32 equipped = PlayerbotGearRaidTier(bot, gearFails);
+                    sLog.outString("TurtleLFG: raid-geared %s equipped=%u %s%s", bot->GetName(),
+                        equipped, gearFails.empty() ? "" : "FAILS: ", gearFails.c_str());
+                }
+                BotRoles roles = AiFactory::GetPlayerRoles(bot);
+                if (roles & roleBit)
+                {
+                    bucket.push_back(bot->GetObjectGuid());
+                    sLog.outString("TurtleLFG: promoted bot %s to L%u as fill (role %u)",
+                        bot->GetName(), targetLevel, roleBit);
+                }
+            }
+        };
+
+        tryPromote(needTank, tanks, BOT_ROLE_TANK, { CLASS_WARRIOR, CLASS_PALADIN, CLASS_DRUID });
+        tryPromote(needHeal, heals, BOT_ROLE_HEALER, { CLASS_PRIEST, CLASS_DRUID, CLASS_SHAMAN, CLASS_PALADIN });
+        tryPromote(needDps, dps, BOT_ROLE_DPS, { CLASS_MAGE, CLASS_ROGUE, CLASS_HUNTER, CLASS_WARLOCK, CLASS_WARRIOR });
+    }
+
+    if (tanks.size() < needTank || heals.size() < needHeal || dps.size() < needDps)
+        return {};   // promotion couldn't cover it either (no idle bots at all)
+
+    std::vector<ObjectGuid> out;
+    for (uint32 i = 0; i < needTank; ++i) out.push_back(tanks[i]);
+    for (uint32 i = 0; i < needHeal; ++i) out.push_back(heals[i]);
+    for (uint32 i = 0; i < needDps; ++i) out.push_back(dps[i]);
+    return out;
+}
+
+// pre-dungeon origins for LFT fills so release can send them back where they came from
+static std::mutex s_lfgOriginMx;
+static std::unordered_map<uint32, WorldLocation> s_lfgOrigins;
+
+bool Playerbot_GetLfgOrigin(uint32 guidLow, WorldLocation& out)
+{
+    std::lock_guard<std::mutex> lk(s_lfgOriginMx);
+    auto it = s_lfgOrigins.find(guidLow);
+    if (it == s_lfgOrigins.end())
+        return false;
+    out = it->second;
+    s_lfgOrigins.erase(it);
+    return true;
+}
+
+void Playerbot_PrepareLfgBot(ObjectGuid botGuid, ObjectGuid masterGuid)
+{
+    Player* bot = sObjectAccessor.FindPlayer(botGuid);
+    Player* master = sObjectAccessor.FindPlayer(masterGuid);
+    if (!bot || !bot->GetPlayerbotAI())
+        return;
+
+    {
+        std::lock_guard<std::mutex> lk(s_lfgOriginMx);
+        s_lfgOrigins[bot->GetGUIDLow()] =
+            WorldLocation(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetOrientation());
+    }
+
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    ai->Reset(true);
+    if (master)
+    {
+        ai->SetMaster(master);
+        ai->ResetStrategies();
+    }
+}
+
+uint8 Playerbot_GetRoleOf(Player* player)
+{
+    if (!player)
+        return 4;
+    BotRoles roles = AiFactory::GetPlayerRoles(player);
+    if (roles & BOT_ROLE_TANK) return 1;
+    if (roles & BOT_ROLE_HEALER) return 2;
+    return 4;
+}
+
+void Playerbot_InstantFillBg(Player* realPlayer, uint32 bgTypeId, uint32 bracketId)
+{
+    // session handlers run on MAP threads -- only record the request; the world thread fills
+    sRandomPlayerbotMgr.QueueInstantFillBg(realPlayer->GetGUIDLow(), bgTypeId, bracketId);
 }

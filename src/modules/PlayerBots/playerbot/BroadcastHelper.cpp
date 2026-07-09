@@ -774,7 +774,7 @@ bool BroadcastHelper::BroadcastGuildGroupOrRaidInvite(
     }
     else
     {
-        //(bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH)
+        //PlayerbotChatLanguage(bot)
         if (urand(0, 3))
         {
             return ai->SayToGuild(BOT_TEXT2("Hey anyone wanna group up in %zone_name?", placeholders));

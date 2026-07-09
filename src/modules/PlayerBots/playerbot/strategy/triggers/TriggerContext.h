@@ -116,6 +116,7 @@ namespace ai
             creators["enemy too close for shoot"] = [](PlayerbotAI* ai) { return new EnemyTooCloseForShootTrigger(ai); };
             creators["enemy too close for melee"] = [](PlayerbotAI* ai) { return new EnemyTooCloseForMeleeTrigger(ai); };
             creators["enemy is close"] = [](PlayerbotAI* ai) { return new EnemyIsCloseTrigger(ai); };
+            creators["healer in melee danger"] = [](PlayerbotAI* ai) { return new HealerInMeleeDangerTrigger(ai); };
             creators["party member to heal out of spell range"] = [](PlayerbotAI* ai) { return new PartyMemberToHealOutOfSpellRangeTrigger(ai); };
             creators["enemy fifteen yards"] = [](PlayerbotAI* ai) { return new EnemyInRangeTrigger(ai, "enemy fifteen yards", 15.0f); };
             creators["enemy ten yards"] = [](PlayerbotAI* ai) { return new EnemyInRangeTrigger(ai, "enemy ten yards", 10.0f); };
@@ -293,6 +294,13 @@ namespace ai
             creators["perception"] = [](PlayerbotAI* ai) { return new PerceptionTrigger(ai); };
 
             // Dungeon Triggers
+            creators["db encounter hazard"] = [](PlayerbotAI* ai) { return new DbEncounterHazardTrigger(ai); };
+            creators["db run out debuff"] = [](PlayerbotAI* ai) { return new DbRunOutDebuffTrigger(ai); };
+            creators["db avoid frontal"] = [](PlayerbotAI* ai) { return new DbAvoidFrontalTrigger(ai); };
+            creators["db tank face away"] = [](PlayerbotAI* ai) { return new DbTankFaceAwayTrigger(ai); };
+            creators["db tank swap"] = [](PlayerbotAI* ai) { return new DbTankSwapTrigger(ai); };
+            creators["db staged tanks"] = [](PlayerbotAI* ai) { return new DbStagedTanksTrigger(ai); };
+            creators["db mark separation"] = [](PlayerbotAI* ai) { return new DbMarkSeparationTrigger(ai); };
             creators["enter onyxia's lair"] = [](PlayerbotAI* ai) { return new OnyxiasLairEnterDungeonTrigger(ai); };
             creators["leave onyxia's lair"] = [](PlayerbotAI* ai) { return new OnyxiasLairLeaveDungeonTrigger(ai); };
             creators["enter molten core"] = [](PlayerbotAI* ai) { return new MoltenCoreEnterDungeonTrigger(ai); };

@@ -6,6 +6,7 @@
 #include "playerbot/LootObjectStack.h"
 #include "Maps/MapManager.h"
 #include "Maps/PathFinder.h"
+#include "Movement/spline/MoveSpline.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/strategy/actions/UseItemAction.h"
@@ -348,7 +349,7 @@ namespace
         struct St { float x; float y; uint32 sinceMs; uint32 lastCheckMs; };
         constexpr uint32 WINDOW_MS = 20000;     // must net-progress within 20s of SCHEDULED time (8s still tripped through 1s-move/nap duty cycles: 31/min fleet)...
         constexpr float MIN_DISP = 8.0f;        // ...by at least 8 yards
-        constexpr uint32 SCHED_GAP_MS = 2500;   // a gap between checks means the action wasn't running
+        constexpr uint32 SCHED_GAP_MS = 7000;   // a gap between checks means the action wasn't running
         static std::mutex mx;
         static std::unordered_map<uint32, St> track;
         const uint32 now = WorldTimer::getMSTime();
@@ -421,6 +422,17 @@ namespace
     }
 }
 
+// v6 unroutable-destination suppression state: (bot guid, destination-title hash) -> holdUntilMs.
+// Written by the degenerate-stub detector, honored at the top of Execute.
+static std::mutex s_unroutableMx;
+static std::unordered_map<uint64, uint32> s_unroutableUntil;
+static uint64 UnroutableKey(Player* bot, TravelTarget* target)
+{
+    const uint32 h = (uint32)std::hash<std::string>{}(
+        target && target->GetDestination() ? target->GetDestination()->GetTitle() : std::string());
+    return ((uint64)bot->GetGUIDLow() << 32) | h;
+}
+
 bool MoveToTravelTargetAction::Execute(Event& event)
 {
     MapManager::SetContinentUpdatePhase("travel-execute-entry", bot ? bot->GetGUIDLow() : 0);
@@ -461,6 +473,27 @@ bool MoveToTravelTargetAction::Execute(Event& event)
             TravelStrandedRescue(bot, ai); // repeated hopeless abandons in place -> unstick
         }
         return false;
+    }
+
+    // UNROUTABLE-DESTINATION SUPPRESSION (v6): SetStatus(COOLDOWN) alone did not hold -- the
+    // chooser replaced the cooled target with a FRESH one for the same destination within
+    // seconds (Betan: 353 stub-cycles/70min on one trainer). After the stub detector below
+    // condemns a (bot, destination) pair, every re-pick of that destination short-circuits
+    // here for 10 minutes: no pathfinding, no movement, action returns false so the engine
+    // falls through to reachable work (grind/quest nearby).
+    {
+        std::lock_guard<std::mutex> lk(s_unroutableMx);
+        auto it = s_unroutableUntil.find(UnroutableKey(bot, target));
+        if (it != s_unroutableUntil.end())
+        {
+            if (WorldTimer::getMSTime() < it->second)
+            {
+                target->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+                target->SetExpireIn(60000);
+                return false;
+            }
+            s_unroutableUntil.erase(it);
+        }
     }
 
     auto dispatchQuestObjectiveCombat = [this, target](bool requireCombatRange, char const* source) -> bool
@@ -1264,6 +1297,83 @@ bool MoveToTravelTargetAction::Execute(Event& event)
 
     MapManager::SetContinentUpdatePhase("travel-move-dispatch", bot ? bot->GetGUIDLow() : 0);
     bool canMove = MoveTo(mapId, x, y, z, false, false);
+
+    // DEGENERATE-STUB DETECTOR (root cause of the 16% move-idle doubling): toward an
+    // UNROUTABLE far destination (e.g. Elwynn -> Ironforge, tram-only) the pathfinder returns
+    // short INCOMPLETE stubs; MoveTo "succeeds", the bot hops in place, and the hops evade the
+    // 8y/20s no-displacement breaker forever. Thresholds from live traces: shufflers produce
+    // SUSTAINED 7-31y stubs (Therineri avg 15y, Betan avg 24y); legitimate chunked long-hauls
+    // reach 360y+. Three trips in a row -> destination is unroutable -> blacklist + re-plan
+    // DIRECTLY (the earlier canMove=false/IncRetry version never fired: intermittent >15y
+    // stubs kept resetting the retry count).
+    if (canMove && mapId == bot->GetMapId())
+    {
+        const float sdx = x - bot->GetPositionX(), sdy = y - bot->GetPositionY();
+        if (sdx * sdx + sdy * sdy > 150.0f * 150.0f)
+        {
+            // NOTE: cannot read bot->movespline here -- MovePoint defers path computation to
+            // the next unit update, so the spline still holds the PREVIOUS (finalized) move.
+            // Recompute the path directly (same probe the trace validated; only for >150y
+            // requests, ~0.2ms) and measure how far it actually reaches.
+            PathFinder dpf(bot);
+            dpf.calculate(x, y, z, false);
+            auto const& dpts = dpf.getPath();
+            float freach2 = 1e18f;
+            if (!dpts.empty())
+            {
+                const float fdx = dpts.back().x - bot->GetPositionX();
+                const float fdy = dpts.back().y - bot->GetPositionY();
+                freach2 = fdx * fdx + fdy * fdy;
+            }
+            if (freach2 < 35.0f * 35.0f)
+            {
+                static std::mutex dgMx;
+                static std::unordered_map<uint32, std::pair<uint32, uint32>> dgTrips; // guid -> {count, lastMs}
+                const uint32 dgNow = WorldTimer::getMSTime();
+                bool abandon = false;
+                {
+                    std::lock_guard<std::mutex> lk(dgMx);
+                    auto& t = dgTrips[bot->GetGUIDLow()];
+                    if (dgNow - t.second > 60000)
+                        t.first = 0;               // stale window -> fresh count
+                    t.second = dgNow;
+                    if (++t.first >= 3)
+                    {
+                        t.first = 0;
+                        abandon = true;
+                    }
+                }
+                // (DGTRIP temp diagnostic removed after v6 verification)
+
+                // NO null-destination exemption here (unlike the freeze breaker): this branch
+                // only runs for >150y requests, and a null "camp" anchor 150y+ away means the
+                // bot was teleported/rescued after it was set -- broken garbage that must be
+                // cleared, not a deliberate cooldown to protect.
+                if (abandon)
+                {
+                    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                        sPlayerbotAIConfig.logEvent(ai, "TravelUnroutableAbandoned",
+                            target->GetDestination() ? target->GetDestination()->GetTitle() : "travel",
+                            "reason=degenerate-path-stubs");
+                    // Register the 10-minute (bot, destination) suppression -- the top-of-Execute
+                    // gate then blocks every re-pick of this destination without pathfinding
+                    // (SetStatus(COOLDOWN) alone did not hold: the chooser recreated the target).
+                    {
+                        std::lock_guard<std::mutex> lk(s_unroutableMx);
+                        s_unroutableUntil[UnroutableKey(bot, target)] = dgNow + 600000;
+                    }
+                    target->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+                    target->SetForced(false);
+                    if (GuidPosition* gp = dynamic_cast<GuidPosition*>(target->GetPosition()))
+                        SkipQuestObjectiveGuid(ai, *gp, 300);   // extra help when it IS a quest objective
+                    TravelMoveStuck(bot, true);    // fresh breaker window for the NEXT target
+                    return false;
+                }
+            }
+        }
+    }
+
+
 
     if (!canMove && usingQuestNpcStandPoint)
     {

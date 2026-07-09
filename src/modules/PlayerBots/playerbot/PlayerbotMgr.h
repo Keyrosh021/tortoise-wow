@@ -20,6 +20,18 @@ class Item;
 typedef std::map<uint32, Player*> PlayerBotMap;
 typedef std::map<std::string, std::set<std::string> > PlayerBotErrorMap;
 
+// Deterministic raid gearing: equips the class T2 8-piece set + curated epic weapons/jewelry
+// by exact item id (the factory's random rolls produced naked bots). Returns pieces equipped;
+// failures land in failText. Used by .bot promote60 and the LFG/raidfill L60 promotions.
+uint32 PlayerbotGearRaidTier(Player* bot, std::string& failText);
+// Deterministic level-appropriate gear fill (fills empty armor/weapon slots from the
+// validated equip cache). Fixes naked leveling bots. Returns slots filled.
+uint32 PlayerbotFillLevelGear(Player* bot);
+// True if an equipped item is real obtainable gear (not a GM/costume/test item).
+bool PlayerbotIsObtainableGear(uint32 entry);
+// Strip non-level-appropriate/costume/unobtainable equipped gear. Call after factory.Randomize.
+uint32 PlayerbotStripBadGear(Player* bot);
+
 class PlayerbotHolder : public PlayerbotAIBase
 {
 public:
@@ -30,6 +42,12 @@ public:
 	void HandlePlayerBotLoginCallback(QueryResult * dummy, SqlQueryHolder * holder);
 
     void LogoutPlayerBot(uint32 guid, bool allowInstant = true, bool forDelete = false);
+
+    // Map threads must NEVER TeleportTo directly (cross-map teleports mid-map-update deadlock the
+    // MapManager — root cause of the 01:52/04:01 world freezes). Queue here; world thread drains.
+    struct QueuedTeleport { uint32 guid; uint32 map; float x, y, z; bool toHomebind; bool resurrect; };
+    void QueueBotTeleport(uint32 guid, uint32 map, float x, float y, float z, bool toHomebind, bool resurrect);
+    void DrainQueuedBotTeleports();
     // Thread-safe logout request for map-worker contexts. LogoutPlayerBot tears the Player down
     // and must only run on the world thread (it races the unlocked playerBots iteration there);
     // queued guids are drained at the top of UpdateAIInternal.
@@ -92,6 +110,8 @@ private:
     std::list<std::string> HandleRaid(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleRaidLeader(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleCreate(Player* master, const std::string param, AccountTypes security);
+    std::list<std::string> HandleRaidFill(Player* master, const std::string param, AccountTypes security);
+    std::list<std::string> HandlePromote60(Player* master, const std::string param, AccountTypes security);
 #ifdef GenerateBotTests
     std::list<std::string> HandleRunTest(Player* master, const std::string param, AccountTypes security);
 
@@ -145,6 +165,8 @@ private:
     PlayerBotMap playerBots;
     std::mutex m_pendingLogoutsLock;
     std::vector<uint32> m_pendingBotLogouts;
+    std::mutex m_pendingTeleportsLock;
+    std::vector<QueuedTeleport> m_pendingBotTeleports;
     std::map<std::string, HolderCommandHandler> m_holderHandlers;
     std::map<std::string, BotCommandHandler> m_botCommandHandlers;
     ObjectGuid m_spoofGuid;

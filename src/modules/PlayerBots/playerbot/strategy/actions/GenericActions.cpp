@@ -157,6 +157,21 @@ bool UpdateStrategyDependenciesAction::isUseful()
                 // Check if we need to add the strategy
                 if (!ai->HasStrategy(strategy.name, strategy.state))
                 {
+                    // CONVERGENCE GUARD: a strategy with no creator in this fork can never be
+                    // added -- ChangeStrategy("+name") silently no-ops, HasStrategy stays false,
+                    // and this action stays "useful" FOREVER, winning every tick at
+                    // ACTION_PASSTROUGH (100) and starving the entire brain below it (mock-game
+                    // finding: all 20 WSG bots frozen on 'update pvp strats'). Skip and log once.
+                    if (!ai->GetAiObjectContext()->GetStrategy(strategy.name))
+                    {
+                        static std::mutex missMx;
+                        static std::set<std::string> missLogged;
+                        std::lock_guard<std::mutex> lk(missMx);
+                        if (missLogged.insert(strategy.name).second)
+                            sLog.outString("UpdateStrategyDependencies: strategy '%s' has NO creator (class %u) -- skipping forever",
+                                strategy.name.c_str(), bot->getClass());
+                        continue;
+                    }
                     strategiesToAdd.emplace_back(&strategy);
                 }
             }

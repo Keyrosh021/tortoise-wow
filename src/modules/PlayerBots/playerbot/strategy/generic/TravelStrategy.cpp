@@ -113,9 +113,15 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
         "has nearby quest taker",
         NextAction::array(0, new NextAction("reset travel target", 6.99f), NULL)));
 
+    // READY-STALL FIX: "move to travel target" was relevance 1.0 -- it lost to every local rpg/no-op
+    // action every tick, so a bot with a chosen grind/quest destination just MILLED in place (measured
+    // 40-49% of questing bots stuck in READY, never departing -> ~63% of time stationary-waiting, the
+    // dominant reason combat is only ~9% vs the 30-47% goal). Raise it to 6.5 so a READY bot COMMITS to
+    // walking to its destination. Still below attack-anything (7.05), so if a mob is in front the bot
+    // fights first; and below the get-a-target requests (6.9+) so a bot without a target still picks one.
     triggers.push_back(new TriggerNode(
         "val::travel target ready",
-        NextAction::array(0, new NextAction("check mount state", 1), new NextAction("move to travel target", 1), NULL)));
+        NextAction::array(0, new NextAction("check mount state", 6.51f), new NextAction("move to travel target", 6.5f), NULL)));
 
     triggers.push_back(new TriggerNode(
         "val::travel target traveling",

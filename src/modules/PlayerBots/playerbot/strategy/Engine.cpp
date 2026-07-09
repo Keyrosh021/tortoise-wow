@@ -211,7 +211,7 @@ bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
                     }
                     else
                     {
-                        ai->GetBot()->Say(out.str(), (ai->GetBot()->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                        ai->GetBot()->Say(out.str(), PlayerbotChatLanguage(ai->GetBot()));
                     }
                 }
                 LogAction("A:%s - UNKNOWN", actionNode->getName().c_str());
@@ -283,6 +283,21 @@ bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
 
                         if (actionExecuted)
                         {
+                            // TEMP BGENGINE TRACE: the mock games show statues whose tactics
+                            // actions never run -- log the REAL per-tick winner for BG bots.
+                            if (ai->GetBot() && ai->GetBot()->InBattleGround())
+                            {
+                                static std::mutex beMx;
+                                static std::unordered_map<uint32, uint32> beLast;
+                                const uint32 beNow = WorldTimer::getMSTime();
+                                std::lock_guard<std::mutex> beLk(beMx);
+                                uint32& t = beLast[ai->GetBot()->GetGUIDLow()];
+                                if (!t || beNow - t >= 10000)
+                                {
+                                    t = beNow;
+                                    sLog.outString("BGENGINE %s won=%s rel=%.1f", ai->GetBot()->GetName(), action->getName().c_str(), relevance);
+                                }
+                            }
                             LogAction("A:%s - OK", action->getName().c_str());
                             MultiplyAndPush(actionNode->getContinuers(), 0, false, event, "cont");
                             lastRelevance = relevance;
@@ -316,7 +331,7 @@ bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
                             }
                             else
                             {
-                                ai->GetBot()->Say(out.str(), (ai->GetBot()->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                                ai->GetBot()->Say(out.str(), PlayerbotChatLanguage(ai->GetBot()));
                             }
                         }
                         LogAction("A:%s - IMPOSSIBLE", action->getName().c_str());
@@ -344,7 +359,7 @@ bool Engine::DoNextAction(Unit* unit, int depth, bool minimal, bool isStunned)
                         }
                         else
                         {
-                            ai->GetBot()->Say(out.str(), (ai->GetBot()->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                            ai->GetBot()->Say(out.str(), PlayerbotChatLanguage(ai->GetBot()));
                         }
                     }
                     lastRelevance = relevance;
@@ -829,7 +844,7 @@ bool Engine::ListenAndExecute(Action* action, Event& event)
         }
         else
         {
-            ai->GetBot()->Say(out.str(), (ai->GetBot()->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+            ai->GetBot()->Say(out.str(), PlayerbotChatLanguage(ai->GetBot()));
         }
     }
 

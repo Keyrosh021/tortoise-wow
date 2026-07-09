@@ -132,6 +132,81 @@ public:
         // MUST use this, not the raw GetPlayers() reference. Writers lock playersMutex too.
         PlayerBotMap GetPlayersCopy() { std::lock_guard<std::mutex> lock(playersMutex); return players; }
         std::mutex& GetPlayersMutex() { return playersMutex; }
+        // THREAD-SAFE real-player snapshot for MAP-THREAD readers (HasPlayerNearby /
+        // HasManyPlayersNearby / guild-chat checks). Iterating the raw `players` map from map
+        // threads while the world thread mutates it on login/logout was the root cause of the
+        // entire 2026-07-04 SIGSEGV family (LogPlayerLocation/AllowActivity frames + the
+        // frameless heap-corruption crash). Rebuilt once per world tick from LIVE lookups;
+        // readers copy the shared_ptr and touch NO Player pointers at all.
+        struct RealPlayerSnap
+        {
+            uint32 guidLow;
+            uint32 guildId;
+            uint32 mapId;
+            float x, y, z;
+            float camX, camY, camZ;
+            bool hasCam;
+        };
+        struct RealPlayerView
+        {
+            std::vector<RealPlayerSnap> players;
+            // bots on any real player's friend list (world thread pre-computes this so
+            // GetPriorityType never touches Player::GetSocial from a map thread)
+            std::unordered_set<uint32> friendBotGuids;
+        };
+        std::shared_ptr<const RealPlayerView> GetRealPlayerSnapshot()
+        {
+            std::lock_guard<std::mutex> lock(m_rpSnapMutex);
+            return m_rpSnap;
+        }
+        void RebuildRealPlayerSnapshot();   // world thread only (UpdateAIInternal)
+        // PROXIMITY BRAIN ALLOCATOR (the 10k illusion): a fixed budget of ActiveBrainBudget
+        // bot brains, always given to the bots NEAREST to real players so everything a player
+        // can see plays like a human, while the rest of the fleet stands parked-but-visible.
+        // Nearest-first ordering makes zones "warm up" as a player approaches. With no players
+        // online the budget rotates through the fleet (slow window) so the world progresses.
+        // Rebuilt every 2s on the world thread; map threads read the published set.
+        std::shared_ptr<const std::unordered_set<uint32>> GetActiveBrainSet() const
+        {
+            std::lock_guard<std::mutex> lock(m_abMutex);
+            return m_activeBrains;
+        }
+        void RebuildActiveBrainSet();       // world thread only (UpdateAIInternal)
+        // one-time fleet level spread toward hash-assigned 1-60 targets (paced, idempotent,
+        // never de-levels); teleports each spread bot to a level-appropriate zone
+        void SpreadFleetLevels();
+        bool RealPlayerActive();
+        // CITY LIFE: teleport a hash-band of bots to capital cities, level them high + gear them,
+        // and sit them AFK so capitals feel populated. Paced, world-thread only, idempotent.
+        void PopulateCapitalCities();
+        void ContainLowLevelBots();
+        // Instant BG pop: when a real player queues a BG, immediately enqueue + port enough bots
+        // (both factions, matching bracket) server-side so the queue pops now (TurtleLFG-style).
+        void InstantFillBgQueue(Player* realPlayer, uint32 bgTypeId, uint32 bracketId);
+        void QueueInstantFillBg(uint32 playerGuidLow, uint32 bgTypeId, uint32 bracketId); // MAP-THREAD SAFE entry
+        void DrainBgFillRequests();   // world thread: perform the queued fills
+        void SpawnMockBattlegrounds(); // bot-only BGs for autonomous tactics observation
+        void EvacuateStrandedBgBots(); // pull bots out of dead/stuck mock BGs (crash source) when mocks off
+        void MockBgWatch();            // 20s telemetry on every live WSG: scores/flags/AFK bots
+        void DrainPendingBgPorts();   // port enqueued bots into their BG the tick they get invited
+        void PromoteSixtyCampaign();  // hold L60 population at Level60Target: promote low bots, gear T2, teleport to L60 zones
+        void ZoneMismatchSweep();     // teleport high-level bots squatting in low-level zones to level-appropriate zones
+        bool IsCityResident(uint32 guidLow) const;
+        // DUNGEON/RAID ENTRANCE LOITERERS ("actor roles"): rotate level-appropriate bots to loiter at
+        // dungeon/raid entrances (fake group-forming); some walk in and zone in. ROTATES so different
+        // bots play the role over time (feels like different people running dungeons).
+        void PopulateDungeonEntrances();
+        bool IsDungeonLoiterer(uint32 guidLow) const;
+        bool GetDungeonLoiterSpot(uint32 guidLow, uint32& mapId, float& x, float& y, float& z, bool& zoneIn) const;
+        void EndDungeonRole(uint32 guidLow);   // free the slot for rotation
+        bool GetDungeonZoneInDest(uint32 guidLow, uint32& mapId, float& x, float& y, float& z) const;
+        void MarkLoitererZonedIn(uint32 guidLow);
+        bool LoitererDwellExpired(uint32 guidLow) const;
+        // MAP-THREAD SAFE teleport request: TeleportTo/RandomTeleportForLevel must NEVER run from a
+        // map-thread AI tick (documented corruption/crash source). Map threads enqueue here; the
+        // world thread executes via DrainBotTeleports(). forLevel=true -> RandomTeleportForLevel.
+        void QueueBotTeleport(uint32 guidLow, uint32 mapId, float x, float y, float z, bool forLevel, bool resurrect = false);
+        void DrainBotTeleports();      // world thread only
         Player* GetPlayer(uint32 playerGuid);
         // Live census: for each REAL player online, tally what the bots within render
         // distance are doing (fighting/moving/idle/dead/...) -> logs/nearby_census.csv.
@@ -144,6 +219,19 @@ public:
         void LogBotDiagSample();
         // PROOF: top quest mobs idle bots starve on + map-wide alive count + bot clustering.
         void LogStuckMobReport();
+        // 10K TWO-TIER FLEET: is this bot in the fully-active cohort? Deterministic hash of
+        // (guid, rotation epoch) so ~ActiveCohortSize of MaxRandomBots are active at any time
+        // with no shared state; membership rotates every CohortRotateMinutes. Everyone else
+        // is LOD-dormant unless a real player is nearby. Safe from any thread.
+        bool IsActiveCohort(uint32 guidLow) const;
+        // Synthetic progression for dormant bots (world thread only, called from
+        // UpdateAIInternal): measures real xp/gold rates from the active cohort into
+        // per-level-bracket EMAs, applies rate*SyntheticRateFactor to dormant bots ~1/min.
+        // Dormant bots keep leveling and earning without costing map-thread CPU.
+        void UpdateSyntheticProgress();
+        // Self-healing raid gear: naked max-level bots (incl. ones inside a player's raid)
+        // get the deterministic T2 kit automatically, every 30s. World thread only.
+        void SweepNakedMaxLevelBots();
         void PrintStats(uint32 requesterGuid);
         double GetBuyMultiplier(Player* bot);
         double GetSellMultiplier(Player* bot);
@@ -153,6 +241,10 @@ public:
         void Refresh(Player* bot);
         void RandomTeleportForLevel(Player* bot, bool activeOnly);
         void RandomTeleportForLevel(Player* bot) { return RandomTeleportForLevel(bot, true); }
+        // Nearest level+faction-appropriate mob-spawn cluster on the bot's map (from the spawn cache),
+        // at least minDist away (so it's a DIFFERENT camp, not the depleted one the bot stands on).
+        // Used by the FSM to make an idle bot ALWAYS walk to content instead of standing around.
+        bool GetNearestGrindSpot(Player* bot, float minDist, float& outX, float& outY, float& outZ);
         void RandomTeleportForRpg(Player* bot, bool activeOnly);
         void RandomTeleportForRpg(Player* bot) { return RandomTeleportForRpg(bot, true); }
         int GetMaxAllowedBotCount();
@@ -295,6 +387,66 @@ public:
         uint32 m_nextCensusMs = 0;   // throttle LogNearbyCensus to ~3s
         uint32 m_nextDiagMs = 0;     // throttle LogBotDiagSample to ~60s
         uint32 m_nextStuckMs = 0;    // throttle LogStuckMobReport to ~5min (heavy)
+        uint32 m_nextNakedSweepMs = 0;   // naked-60 gear sweep throttle
+        // virtual observer anchor (synthetic player when nobody is online)
+        uint32 m_voMapId = 0; float m_voX = 0, m_voY = 0, m_voZ = 0;
+        bool m_voValid = false;
+        uint32 m_voRotateMs = 0;
+        uint32 m_abLogMs = 0;   // allocator csv log throttle
+        uint32 m_lvlSpreadCursor = 0;   // level-spread walk position
+        uint32 m_lvlSpreadDoneMs = 0;   // set when a full pass found nothing to do
+        uint32 m_cityCursor = 0;        // city-populate walk position
+        uint32 m_cityNextMs = 0;        // city-populate pacing
+        uint32 m_lowContainMs = 0;
+        uint32 m_lowContainCursor = 0;
+        uint32 m_nakedSweepCursor = 0;
+        struct BgFillRequest { uint32 playerGuidLow; uint32 bgTypeId; uint32 bracketId; };
+        std::mutex m_bgFillMutex;
+        std::vector<BgFillRequest> m_bgFillRequests;
+        struct PendingBgPort { uint32 guidLow; uint32 mapId; uint32 queueTypeId; uint32 bgTypeId; uint32 bracketId; };
+        std::vector<PendingBgPort> m_pendingBgPort;
+        uint32 m_pendingBgPortUntilMs = 0;
+        uint32 m_pendingBgKickMs = 0;   // 2s re-kick of the event-scheduled queue update
+        uint32 m_pendingBgDiagMs = 0;   // 5s throttle for BGPORT wait diagnostics
+        bool   m_mockBgSpawned = false;
+        uint32 m_mockWatchMs = 0;
+        std::unordered_map<uint32, uint32> m_stuckStreak; // consecutive STUCK censuses per bot (near-player rescue)
+        uint32 m_promote60NextMs = 0;
+        uint32 m_promote60Cursor = 0;
+        uint32 m_zoneFixNextMs = 0;
+        uint32 m_zoneFixCursor = 0;
+        // dungeon/raid entrance loiterer role pool
+        struct DungeonEntrance { uint32 map; float x, y, z; uint8 minLevel; bool isRaid;
+                                 uint32 destMap; float destX, destY, destZ; };
+        std::vector<DungeonEntrance> m_dungeonEntrances;
+        bool m_dungeonBuilt = false;
+        struct LoiterRole { uint32 entranceIdx; uint32 expiryMs; bool zoneIn; uint32 zonedInMs = 0; };
+        std::unordered_map<uint32, LoiterRole> m_dungeonRoles;   // guidLow -> role
+        mutable std::mutex m_dungeonMutex;
+        uint32 m_dungeonNextMs = 0;
+        uint32 m_dungeonCursor = 0;
+        uint32 m_bgEvacNextMs = 0;
+        // map-thread-safe teleport request queue (drained on the world thread)
+        struct BotTeleRequest { uint32 guid; uint32 map; float x, y, z; bool forLevel; bool resurrect; };
+        std::vector<BotTeleRequest> m_teleRequests;
+        std::mutex m_teleMutex;
+        // proximity brain allocator storage
+        std::shared_ptr<const std::unordered_set<uint32>> m_activeBrains = std::make_shared<const std::unordered_set<uint32>>();
+        mutable std::mutex m_abMutex;
+        uint32 m_abNextMs = 0;          // 2s rebuild throttle
+        uint32 m_abWindowStart = 0;     // no-players rotation window anchor
+        uint32 m_abWindowRotateMs = 0;  // when to advance the rotation window
+        // real-player snapshot storage (see GetRealPlayerSnapshot)
+        std::shared_ptr<const RealPlayerView> m_rpSnap = std::make_shared<const RealPlayerView>();
+        std::mutex m_rpSnapMutex;
+        // 10K synthetic progression state (world-thread only)
+        struct SynthState { uint32 lastXp = 0; uint32 lastMoney = 0; uint32 lastMs = 0; uint8 lastLevel = 0; uint8 wasDormant = 2; };
+        std::unordered_map<uint32, SynthState> synthStates;
+        double synthXpRate[7] = {};   // EMA xp/hour by level/10 bracket, measured from active bots
+        double synthGoldRate[7] = {}; // EMA copper/hour
+        uint32 synthCursor = 0;
+        uint32 synthAppliedBots = 0, synthAppliedXp = 0, synthAppliedMoney = 0;
+        uint32 synthLogDueMs = 0;
         uint32 bgBotsCount;
         uint32 playersLevel = 0;
         uint32 botCount = 0;

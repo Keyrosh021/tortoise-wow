@@ -18,6 +18,14 @@ bool FollowAction::Execute(Event& event)
 
     if (ai->IsSafe(followTarget))
     {
+        // LOOSE FOLLOW (humanization): bots following a REAL player must not use the core
+        // MoveFollow generator -- it re-anchors every bot to the master's FACING every tick,
+        // so the whole raid snap-rotates around the player like a bodyguard detail. Loose
+        // mode gives each bot a world-space slot, reaction latency and stragglers.
+        if (sPlayerbotAIConfig.looseFollow && followTarget->IsPlayer()
+            && !((Player*)followTarget)->GetPlayerbotAI() && ai->HasRealPlayerMaster())
+            return LooseFollow(followTarget);
+
         if (formation)
         {
             WorldLocation loc = formation->GetLocation();
@@ -31,6 +39,88 @@ bool FollowAction::Execute(Event& event)
         moved = Follow(followTarget, 0, 0);
 
     return moved;
+}
+
+bool FollowAction::LooseFollow(Unit* master)
+{
+    struct LooseState
+    {
+        float slotAngle = 0, slotDist = 0;   // personal WORLD-space slot around the master
+        uint32 rollAtMs = 0;                 // when to re-roll the slot (drifting crowd)
+        uint32 reactDelayMs = 0;             // personal reaction latency to master movement
+        uint32 notedMoveMs = 0;              // when we noticed the master strayed
+        float anchorX = 0, anchorY = 0;      // master position we last pathed against
+        bool anchored = false;
+    };
+    static std::mutex s_mx;
+    static std::unordered_map<uint32, LooseState> s_states;
+
+    const uint32 now = WorldTimer::getMSTime();
+    const float mx = master->GetPositionX(), my = master->GetPositionY();
+
+    bool moveNow = false;
+    float slotAngle, slotDist, ax, ay;
+    {
+        std::lock_guard<std::mutex> lk(s_mx);
+        LooseState& st = s_states[bot->GetGUIDLow()];
+        if (!st.rollAtMs || now >= st.rollAtMs)
+        {
+            st.rollAtMs = now + urand(45000, 90000);
+            st.slotAngle = frand(0, 2 * M_PI_F);
+            st.slotDist = frand(3.0f, 14.0f);
+            st.reactDelayMs = urand(300, 1800);
+            if (!urand(0, 4))
+                st.reactDelayMs += urand(1000, 2500);   // straggler personality
+        }
+
+        const float ddx = mx - st.anchorX, ddy = my - st.anchorY;
+        const float strayed2 = ddx * ddx + ddy * ddy;
+        if (!st.anchored)
+        {
+            st.anchored = true; st.anchorX = mx; st.anchorY = my;
+            moveNow = true;
+        }
+        else if (strayed2 > 60.0f * 60.0f)
+        {
+            // master is sprinting/mounted away -- no lazy reaction, keep up NOW
+            st.anchorX = mx; st.anchorY = my; st.notedMoveMs = 0;
+            moveNow = true;
+        }
+        else if (strayed2 > 10.0f * 10.0f)
+        {
+            // master strayed from our anchor: react only after the personal latency
+            if (!st.notedMoveMs)
+                st.notedMoveMs = now;
+            else if (now - st.notedMoveMs >= st.reactDelayMs)
+            {
+                st.anchorX = mx; st.anchorY = my; st.notedMoveMs = 0;
+                moveNow = true;
+            }
+        }
+        else
+            st.notedMoveMs = 0;   // master is loitering near our anchor -- hold position
+
+        slotAngle = st.slotAngle; slotDist = st.slotDist;
+        ax = st.anchorX; ay = st.anchorY;
+    }
+
+    const float tx = ax + cos(slotAngle) * slotDist;
+    const float ty = ay + sin(slotAngle) * slotDist;
+
+    // catch-up guard: deliberately holding is fine, being LEFT BEHIND is not (rez, loot detour)
+    if (!moveNow)
+    {
+        const float bdx = tx - bot->GetPositionX(), bdy = ty - bot->GetPositionY();
+        if (bdx * bdx + bdy * bdy > 30.0f * 30.0f)
+            moveNow = true;
+    }
+
+    if (!moveNow)
+        return true;   // deliberate hold = success (don't let the engine fidget)
+
+    float tz = master->GetPositionZ();
+    bot->UpdateAllowedPositionZ(tx, ty, tz);
+    return MoveTo(master->GetMapId(), tx, ty, tz, false, false);
 }
 
 bool FollowAction::isUseful()

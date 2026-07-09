@@ -97,6 +97,46 @@ void ai::SuppressLootGuid(ObjectGuid guid, time_t until)
     s_suppressedLootGuids[guid.GetRawValue()] = until;
 }
 
+namespace
+{
+    std::mutex s_targetDeferMx;
+    std::unordered_map<uint32, std::unordered_map<uint64, time_t>> s_targetDefers;
+}
+
+void ai::DeferTargetGuidForBot(Player* bot, ObjectGuid guid, time_t delaySeconds)
+{
+    if (!bot || !guid)
+        return;
+    std::lock_guard<std::mutex> lk(s_targetDeferMx);
+    auto& m = s_targetDefers[bot->GetGUIDLow()];
+    m[guid.GetRawValue()] = time(nullptr) + delaySeconds;
+    if (m.size() > 64)
+    {
+        const time_t now = time(nullptr);
+        for (auto it = m.begin(); it != m.end();)
+            it = (it->second < now) ? m.erase(it) : std::next(it);
+    }
+}
+
+bool ai::IsTargetGuidSkippedForBot(Player* bot, ObjectGuid guid)
+{
+    if (!bot || !guid)
+        return false;
+    std::lock_guard<std::mutex> lk(s_targetDeferMx);
+    auto bi = s_targetDefers.find(bot->GetGUIDLow());
+    if (bi == s_targetDefers.end())
+        return false;
+    auto ti = bi->second.find(guid.GetRawValue());
+    if (ti == bi->second.end())
+        return false;
+    if (ti->second < time(nullptr))
+    {
+        bi->second.erase(ti);
+        return false;
+    }
+    return true;
+}
+
 bool ai::IsLootGuidSkippedForBot(Player* bot, ObjectGuid guid)
 {
     if (!bot || !guid)

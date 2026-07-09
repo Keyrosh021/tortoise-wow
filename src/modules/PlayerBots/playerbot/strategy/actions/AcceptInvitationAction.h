@@ -19,7 +19,10 @@ namespace ai
             if (!inviter)
                 return false;
 
-			if (!ai->GetSecurity()->CheckLevelFor(PlayerbotSecurityLevel::PLAYERBOT_SECURITY_INVITE, false, inviter))
+			// Real players on this server always get their invite accepted (user mandate: kicked
+			// bots must be re-invitable; security levels are for bot-to-bot spam, not humans).
+			if (!inviter->isRealPlayer() &&
+			    !ai->GetSecurity()->CheckLevelFor(PlayerbotSecurityLevel::PLAYERBOT_SECURITY_INVITE, false, inviter))
             {
                 WorldPacket data(SMSG_GROUP_DECLINE, 10);
                 data << bot->GetName();
@@ -71,7 +74,7 @@ namespace ai
                     if (guild && master->IsInGuild(bot->GetGuildId()))
                         guild->BroadcastToGuild(bot->GetSession(), reply, LANG_UNIVERSAL);
                     else if (sServerFacade.GetDistance2d(bot, master) < sPlayerbotAIConfig.spellDistance * 1.5)
-                        bot->Say(reply, (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                        bot->Say(reply, PlayerbotChatLanguage(bot));
                 }
 
                 Formation* masterFormation = MAI_VALUE(Formation*, "formation");

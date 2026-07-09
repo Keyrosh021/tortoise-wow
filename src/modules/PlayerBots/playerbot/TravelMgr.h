@@ -127,6 +127,7 @@ namespace ai
 	protected:
 		void SetExpireFast() { expireDelay = 60000; } //1 minute
 		void SetCooldownShort() { cooldownDelay = 1000; } //1 second
+		void SetCooldownMedium() { cooldownDelay = 8000; } //8 seconds
 		void SetCooldownLong() { cooldownDelay = 300000; } //5 minutes
 		virtual std::vector<std::string> GetTravelConditions() const { return {}; }
 
@@ -278,7 +279,11 @@ namespace ai
 	class GrindTravelDestination : public EntryTravelDestination
 	{
 	public:
-		GrindTravelDestination(TravelDestinationPurpose purpose, uint32 /*id*/, int32 entry) : EntryTravelDestination(purpose, entry) {}
+		// 8s cooldown (was the 60s default): grinding is the questless bot's core activity, and a
+		// 60s park after every grind session was a top time-sink (measured 32% of questing snapshots
+		// sat in travel COOLDOWN, WORK=0%). 8s lets a bot re-pick the next ACTIVE camp quickly (the
+		// chooser already filters inactive/over-farmed camps via IsActive) without the 1s flicker.
+		GrindTravelDestination(TravelDestinationPurpose purpose, uint32 /*id*/, int32 entry) : EntryTravelDestination(purpose, entry) { SetCooldownMedium(); }
 
 		virtual bool IsPossible(const PlayerTravelInfo& info) const override;
 		virtual bool IsActive(Player* bot, const PlayerTravelInfo& info) const override;

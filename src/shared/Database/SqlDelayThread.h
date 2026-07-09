@@ -38,14 +38,14 @@ class SqlDelayThread
         SqlQueue m_serialDelayQueue;
         SqlConnection *m_dbConnection;                     ///< Pointer to DB connection
         volatile bool m_running;
-        const char* Name;
+        std::string Name;   // OWNED copy: a const char* here dangled (ASAN stack-use-after-scope: the SQL thread sprintf'd a dead main-thread stack string)
 
 
         //process all enqueued requests
         void ProcessRequests();
 
     public:
-        SqlDelayThread(const char* InName, Database* db, SqlConnection* conn);
+        SqlDelayThread(std::string InName, Database* db, SqlConnection* conn);
         ~SqlDelayThread();
 
         ///< Put sql statement to delay queue

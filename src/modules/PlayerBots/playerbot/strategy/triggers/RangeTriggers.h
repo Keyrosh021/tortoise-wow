@@ -202,7 +202,28 @@ namespace ai
         }
     };
 
-    class EnemyInRangeTrigger : public Trigger 
+    // HEALER MELEE-DANGER: fires when a hostile is in melee range of the HEALER itself, regardless
+    // of the healer's (ally) target. The other range triggers key on "current target" (an offensive
+    // target a pure healer never has), so nothing ever backed a healer out of melee -> they glued to
+    // the tank at 1.5y and ate cleave/AoE. Maps to "flee" so the healer holds at heal range.
+    class HealerInMeleeDangerTrigger : public Trigger
+    {
+    public:
+        HealerInMeleeDangerTrigger(PlayerbotAI* ai) : Trigger(ai, "healer in melee danger", 2) {}
+        virtual bool IsActive() override
+        {
+            if (!ai->IsHeal(bot))
+                return false;
+            // something is meleeing the healer directly
+            for (Unit* atk : bot->getAttackers())
+                if (atk && atk->IsAlive() && !atk->IsPlayer()
+                    && sServerFacade.GetDistance2d(bot, atk) < (sPlayerbotAIConfig.meleeDistance + 3.0f))
+                    return true;
+            return false;
+        }
+    };
+
+    class EnemyInRangeTrigger : public Trigger
     {
     public:
         EnemyInRangeTrigger(PlayerbotAI* ai, std::string name, float distance, bool enemyMustBePlayer = false, bool enemyTargetsBot = false)

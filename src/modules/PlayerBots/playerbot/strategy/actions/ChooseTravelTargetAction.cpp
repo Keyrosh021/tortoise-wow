@@ -8,6 +8,8 @@
 #include "playerbot/strategy/values/GuildValues.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/QuestGuideMgr.h"
+#include "playerbot/GuideFollowMgr.h"
+#include "Formulas.h"
 #include "playerbot/BotLearningMgr.h"
 #include "Guild/GuildMgr.h"
 #include "PerfStats.h"
@@ -583,6 +585,20 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
             {
                 ++bannedEntrySkips;
                 continue;
+            }
+
+            // LETHAL-ZONE GUARD (deaths lever): never route a bot to a destination whose area
+            // level exceeds its own by 6+ (measured: L12-13 bots routed into Eastern Plaguelands
+            // spent >50% of their time dead; deaths goal is 0.05-0.15/hr). Level-appropriate and
+            // unknown (level 0) areas pass untouched.
+            if (position)
+            {
+                const int32 areaLevel = position->getAreaLevel();
+                if (areaLevel > 0 && areaLevel > (int32)bot->GetLevel() + 15)
+                {
+                    ++bannedEntrySkips;
+                    continue;
+                }
             }
 
             if (onlyActive && !target->IsForced() && isActive.find(destination) != isActive.end() && !isActive[destination])
@@ -1974,8 +1990,69 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
         sPlayerbotAIConfig.logEvent(ai, "RecentQuestTurnInAnchor", "QuestFetches", out.str());
     }
 
+    // CAMP MODE v1 (directive 3, the band lever): in a DENSE spot (>=3 killable XP mobs within
+    // 65y) with no quest turn-ins waiting, don't start a new travel leg — stay and let the grind
+    // chain run. The travel target cools down 60s, so guides resume the moment the pocket thins.
+    if (autonomousRandomBot && !turnInQuestCount)
+    {
+        uint32 nearValid = 0;
+        std::list<ObjectGuid> campTargets = AI_VALUE(std::list<ObjectGuid>, "possible targets");
+        for (const ObjectGuid& guid : campTargets)
+        {
+            Unit* unit = ai->GetUnit(guid);
+            if (!unit || !unit->IsAlive())
+                continue;
+            Creature* creature = dynamic_cast<Creature*>(unit);
+            if (!creature || !MaNGOS::XP::Gain(bot, creature))
+                continue;
+            if ((int32)creature->GetLevel() + 5 < (int32)bot->GetLevel())
+                continue;                                // near-gray trash doesn't justify camping
+            if (bot->GetDistance(unit) > 65.0f)
+                continue;
+            if (++nearValid >= 2)
+                break;
+        }
+        if (nearValid >= 2)
+        {
+            TravelTarget* campTarget = AI_VALUE(TravelTarget*, "travel target");
+            if (campTarget)
+            {
+                campTarget->SetStatus(TravelStatus::TRAVEL_STATUS_COOLDOWN);
+                campTarget->SetExpireIn(60000);
+            }
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+                sPlayerbotAIConfig.logEvent(ai, "CampModeHold", "dense pocket", std::to_string(nearValid));
+            return false;                                // camp: grind chain owns the next 60s
+        }
+    }
+
+    // LEVELING-GUIDE ROUTE (speedrunner steps, ai_playerbot_leveling_step): if the bot has a
+    // current guide step, its quest leads the fetch list — the route already encodes what to do
+    // next, no hub-director/heuristic thinking needed. Generic machinery below stays as fallback.
+    bool guideStepSeeded = false;
+    if (autonomousRandomBot)
+    {
+        ai::GuideStep gstep;
+        if (sGuideFollowMgr.GetCurrentStep(bot, gstep))
+        {
+            uint32 purpose = gstep.action == "turnin" ? (uint32)TravelDestinationPurpose::QuestTaker
+                : gstep.action == "accept" ? (uint32)TravelDestinationPurpose::QuestGiver
+                : ((uint32)TravelDestinationPurpose::QuestObjective1 | (uint32)TravelDestinationPurpose::QuestObjective2 |
+                   (uint32)TravelDestinationPurpose::QuestObjective3 | (uint32)TravelDestinationPurpose::QuestObjective4);
+            destinationFetches.push_back({ purpose, (int32)gstep.questId, std::max(genericQuestGiverRange, 1500.0f) });
+            guideStepSeeded = true;
+            if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+            {
+                std::ostringstream out;
+                out << "action=" << gstep.action << " quest=" << gstep.questId
+                    << " guide=" << gstep.guideId << " seq=" << gstep.seqNo;
+                sPlayerbotAIConfig.logEvent(ai, "GuideStepSelected", "QuestGuide", out.str());
+            }
+        }
+    }
+
     bool hasGuideQuestCandidates = false;
-    if (!starterQuestSeeded && !hasQueuedQuestWork)
+    if (!starterQuestSeeded && !hasQueuedQuestWork && !guideStepSeeded)
     {
         std::string directorTrace;
         directorHubIntent = sQuestGuideMgr.SelectNextHub(bot, &directorTrace);

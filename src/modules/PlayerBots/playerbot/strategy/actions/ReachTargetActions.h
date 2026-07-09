@@ -65,6 +65,18 @@ namespace ai
                     chaseDist = (chaseDist - sPlayerbotAIConfig.contactDistance);
                 }
 
+                // MELEE CONTACT SNAP ("run to it and stick to it every tick", like a
+                // right-clicked companion). For a melee attacker, chasing to
+                // (ATTACK_DISTANCE - contact) = 4.5y keeps the bot at the OUTER edge of range;
+                // MoveChase's offset sits BEYOND the combined combat reaches, so the maintained
+                // center-to-center gap exceeds ATTACK_DISTANCE(5y) and swings whiff -- the exact
+                // "walks up to the target but stops short and can't hit" bug. Every core creature
+                // chases its victim with offset 0 (contact). Match that for hostile melee reaches
+                // so the bot glues to swing range. Continuous MoveChase (in ChaseTo) already
+                // re-paths every tick, so this only tightens where it stops.
+                if (!isFriend && !ai->IsRanged(bot) && range > 0.0f && range <= ATTACK_DISTANCE)
+                    chaseDist = 0.0f;
+
                 if (MoveStyleValue::WaitForEnemy(ai) && target->m_movementInfo.HasMovementFlag(movementFlagsMask) &&
                         sServerFacade.IsInFront(target, bot, sPlayerbotAIConfig.sightDistance, CAST_ANGLE_IN_FRONT) &&
                         sServerFacade.IsDistanceGreaterThan(distanceToTarget, sPlayerbotAIConfig.tooCloseDistance))
@@ -188,7 +200,13 @@ namespace ai
                                     }
                                 }
                             }
-                            return false;
+                            // A reach anchor the bot doesn't even KNOW (result 56: wrong-expansion
+                            // spell in the strategy list, missing talent, unlearned rank) must NOT
+                            // freeze the bot at range -- that's the "DPS stands in attack animation
+                            // and never walks up, re-checking range forever" dungeon bug. Closing to
+                            // the target is still the right move; only real cast blockers stop us.
+                            if (reachCheck != SPELL_FAILED_NOT_KNOWN)
+                                return false;
                         }
 
                         // Do not use self/point-blank utility spells as chase anchors for ranged combat.
@@ -294,6 +312,7 @@ namespace ai
 
             return ReachTargetAction::isUseful();
         }
+
     };
 
     class ReachSpellAction : public ReachTargetAction

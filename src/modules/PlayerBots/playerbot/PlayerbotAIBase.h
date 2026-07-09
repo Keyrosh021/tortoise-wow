@@ -21,7 +21,7 @@ public:
 protected:
     virtual void UpdateAIInternal(uint32 elapsed, bool minimal = false);
     bool CanUpdateAIInternal() const { return aiInternalUpdateDelay < 100U; }
-    void SetAIInternalUpdateDelay(const uint32 delay);
+    virtual void SetAIInternalUpdateDelay(const uint32 delay);
     void ResetAIInternalUpdateDelay() { aiInternalUpdateDelay = 0U; }
     void IncreaseAIInternalUpdateDelay(uint32 delay);
     void YieldAIInternalThread(bool minimal = false);

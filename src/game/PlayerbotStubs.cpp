@@ -21,6 +21,11 @@ bool Player::isRealPlayer() const             { return true; }
 void Player::UpdatePlayerbotHooks(uint32)     {}
 
 void World::UpdatePlayerbotsTick(uint32)      {}
+
+#include "LFG/TurtleLFGMgr.h"
+std::vector<ObjectGuid> Playerbot_SelectLfgFill(uint32, uint32, uint32, uint32, uint32, std::vector<ObjectGuid> const&) { return {}; }
+void Playerbot_PrepareLfgBot(ObjectGuid, ObjectGuid) {}
+uint8 Playerbot_GetRoleOf(Player*) { return 4; }
 void World::InitPlayerbotsAtStartup()         {}
 
 bool Player_DispatchBotOutgoingPacket(Player*, WorldPacket const&) { return false; }
@@ -46,3 +51,4 @@ bool ChatHandler::HandleAhBotCommand(char*)
     { SendSysMessage("AHBot not built (BUILD_PLAYERBOTS=OFF)."); return true; }
 bool ChatHandler::HandlePerfMonCommand(char*)
     { SendSysMessage("Bot performance monitor not built (BUILD_PLAYERBOTS=OFF)."); return true; }
+void Playerbot_InstantFillBg(Player*, uint32, uint32) {}

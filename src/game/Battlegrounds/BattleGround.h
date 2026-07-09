@@ -344,6 +344,15 @@ class BattleGround
 
         void ModifyStartDelayTime(int diff) { m_StartDelayTime -= diff; }
         void SetStartDelayTime(int Time)    { m_StartDelayTime = Time; }
+        // shrink the starting-event table (stock 2m/1m/30s): the event sequence RESETS
+        // m_StartDelayTime to the FIRST table entry when the first player ports in, so a
+        // bare SetStartDelayTime before anyone enters is always stomped back to 2 minutes.
+        void SetStartDelayTimeTable(int first, int second, int third)
+        {
+            m_StartDelayTimes[BG_STARTING_EVENT_FIRST]  = BattleGroundStartTimeIntervals(first);
+            m_StartDelayTimes[BG_STARTING_EVENT_SECOND] = BattleGroundStartTimeIntervals(second);
+            m_StartDelayTimes[BG_STARTING_EVENT_THIRD]  = BattleGroundStartTimeIntervals(third);
+        }
 
         void SetMaxPlayersPerTeam(uint32 MaxPlayers) { m_MaxPlayersPerTeam = MaxPlayers; }
         void SetMinPlayersPerTeam(uint32 MinPlayers) { m_MinPlayersPerTeam = MinPlayers; }

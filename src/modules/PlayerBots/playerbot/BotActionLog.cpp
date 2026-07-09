@@ -4,6 +4,7 @@
 
 #include "playerbot/playerbot.h"
 #include "BotActionLog.h"
+#include "BotLearningMgr.h"
 #include "PlayerbotAI.h"
 #include "BotDiagnostics.h"  // for SC_LOG + IsActionLogEnabled
 #include "PlayerbotAIConfig.h"
@@ -458,6 +459,11 @@ void BotActionLog_LogDamage(Unit* attacker, Unit* victim, uint32 damage, uint32 
     PlayerbotAI* attackerAi = AiFor(attacker);
     PlayerbotAI* victimAi   = AiFor(victim);
     if (!attackerAi && !victimAi) return;
+
+    // Phase 4 death attribution: remember the last hit each BOT took (spell + source entry).
+    if (victimAi && victim && attacker)
+        botlearn::RecordDamageTaken(victim->GetGUIDLow(), spellId,
+            attacker->GetTypeId() == TYPEID_UNIT ? attacker->GetEntry() : 0);
 
     auto bucket = [&](Unit* who) -> bool {
         uint64 g = who ? who->GetObjectGuid().GetRawValue() : 0;

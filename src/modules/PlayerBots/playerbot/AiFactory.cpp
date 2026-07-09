@@ -319,6 +319,12 @@ BotRoles AiFactory::GetPlayerRoles(const Player* player)
         }
     }
 
+    // Stance/form-aware override: a warrior in defensive stance / druid in bear form IS tanking
+    // right now regardless of spec tab. The override above was computed then discarded for years
+    // (always returned the spec-tab role) -- honor it.
+    if (role != BOT_ROLE_NONE)
+        return role;
+
     return GetPlayerRoles(cls, tab);
 }
 
@@ -558,7 +564,7 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
 #endif
     }
 
-    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player))
+    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player) || facade->GetMaster())
 	{
         combatEngine->addStrategy("roll");
 
@@ -948,6 +954,10 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
             : (sPlayerbotAIConfig.useWanderAsDefaultFollowStrategy ? "wander" : "follow");
         (void)master;
         nonCombatEngine->addStrategies("racials", "nc", "food", wanderFollow, "default", "quest", "loot", "gather", "duel", "emote", "buff", "mount", NULL);
+        // Instance behavior framework (vanilla raid/dungeon strategies): its Enter*/Leave* triggers
+        // key on instance map ids, so it is inert in the open world. Without this the per-instance
+        // strategies (hazard avoidance etc.) NEVER activate — the enable chain starts here.
+        nonCombatEngine->addStrategy("dungeon");
     }
 
     if ((facade->HasRealPlayerMaster() && sPlayerbotAIConfig.jumpWithPlayer) ||
@@ -963,7 +973,7 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
     if (!player->InBattleGround() && sPlayerbotAIConfig.jumpFollow)
         nonCombatEngine->addStrategy("follow jump");
 
-    if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !player->InBattleGround())
+    if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player) || facade->GetMaster()) && !player->InBattleGround())
     {   
         Player* master = facade->GetMaster();
 

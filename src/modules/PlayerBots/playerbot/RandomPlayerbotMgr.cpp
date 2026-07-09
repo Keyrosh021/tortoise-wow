@@ -1,4 +1,6 @@
 #include "Config/Config.h"
+#include "playerbot/strategy/values/PositionValue.h"
+#include "Battlegrounds/BattleGroundWS.h"
 #include <atomic>
 
 #include "playerbot/playerbot.h"
@@ -7,6 +9,8 @@
 #include "playerbot/PerformanceMonitor.h"
 #include "strategy/values/LastMovementValue.h"
 #include "AccountMgr.h"
+#include "SocialMgr.h"
+#include "GuideFollowMgr.h"
 #include "ObjectMgr.h"
 #include "Database/DatabaseEnv.h"
 #include "PlayerbotAI.h"
@@ -534,7 +538,12 @@ void RandomPlayerbotMgr::LogPlayerLocation()
 
     for (auto i : GetPlayersCopy())
     {
-        Player* bot = i.second;
+        // Do NOT trust the cached Player* -- a real player who disconnected can leave a
+        // dangling entry until OnPlayerLogout catches up, and a non-null but freed
+        // PlayerbotAI* passed every null check here (both 15:56/16:00 SIGSEGVs:
+        // LogPlayerLocation -> AllowActivity on the world thread while the user relogged).
+        // Re-resolve by guid; ObjectAccessor only returns live players.
+        Player* bot = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, i.first));
         if (!bot || !bot->IsInWorld())
             continue;
         if (bot->GetPlayerbotAI())
@@ -670,10 +679,12 @@ void RandomPlayerbotMgr::LogPlayerLocation()
                 });
             }
 
-            for (auto i : GetPlayers())
+            for (auto i : GetPlayersCopy())
             {
-                Player* bot = i.second;
-                if (!bot)
+                // live re-resolve: stored Player* can be stale after a disconnect (same
+                // class as the AllowActivity SIGSEGVs)
+                Player* bot = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, i.first));
+                if (!bot || !bot->IsInWorld())
                     continue;
 
                 std::ostringstream out;
@@ -830,6 +841,7 @@ void RandomPlayerbotMgr::LogNearbyCensus()
         const float range = player->GetVisibilityDistance();
 
         uint32 total = 0, dead = 0, fighting = 0, moving = 0, idle = 0, casting = 0, looting = 0;
+        uint32 rescued = 0;   // STUCK-rescue teleports this pass (cap 2 -- thin the crowd, don't blink it out)
         // idle breakdown: WHY is an alive, out-of-combat, not-moving bot doing nothing?
         uint32 idleRest = 0, idleLowHp = 0, idleLowMana = 0, idleStuck = 0;
         uint32 sumLevel = 0;
@@ -865,6 +877,30 @@ void RandomPlayerbotMgr::LogNearbyCensus()
                 else if (lowMana)                                   { ++idleLowMana; act = "lowMana"; }
                 else                                                { ++idleStuck;   act = "STUCK"; }
             }
+
+            // STUCK-RESCUE: a bot standing "STUCK" for ~10 consecutive censuses (~30s) near a
+            // player is broken-for-this-spot (typical: dispersal-leveled bot in a low zone --
+            // every mob grey-filtered, no quests for its level -> travel-target churn forever).
+            // Heal its spell kit and move it to level-appropriate content; the proximity
+            // allocator then promotes level-appropriate locals around the player instead.
+            if (strcmp(act, "STUCK") == 0)
+            {
+                uint32& streak = m_stuckStreak[bot->GetGUIDLow()];
+                if (++streak >= 10 && rescued < 2
+                    && IsRandomBot(bot) && !bot->GetGroup() && !bot->InBattleGround() && !bot->InBattleGroundQueue()
+                    && !IsCityResident(bot->GetGUIDLow())
+                    && bot->GetPlayerbotAI() && !bot->GetPlayerbotAI()->HasRealPlayerMaster())
+                {
+                    streak = 0;
+                    ++rescued;
+                    PlayerbotFactory(bot, bot->GetLevel()).LearnClassTrainerSpells();
+                    RandomTeleportForLevel(bot, false);
+                    sLog.outString("STUCKRESCUE %s L%u -> level-appropriate zone (stuck ~30s near %s)",
+                        bot->GetName(), bot->GetLevel(), player->GetName());
+                }
+            }
+            else
+                m_stuckStreak.erase(bot->GetGUIDLow());
 
             // per-bot list row: ts,observer,bot,level,class,activity,distance
             if (!fb)
@@ -1445,6 +1481,98 @@ static void FormQuestCampGroups()
     }
 }
 
+// FormGrindingParties: broader than FormQuestCampGroups -- cluster nearby autonomous ungrouped
+// ACTIVE-COHORT bots into grinding parties so the world has real group content (only 0.7% of bots
+// ever grouped). Bots are spread ~2-3 per area, so we cluster at a larger radius and let the FSM's
+// FOLLOW branch converge them on the leader (the follow/assist behavior lives in the map-thread FSM;
+// this function only CREATES groups on the world thread -- never touches a bot's AI, which would race
+// the map thread). Focus-fire is free via GroupAssistTrigger. Bounded (active cohort only, cap per
+// tick). Config: AiPlayerbot.AutonomousParties.
+static void FormGrindingParties()
+{
+    const float CLUSTER = 120.0f;
+    const uint32 MAX_NEW_GROUPS = 12;   // cap DB/group churn per pass
+
+    std::vector<Player*> cands;
+    for (auto& it : sObjectAccessor.GetPlayers())
+    {
+        Player* bot = it.second;
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsBeingTeleported())
+            continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster() || !sRandomPlayerbotMgr.IsRandomBot(bot))
+            continue;
+        if (bot->InBattleGround() || bot->InBattleGroundQueue())
+            continue;
+        if (bot->GetGroup() || bot->IsInCombat())
+            continue;                                          // only ungrouped, not mid-fight
+        if (!sRandomPlayerbotMgr.IsActiveCohort(bot->GetGUIDLow()))
+            continue;                                          // active cohort only (bounded, visible)
+        cands.push_back(bot);
+    }
+
+    uint32 groupsFormed = 0, botsGrouped = 0;
+    std::vector<bool> used(cands.size(), false);
+    for (size_t i = 0; i < cands.size() && groupsFormed < MAX_NEW_GROUPS; ++i)
+    {
+        if (used[i])
+            continue;
+        Player* seed = cands[i];
+        used[i] = true;
+        Group* group = nullptr;
+        uint32 size = 1;
+        for (size_t j = 0; j < cands.size() && size < 5; ++j)
+        {
+            if (used[j])
+                continue;
+            Player* c = cands[j];
+            if (c->GetMapId() != seed->GetMapId())
+                continue;
+            if (seed->GetDistance(c) > CLUSTER)
+                continue;
+            if (abs(int32(c->GetLevel()) - int32(seed->GetLevel())) > 5)
+                continue;
+            if (!group)
+            {
+                group = new Group();
+                if (!group->Create(seed->GetObjectGuid(), seed->GetName()))
+                {
+                    delete group;
+                    group = nullptr;
+                    break;
+                }
+                sObjectMgr.AddGroup(group);
+                group->SetLootMethod(GROUP_LOOT);
+            }
+            if (group->AddMember(c->GetObjectGuid(), c->GetName()))
+            {
+                used[j] = true;
+                ++size;
+                ++botsGrouped;
+            }
+        }
+        if (group)
+        {
+            group->BroadcastGroupUpdate();
+            ++groupsFormed;
+        }
+    }
+
+    if (groupsFormed || botsGrouped)
+    {
+        FILE* fa = fopen("logs/bot_fleet.csv", "a");
+        if (!fa) fa = fopen("../logs/bot_fleet.csv", "a");
+        if (fa)
+        {
+            time_t t = time(nullptr); struct tm* lt = localtime(&t);
+            char ts[16]; strftime(ts, sizeof(ts), "%H:%M:%S", lt);
+            fprintf(fa, "%s,GRINDPARTY,new_groups=%u,bots_grouped=%u,cands=%u\n",
+                ts, groupsFormed, botsGrouped, (uint32)cands.size());
+            fclose(fa);
+        }
+    }
+}
+
 // PROOF report (every ~5min): which quest mobs are idle kill-quest bots starving on the most,
 // and for each: total spawn locations vs how many are ALIVE right now MAP-WIDE, plus how
 // clustered the demanding bots are. Answers "is there a live target anywhere, and are bots
@@ -1537,6 +1665,1027 @@ void RandomPlayerbotMgr::LogStuckMobReport()
     fclose(f);
 }
 
+bool RandomPlayerbotMgr::IsActiveCohort(uint32 guidLow) const
+{
+    // PROXIMITY-ALLOCATED: membership = the published nearest-to-players brain set
+    // (user architecture 2026-07-04: 100-200 real brains chase the players; hash cohorts
+    // replaced -- proximity IS the allocator).
+    if (!sPlayerbotAIConfig.activeBrainBudget)
+        return true;   // feature off -> everyone fully active
+    return GetActiveBrainSet()->count(guidLow) != 0;
+}
+
+void RandomPlayerbotMgr::RebuildActiveBrainSet()
+{
+    const uint32 budget = sPlayerbotAIConfig.activeBrainBudget;
+    if (!budget)
+        return;
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_abNextMs)
+        return;
+    m_abNextMs = now + 2000;
+
+    auto rp = GetRealPlayerSnapshot();
+    auto set = std::make_shared<std::unordered_set<uint32>>();
+    PlayerBotMap& bots = GetAllBots();
+
+    if (rp->players.empty())
+    {
+        // no players online: rotate the budget through the fleet on a slow window so the
+        // whole world still levels/farms over time (window advances every 10 minutes)
+        if (now >= m_abWindowRotateMs)
+        {
+            m_abWindowRotateMs = now + 600000;
+            auto adv = bots.upper_bound(m_abWindowStart);
+            for (uint32 i = 0; i < budget && !bots.empty(); ++i)
+            {
+                if (adv == bots.end()) adv = bots.begin();
+                ++adv;
+            }
+            m_abWindowStart = (adv == bots.end() || bots.empty()) ? 0 : adv->first;
+        }
+        auto it = bots.lower_bound(m_abWindowStart);
+        while (set->size() < budget && set->size() < bots.size() && !bots.empty())
+        {
+            if (it == bots.end()) it = bots.begin();
+            set->insert(it->first);
+            ++it;
+        }
+    }
+    else
+    {
+        // nearest-N to any real player: everything a player can see gets a real brain,
+        // and zones warm up nearest-first as players travel. Cross-map bots rank last.
+        std::vector<std::pair<float, uint32>> byDist;
+        byDist.reserve(bots.size());
+        for (auto& pr : bots)
+        {
+            Player* b = pr.second;
+            if (!b || !b->IsInWorld())
+                continue;
+            float best = 1e18f;
+            const float bx = b->GetPositionX(), by = b->GetPositionY();
+            for (auto const& p : rp->players)
+            {
+                if (p.mapId != b->GetMapId())
+                    continue;
+                const float dx = p.x - bx, dy = p.y - by;
+                const float q = dx * dx + dy * dy;
+                if (q < best) best = q;
+            }
+            byDist.push_back({ best, pr.first });
+        }
+        // RENDER-RANGE ACTIVE SET: every bot within ActiveRenderRange of any real player gets
+        // a full-speed brain -- UNCAPPED ("200" was never a hard cap; the requirement is that
+        // everything the player can SEE is awake and fast). The budget only tops the set up
+        // with next-nearest bots beyond the range so the surrounding zone stays pre-warmed,
+        // and budget*4 is a sanity ceiling against pathological pile-ups.
+        const float rr = sPlayerbotAIConfig.activeRenderRange;
+        const float rr2 = rr * rr;
+        size_t inRange = 0;
+        for (auto const& pr : byDist)
+            if (pr.first <= rr2)
+                ++inRange;
+        size_t n = std::min(byDist.size(), std::max<size_t>(budget, inRange));
+        n = std::min(n, (size_t)budget * 4);
+        std::partial_sort(byDist.begin(), byDist.begin() + n, byDist.end());
+        for (size_t i = 0; i < n; ++i)
+            set->insert(byDist[i].second);
+    }
+
+    if (now >= m_abLogMs)
+    {
+        m_abLogMs = now + 60000;
+        uint32 parked = 0, total = 0;
+        for (auto& pr : bots)
+        {
+            Player* b = pr.second;
+            if (!b || !b->IsInWorld()) continue;
+            ++total;
+            if (b->GetPlayerbotAI() && b->GetPlayerbotAI()->IsColdDormant()) ++parked;
+        }
+        FILE* f = fopen("logs/allocator.csv", "a");
+        if (!f) f = fopen("../logs/allocator.csv", "a");
+        if (f)
+        {
+            time_t tt = time(0); struct tm tmv; localtime_r(&tt, &tmv);
+            char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+            fprintf(f, "%s,players=%u,virtual=%d,budget=%u,active_set=%u,parked=%u,total=%u\n",
+                ts, (uint32)rp->players.size(),
+                (!rp->players.empty() && rp->players[0].guidLow == 0xFFFFFFFEu) ? 1 : 0,
+                budget, (uint32)set->size(), parked, total);
+            fclose(f);
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(m_abMutex);
+    m_activeBrains = std::shared_ptr<const std::unordered_set<uint32>>(std::move(set));
+}
+
+void RandomPlayerbotMgr::UpdateSyntheticProgress()
+{
+    if (!sPlayerbotAIConfig.syntheticProgressEnabled || !sPlayerbotAIConfig.lodColdUpdateMs
+        || !sPlayerbotAIConfig.activeBrainBudget)
+        return;
+    if (RealPlayerActive())
+        return;   // player online -> pause synthetic leveling; prioritize their live bots
+
+    const uint32 now = WorldTimer::getMSTime();
+    PlayerBotMap& bots = GetAllBots();
+    if (bots.empty())
+        return;
+
+    // ~50 bots inspected per world-tick second -> full 1000-bot sweep every ~20s; each bot
+    // is sampled/advanced at most once a minute. Runs at the post-map-update safe point
+    // (same place as the queued teleport/logout drains), so direct Player mutation is safe.
+    uint32 inspected = 0;
+    auto it = bots.lower_bound(synthCursor);
+    while (inspected < 50)
+    {
+        if (it == bots.end())
+        {
+            it = bots.begin();
+            if (it == bots.end())
+                break;
+        }
+        Player* bot = it->second;
+        const uint32 guid = it->first;
+        ++it; ++inspected;
+        synthCursor = (it == bots.end()) ? 0 : it->first;
+
+        if (!bot || !bot->IsInWorld() || !IsRandomBot(bot))
+            continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster() || bot->GetGroup())
+            continue;
+
+        SynthState& st = synthStates[guid];
+        const uint8 dormant = ai->IsColdDormant() ? 1 : 0;
+        const uint8 level = (uint8)bot->GetLevel();
+        // (re)baseline on first sight, tier flip, or level change (xp counter resets per level)
+        if (st.wasDormant != dormant || !st.lastMs || st.lastLevel != level)
+        {
+            st.lastXp = bot->GetUInt32Value(PLAYER_XP);
+            st.lastMoney = bot->GetMoney();
+            st.lastMs = now;
+            st.lastLevel = level;
+            st.wasDormant = dormant;
+            continue;
+        }
+        const uint32 dt = now - st.lastMs;
+        if (dt < 60000)
+            continue;
+        const double hours = dt / 3600000.0;
+        const uint32 bracket = std::min<uint32>(level / 10, 6u);
+
+        if (!dormant)
+        {
+            // ACTIVE bot: measure real earn rates into the bracket EMA (this is what makes
+            // synthetic progression self-calibrating -- dormant bots earn what the live
+            // fleet actually earns at that level, scaled by SyntheticRateFactor).
+            const uint32 curXp = bot->GetUInt32Value(PLAYER_XP);
+            const uint32 curMoney = bot->GetMoney();
+            if (curXp >= st.lastXp)
+            {
+                const double r = (curXp - st.lastXp) / hours;
+                if (r < 50000.0)
+                    synthXpRate[bracket] = synthXpRate[bracket] > 1.0 ? synthXpRate[bracket] * 0.9 + r * 0.1 : r;
+            }
+            if (curMoney >= st.lastMoney)
+            {
+                const double r = (curMoney - st.lastMoney) / hours;
+                if (r < 500000.0)
+                    synthGoldRate[bracket] = synthGoldRate[bracket] > 1.0 ? synthGoldRate[bracket] * 0.9 + r * 0.1 : r;
+            }
+            st.lastXp = curXp; st.lastMoney = curMoney; st.lastMs = now;
+        }
+        else
+        {
+            // DORMANT bot: apply the measured (or fallback) rate so it keeps progressing.
+            const double f = sPlayerbotAIConfig.syntheticRateFactor;
+            const double xpRate = synthXpRate[bracket] > 1.0 ? synthXpRate[bracket]
+                : (double)sPlayerbotAIConfig.syntheticXpFallbackPerHour * (1 + bracket);
+            const double goldRate = synthGoldRate[bracket] > 1.0 ? synthGoldRate[bracket]
+                : (double)sPlayerbotAIConfig.syntheticGoldFallbackPerHour;
+            const uint32 maxLvl = sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
+            // Normal synthetic rate for all levels: the 1/4 throttle for <L5 made low bots LINGER
+            // and pile up thousands-deep in the 6 starter zones (Durotar 2105 etc.), choking the
+            // continent update and starving every bot's brain (the "bots stand still" regression).
+            // Containment still holds them IN the starter until L5; they just flow through normally.
+            double starterFactor = 1.0;
+            if (bot->IsAlive() && level < maxLvl)
+            {
+                const uint32 xp = (uint32)(xpRate * f * hours * starterFactor);
+                if (xp)
+                {
+                    bot->GiveXP(xp, nullptr);
+                    synthAppliedXp += xp;
+                    ++synthAppliedBots;
+                }
+            }
+            const uint32 money = (uint32)(goldRate * f * hours);
+            if (money)
+            {
+                bot->ModifyMoney((int32)money);
+                synthAppliedMoney += money;
+            }
+            st.lastXp = bot->GetUInt32Value(PLAYER_XP);
+            st.lastMoney = bot->GetMoney();
+            st.lastMs = now;
+            st.lastLevel = (uint8)bot->GetLevel();
+        }
+    }
+
+    if (now >= synthLogDueMs)
+    {
+        synthLogDueMs = now + 60000;
+        FILE* f = fopen("logs/synthetic_progress.csv", "a");
+        if (!f) f = fopen("../logs/synthetic_progress.csv", "a");
+        if (f)
+        {
+            time_t tt = time(0); struct tm tmv; localtime_r(&tt, &tmv);
+            char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+            fprintf(f, "%s,applied_bots=%u,applied_xp=%u,applied_copper=%u,xp_rates=%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f,gold_rates=%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f\n",
+                ts, synthAppliedBots, synthAppliedXp, synthAppliedMoney,
+                synthXpRate[0], synthXpRate[1], synthXpRate[2], synthXpRate[3], synthXpRate[4], synthXpRate[5], synthXpRate[6],
+                synthGoldRate[0], synthGoldRate[1], synthGoldRate[2], synthGoldRate[3], synthGoldRate[4], synthGoldRate[5], synthGoldRate[6]);
+            fclose(f);
+        }
+        synthAppliedBots = synthAppliedXp = synthAppliedMoney = 0;
+    }
+}
+
+// SELF-HEALING RAID GEAR: any online max-level random bot with a mostly-empty equipment set
+// gets the deterministic T2 kit automatically -- INCLUDING bots sitting in a player's raid
+// (promote60 skips grouped bots by design, which left the user's own raid members naked after
+// the old factory bug). Every 30s over the whole roster; equip-slot counting is trivial.
+// World-thread safe point (called next to the queued-teleport drains).
+// Race starter zone anchor. Low bots (<5) belong here questing up before entering the world.
+static void ReturnLowBotToStarter(Player* bot)
+{
+    // UNIVERSAL starter containment via HOMEBIND (works for every race incl. Turtle customs 9/10):
+    // a fresh character's homebind IS its starter sub-zone. If a <L5 bot has wandered out of its
+    // homebind AREA (e.g. Northshire -> Goldshire), send it back to quest 1-5 where it belongs.
+    // Per-bot 60s cooldown so a bot that keeps walking out isn't teleport-spammed every tick
+    // (that caused the stutter + the multi-second map spikes).
+    if (bot->GetAreaId() == bot->GetHomeBindAreaId())
+        return;
+    static std::mutex cdMx;
+    static std::unordered_map<uint32, uint32> cd;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(cdMx);
+        uint32& t = cd[bot->GetGUIDLow()];
+        if (t && now - t < 20000)
+            return;
+        t = now;
+    }
+    float hx, hy, hz; uint32 hmap;
+    bot->GetHomebindLocation(hx, hy, hz, hmap);
+    bot->TeleportTo(hmap, hx, hy, hz, frand(0, 2 * M_PI_F));
+    // re-pick a starter-area quest instead of immediately heading back out (anti tug-of-war)
+    bot->StopMoving();
+    sGuideFollowMgr.ResetCursor(bot);
+    if (PlayerbotAI* pai = bot->GetPlayerbotAI())
+        if (TravelTarget* tt = pai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get())
+            tt->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+}
+
+void RandomPlayerbotMgr::ContainLowLevelBots()
+{
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_lowContainMs) return;
+    m_lowContainMs = now + (RealPlayerActive() ? 30000 : 5000);   // ease off while a player plays
+    PlayerBotMap& bots = GetAllBots();
+    if (bots.empty()) return;
+    uint32 inspected = 0;
+    auto it = bots.lower_bound(m_lowContainCursor);
+    while (inspected < 120)
+    {
+        if (it == bots.end()) { it = bots.begin(); if (it == bots.end()) break; }
+        Player* bot = it->second;
+        ++it; ++inspected;
+        m_lowContainCursor = (it == bots.end()) ? 0 : it->first;
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->GetLevel() >= 5) continue;
+        if (!IsRandomBot(bot) || bot->GetGroup() || bot->IsInCombat()) continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster()) continue;
+        ReturnLowBotToStarter(bot);
+    }
+}
+
+void RandomPlayerbotMgr::SweepNakedMaxLevelBots()
+{
+    // Repair window: first 10 minutes after boot (roster login) PLUS while the level-spread
+    // walker is still leveling bots (+10 min tail) -- spread-ups happen well past boot and
+    // must also end up geared for their level (user mandate).
+    if (sWorld.GetUptime() > 600 && m_lvlSpreadDoneMs
+        && WorldTimer::getMSTime() > m_lvlSpreadDoneMs + 600000)
+        return;
+    if (RealPlayerActive())
+        return;   // player online -> pause the gear-setup sweep (frees world thread for their bots)
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_nextNakedSweepMs)
+        return;
+    m_nextNakedSweepMs = now + 1000;
+
+    // PACED cursor slice: iterating all 10k bots + strip/fill/DB in ONE tick blocked the map
+    // manager up to 9 SECONDS (the lag/near-freeze). Process ~40 bots/tick; full fleet every ~4min.
+    const uint32 maxLvl = sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
+    PlayerBotMap& sweepBots = GetAllBots();
+    if (sweepBots.empty())
+        return;
+    uint32 sweepN = 0;
+    auto sweepIt = sweepBots.lower_bound(m_nakedSweepCursor);
+    while (sweepN < 40)
+    {
+        if (sweepIt == sweepBots.end()) { sweepIt = sweepBots.begin(); if (sweepIt == sweepBots.end()) break; }
+        auto& pr = *sweepIt;
+        ++sweepIt; ++sweepN;
+        m_nakedSweepCursor = (sweepIt == sweepBots.end()) ? 0 : sweepIt->first;
+        Player* bot = pr.second;
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+            continue;
+        if (!IsRandomBot(bot))
+            continue;
+        if (bot->GetLevel() < 5)
+        {
+            PlayerbotAI* lai = bot->GetPlayerbotAI();
+            if (!bot->GetGroup() && !bot->IsInCombat() && lai && !lai->HasRealPlayerMaster())
+                ReturnLowBotToStarter(bot);
+        }
+        if (bot->GetLevel() < 2)
+            continue;
+        // strip GM/costume/test items (unobtainable) so the fill below replaces them with real gear
+        uint32 stripped = 0;
+        for (uint8 sl = EQUIPMENT_SLOT_START; sl < EQUIPMENT_SLOT_END; ++sl)
+        {
+            if (sl == EQUIPMENT_SLOT_TABARD || sl == EQUIPMENT_SLOT_BODY)
+                continue;
+            Item* eq = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, sl);
+            if (!eq) continue;
+            ItemPrototype const* ep = eq->GetProto();
+            // strip if: (a) unobtainable (GM/costume/test), OR (b) item_level too high for the
+            // bot's level (rep necks ilvl 68, engineering ilvl 58 on a low bot) -- both are the
+            // "powerful gear that makes no sense for the level" the user flagged.
+            const bool tooPowerful = ep->ItemLevel > bot->GetLevel() + 8;
+            // COSTUME/EVENT/TOY detector (santa hats, Nightelf masks, flower off-hands): armor
+            // pieces without durability, weapons without damage, or items with no armor+stat+dmg.
+            const uint32 iv = ep->InventoryType;
+            const bool armorSlot = iv==INVTYPE_HEAD||iv==INVTYPE_SHOULDERS||iv==INVTYPE_CHEST||iv==INVTYPE_ROBE||
+                iv==INVTYPE_WAIST||iv==INVTYPE_LEGS||iv==INVTYPE_FEET||iv==INVTYPE_WRISTS||iv==INVTYPE_HANDS;
+            const bool weaponSlot = iv==INVTYPE_WEAPON||iv==INVTYPE_2HWEAPON||iv==INVTYPE_WEAPONMAINHAND||
+                iv==INVTYPE_WEAPONOFFHAND||iv==INVTYPE_RANGED||iv==INVTYPE_RANGEDRIGHT||iv==INVTYPE_THROWN;
+            bool costume = false;
+            if (armorSlot) costume = (ep->MaxDurability == 0 || ep->Armor == 0);
+            else if (weaponSlot) costume = (ep->Damage[0].DamageMin == 0 || ep->MaxDurability == 0);
+            else { bool hasStat = ep->Armor > 0; for (int st=0; st<MAX_ITEM_PROTO_STATS && !hasStat; ++st) if (ep->ItemStat[st].ItemStatValue) hasStat=true; costume = !hasStat; }
+            if (!PlayerbotIsObtainableGear(ep->ItemId) || tooPowerful || costume)
+            {
+                bot->DestroyItem(INVENTORY_SLOT_BAG_0, sl, true);
+                ++stripped;
+            }
+        }
+        if (stripped)
+            sLog.outString("NakedSweep: stripped %u unobtainable items from %s", stripped, bot->GetName());
+        uint32 equipped = 0;
+        for (uint8 s = EQUIPMENT_SLOT_START; s < EQUIPMENT_SLOT_END; ++s)
+            if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, s))
+                ++equipped;
+        // refill if under-geared OR we just stripped GM items (stripped bot may still have >=8
+        // real items but now has empty slots that must be filled with obtainable gear)
+        if (equipped >= 8 && !stripped)
+            continue;
+        if (bot->GetLevel() >= maxLvl)
+        {
+            // max-level: deterministic raid tier kit
+            std::string fails;
+            const uint32 ok = PlayerbotGearRaidTier(bot, fails);
+            sLog.outString("NakedSweep: re-geared L60 %s (had %u equipped, kit gave %u) %s%s",
+                bot->GetName(), equipped, ok, fails.empty() ? "" : "FAILS: ", fails.c_str());
+        }
+        else
+        {
+            // leveling bot: deterministic fill of empty slots from the validated equip cache
+            // (factory random roll was what left them naked); gear always matches level
+            const uint32 f = PlayerbotFillLevelGear(bot);
+            uint32 after = 0;
+            for (uint8 s = EQUIPMENT_SLOT_START; s < EQUIPMENT_SLOT_END; ++s)
+                if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, s))
+                    ++after;
+            sLog.outString("NakedSweep: filled %s L%u (had %u +%u -> now %u equipped)%s",
+                bot->GetName(), bot->GetLevel(), equipped, f, after,
+                after < 8 ? " STILL-UNDERGEARED" : "");
+        }
+    }
+}
+
+void RandomPlayerbotMgr::RebuildRealPlayerSnapshot()
+{
+    auto view = std::make_shared<RealPlayerView>();
+    std::vector<Player*> livePlayers;
+    {
+        std::lock_guard<std::mutex> lock(playersMutex);
+        view->players.reserve(players.size());
+        for (auto& pr : players)
+        {
+            // LIVE lookup by guid -- the stored Player* can be stale after a disconnect
+            Player* p = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, pr.first));
+            if (!p || !p->IsInWorld())
+                continue;
+            RealPlayerSnap s;
+            s.guidLow = pr.first;
+            s.guildId = p->GetGuildId();
+            s.mapId = p->GetMapId();
+            s.x = p->GetPositionX(); s.y = p->GetPositionY(); s.z = p->GetPositionZ();
+            s.hasCam = false;
+            s.camX = s.camY = s.camZ = 0.0f;
+            Camera& cam = p->GetCamera();
+            WorldObject* viewObj = cam.GetBody();
+            if (viewObj && viewObj != p)
+            {
+                s.hasCam = true;
+                s.camX = viewObj->GetPositionX();
+                s.camY = viewObj->GetPositionY();
+                s.camZ = viewObj->GetPositionZ();
+            }
+            view->players.push_back(s);
+            livePlayers.push_back(p);
+        }
+    }
+
+    // pre-compute "bot is on a real player's friend list" here on the world thread --
+    // GetPriorityType used to call real-player GetSocial()->HasFriend from MAP threads
+    // (documented past SIGSEGV in Player::GetSocial, and part of today's crash family)
+    if (!livePlayers.empty())
+        for (auto& pr : GetAllBots())
+        {
+            if (!pr.second)
+                continue;
+            const ObjectGuid botGuid(HIGHGUID_PLAYER, pr.first);
+            for (Player* p : livePlayers)
+                if (p->GetSocial() && p->GetSocial()->HasFriend(botGuid))
+                {
+                    view->friendBotGuids.insert(pr.first);
+                    break;
+                }
+        }
+
+    // VIRTUAL OBSERVER: nobody online -> plant a synthetic "player" so the proximity
+    // allocator, zone warm-up and active-vs-parked telemetry keep exercising the exact
+    // code paths a real player triggers. Anchored to a random bot's position (so it always
+    // has a crowd around it) and re-anchored every VirtualObserverRotateMinutes to sweep
+    // different zones/level brackets.
+    if (view->players.empty() && sPlayerbotAIConfig.virtualObserver)
+    {
+        const uint32 now = WorldTimer::getMSTime();
+        if (!m_voValid || now >= m_voRotateMs)
+        {
+            PlayerBotMap& bots = GetAllBots();
+            if (!bots.empty())
+            {
+                auto it = bots.begin();
+                std::advance(it, urand(0, bots.size() - 1));
+                if (Player* b = it->second)
+                    if (b->IsInWorld())
+                    {
+                        m_voMapId = b->GetMapId();
+                        m_voX = b->GetPositionX(); m_voY = b->GetPositionY(); m_voZ = b->GetPositionZ();
+                        m_voValid = true;
+                        m_voRotateMs = now + std::max(1u, sPlayerbotAIConfig.virtualObserverRotateMinutes) * 60000;
+                        sLog.outString("VirtualObserver: anchored map=%u %.0f,%.0f (near %s)",
+                            m_voMapId, m_voX, m_voY, b->GetName());
+                    }
+            }
+        }
+        if (m_voValid)
+        {
+            RealPlayerSnap v;
+            v.guidLow = 0xFFFFFFFEu;   // sentinel: never matches a real guid
+            v.guildId = 0;
+            v.mapId = m_voMapId; v.x = m_voX; v.y = m_voY; v.z = m_voZ;
+            v.hasCam = false; v.camX = v.camY = v.camZ = 0.0f;
+            view->players.push_back(v);
+        }
+    }
+    else if (!view->players.empty() && view->players[0].guidLow != 0xFFFFFFFEu)
+        m_voValid = false;   // real players online -> observer stands down, re-anchor later
+
+    std::lock_guard<std::mutex> lock(m_rpSnapMutex);
+    m_rpSnap = std::shared_ptr<const RealPlayerView>(std::move(view));
+}
+
+// ONE-TIME FLEET LEVEL SPREAD (user mandate: 5k bots spread 1-60 so no single zone carries the
+// load). Each bot gets a deterministic hash-assigned target level; we walk the online fleet a
+// few bots per world tick, level each one UP to its target (promote60-proven path: GiveLevel +
+// talents + full factory kit), and teleport it to a level-appropriate zone. Idempotent (skips
+// bots already at/above target), never de-levels, self-disarms after a clean full pass.
+void RandomPlayerbotMgr::SpreadFleetLevels()
+{
+    if (!sPlayerbotAIConfig.levelSpreadEnabled || m_lvlSpreadDoneMs)
+        return;
+    if (sWorld.GetUptime() < 600)
+        return;
+    // NOTE: spread must KEEP running with a player online -- it disperses packed low bots out of
+    // the dense starter zones (the density that balloons the tick). It just runs a smaller slice
+    // per tick when a player is online (see the leveled>=slice cap below).
+
+    PlayerBotMap& bots = GetAllBots();
+    if (bots.empty())
+        return;
+
+    uint32 processed = 0, leveled = 0;
+    auto it = bots.lower_bound(m_lvlSpreadCursor);
+    const uint32 maxLvl = sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
+    while (processed < std::max(1u, sPlayerbotAIConfig.levelSpreadPerTick) * 10)   // inspect 10x, level up to N
+    {
+        if (it == bots.end())
+        {
+            // DON'T DISARM: the spread must keep sweeping. It disarmed prematurely mid-login-ramp
+            // (a pass over the partial online set found nothing to level) leaving 5000+ bots packed
+            // at level 1 in starter zones -- the density that ballooned the tick. Once every bot is
+            // at its hash-target, each pass does 0 level-ups (cheap), and any new/undispersed low
+            // bot gets leveled + teleported to a level-appropriate zone. Just wrap the cursor.
+            it = bots.begin();
+            m_lvlSpreadCursor = 0;
+            break;   // finish this tick's slice; resume next tick from the top
+        }
+        Player* bot = it->second;
+        const uint32 guid = it->first;
+        ++it; ++processed;
+        m_lvlSpreadCursor = (it == bots.end()) ? 0 : it->first;
+
+        if (!bot || !bot->IsInWorld() || !IsRandomBot(bot))
+            continue;
+        if (IsCityResident(guid))
+            continue;   // city residents are placed by PopulateCapitalCities, not spread
+        if (IsDungeonLoiterer(guid))
+            continue;   // loiterers are placed at their entrance, not spread
+        if (bot->GetLevel() < 5)
+        {
+            // STARTER CONTAINMENT: a bot below level 5 belongs in its race's starter zone
+            // questing up. If it has strayed (wrong map or >700y from the starter), send it back.
+            struct Start { uint32 map; float x, y, z; };
+            // TEAM-AWARE default: Turtle adds custom races (9=Goblin HORDE, 10=High Elf ALLIANCE)
+            // that fell into the old `default: Northshire` -- HORDE goblins teleported into the
+            // Alliance starter got slaughtered by the L55 Northshire Guard, revived, re-contained,
+            // and died again forever (657 deaths, 13% of all fleet deaths, top killer creature).
+            auto starterFor = [](Player* b) -> Start {
+                switch (b->getRace()) {
+                    case RACE_HUMAN:    return { 0, -8949.95f, -139.6f,  82.0f };   // Northshire
+                    case RACE_DWARF:
+                    case RACE_GNOME:    return { 0, -6240.3f,  331.0f,  382.8f };   // Coldridge Valley
+                    case RACE_NIGHTELF: return { 1, 10311.3f,  832.5f, 1326.4f };   // Shadowglen
+                    case RACE_ORC:
+                    case RACE_TROLL:    return { 1, -618.5f, -4251.6f,  38.7f };     // Valley of Trials
+                    case RACE_TAUREN:   return { 1, -2917.6f, -257.3f,  52.9f };     // Camp Narache
+                    case RACE_UNDEAD:   return { 0, 1676.3f,  1677.4f, 121.6f };     // Deathknell
+                    default:            // custom race -> route by FACTION to a safe starter
+                        return b->GetTeam() == HORDE ? Start{ 1, -618.5f, -4251.6f, 38.7f }    // Valley of Trials
+                                                     : Start{ 0, -8949.95f, -139.6f, 82.0f };  // Northshire
+                }
+            };
+            { PlayerbotAI* lai = bot->GetPlayerbotAI();
+            if (!bot->GetGroup() && !bot->IsInCombat() && lai && !lai->HasRealPlayerMaster())
+            {
+                Start st = starterFor(bot);
+                const float dx = bot->GetPositionX() - st.x, dy = bot->GetPositionY() - st.y;
+                if (bot->GetMapId() != st.map || dx * dx + dy * dy > 700.0f * 700.0f)
+                {
+                    uint32 hh = guid * 2654435761u; hh ^= hh >> 16;
+                    const float ox = ((hh & 0xFFFF) / 65535.0f - 0.5f) * 80.0f;
+                    const float oy = (((hh >> 16) & 0xFFFF) / 65535.0f - 0.5f) * 80.0f;
+                    bot->TeleportTo(st.map, st.x + ox, st.y + oy, st.z, frand(0, 2 * M_PI_F));
+                }
+            } }
+            continue;   // finish starter-zone questing to L5 before the world spread relocates it
+        }
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster() || bot->GetGroup() || bot->IsInCombat())
+            continue;
+
+        // deterministic target: bracket weights 20/20/17/15/15/13 (%) over 1-60
+        uint32 h = guid * 2654435761u; h ^= h >> 16; h *= 2246822519u; h ^= h >> 13;
+        const uint32 roll = h % 100;
+        uint32 bracket = roll < 10 ? 0 : roll < 28 ? 1 : roll < 46 ? 2 : roll < 64 ? 3 : roll < 82 ? 4 : 5;  // 10/18/18/18/18/18 - fewer packed at 1-10
+        uint32 target = std::min(maxLvl, bracket * 10 + 1 + (h >> 8) % 10);
+
+        if (bot->GetLevel() >= target)
+            continue;
+
+        bot->GiveLevel(target);
+        bot->InitTalentForLevel();
+        // GiveLevel teaches NOTHING in this fork (learnClassLevelSpells is a stub): a +20 level
+        // jump left a starter spellbook, so the bot could not fight anything its level and stood
+        // "STUCK" churning travel targets (the near-player statue regression). Cache-backed+idempotent.
+        PlayerbotFactory(bot, target).LearnClassTrainerSpells();
+        RandomTeleportForLevel(bot, false);   // teleport to a level-appropriate zone (disperses!)
+        // gear deferred to the naked sweep -- keeping the spread light so it disperses fast
+        // DIRECTIVE 2/6/10 FIX: after a level jump + random teleport, the RXP guide cursor is
+        // stale -- it resumes the bot's OLD linear position, sending a bot teleported to (say)
+        // Loch Modan trekking 9000y to its previous zone's next step. Reset it so the guide
+        // re-picks a fresh step for the bot's NEW level near where it now stands, instead of a
+        // cross-continent haul (measured: L15-19 bots with 4000-9000y travel targets, the
+        // dominant cause of active-tier 54% move / 8% combat).
+        sGuideFollowMgr.ResetCursor(bot);
+        ++leveled;
+        if (leveled >= (RealPlayerActive() ? 8u : std::max(1u, sPlayerbotAIConfig.levelSpreadPerTick)))
+            break;
+    }
+}
+
+bool RandomPlayerbotMgr::IsCityResident(uint32 guidLow) const
+{
+    const uint32 n = sPlayerbotAIConfig.cityResidents;
+    if (!n)
+        return false;
+    const uint32 total = std::max(1u, sPlayerbotAIConfig.maxRandomBots);
+    uint32 h = guidLow * 2246822519u; h ^= h >> 15; h *= 2654435761u; h ^= h >> 13;
+    return (h % total) < n;
+}
+
+void RandomPlayerbotMgr::PopulateCapitalCities()
+{
+    if (!sPlayerbotAIConfig.cityResidents)
+        return;
+    if (RealPlayerActive())
+        return;   // player online -> pause city-resident factory setup
+    // Let the login ramp settle: grabbing half-initialized bots mid-login and running the full
+    // factory Randomize (InitMounts) on them crashed at 11k (empty race vectors). 10 min covers
+    // even a 9-11k paced login.
+    if (sWorld.GetUptime() < 600)
+        return;
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_cityNextMs)
+        return;
+    m_cityNextMs = now + 3000;
+
+    // faction capitals: {mapId, x, y, z}. Horde 0-2, Alliance 3-5. Spread within ~40y of center.
+    struct Cap { uint32 map; float x, y, z; };
+    static const Cap horde[3] = {
+        { 1, 1629.36f, -4373.39f, 31.2f },   // Orgrimmar
+        { 1, -1196.7f,  29.6f,   176.6f },   // Thunder Bluff
+        { 0, 1585.0f,  239.5f,   -52.1f } }; // Undercity
+    static const Cap ally[3] = {
+        { 0, -8833.0f, 628.6f,   94.0f },    // Stormwind
+        { 0, -4918.9f, -940.4f,  501.6f },   // Ironforge
+        { 1, 9949.0f,  2284.0f,  1341.4f } };// Darnassus
+
+    PlayerBotMap& bots = GetAllBots();
+    if (bots.empty())
+        return;
+
+    uint32 inspected = 0, placed = 0;
+    auto it = bots.lower_bound(m_cityCursor);
+    const uint32 maxLvl = sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
+    while (inspected < 20)
+    {
+        if (it == bots.end()) { it = bots.begin(); if (it == bots.end()) break; }
+        Player* bot = it->second;
+        const uint32 guid = it->first;
+        ++it; ++inspected;
+        m_cityCursor = (it == bots.end()) ? 0 : it->first;
+
+        if (!bot || !bot->IsInWorld() || !IsRandomBot(bot) || !IsCityResident(guid))
+            continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster() || bot->GetGroup() || bot->IsInCombat())
+            continue;
+
+        const bool horde_ = bot->GetTeam() == HORDE;
+        // deterministic home capital for this bot
+        uint32 h = guid * 40503u; h ^= h >> 13;
+        const Cap& cap = horde_ ? horde[h % 3] : ally[h % 3];
+
+        // already home? (within 60y of its capital center) -> just make sure it is seated
+        if (bot->GetMapId() == cap.map)
+        {
+            const float dx = bot->GetPositionX() - cap.x, dy = bot->GetPositionY() - cap.y;
+            if (dx * dx + dy * dy < 60.0f * 60.0f)
+            {
+                if (bot->IsStandState() && !bot->IsInCombat())
+                    bot->SetStandState(UNIT_STAND_STATE_SIT);
+                continue;
+            }
+        }
+
+        // level up to city-resident band (skew high: 55-60) if below
+        const uint32 target = std::min(maxLvl,
+            sPlayerbotAIConfig.cityResidentMinLevel + (h >> 8) % (maxLvl - sPlayerbotAIConfig.cityResidentMinLevel + 1));
+        if (bot->GetLevel() < target)
+        {
+            bot->GiveLevel(target);
+            bot->InitTalentForLevel();
+            PlayerbotFactory(bot, target).LearnClassTrainerSpells();  // GiveLevel learns no spells in this fork
+            PlayerbotFactory factory(bot, target);
+            factory.Randomize(false, false, true);
+        }
+        std::string gf;
+        PlayerbotStripBadGear(bot);    // remove factory costume junk before (re)gearing
+        if (bot->GetLevel() >= maxLvl) PlayerbotGearRaidTier(bot, gf);
+        else PlayerbotFillLevelGear(bot);
+
+        // scatter within the capital so they are not stacked on one point
+        uint32 hs = guid * 2654435761u; hs ^= hs >> 16;
+        const float ox = ((hs & 0xFFFF) / 65535.0f - 0.5f) * 70.0f;
+        const float oy = (((hs >> 16) & 0xFFFF) / 65535.0f - 0.5f) * 70.0f;
+        bot->TeleportTo(cap.map, cap.x + ox, cap.y + oy, cap.z, frand(0, 2 * M_PI_F));
+        bot->SetStandState(UNIT_STAND_STATE_SIT);
+        ++placed;
+    }
+
+    if (placed)
+        sLog.outDetail("CityLife: placed %u residents this tick", placed);
+}
+
+// DUNGEON/RAID ENTRANCE LOITERERS ("actor roles"). Parks 20-30 level-appropriate bots at each dungeon
+// entrance and 40 at each raid entrance, spread ~40y around the portal, so a real player passing by
+// sees a lively "forming group / waiting for members" crowd. ROTATES: each assignment expires after
+// 8-25 min (staggered) and a DIFFERENT level-appropriate bot fills the slot -> feels like different
+// people over time. Positioning teleports happen only when NO human is within 250y (Goal 3). The
+// per-bot loiter/emote/walk-in behavior lives in PlayerbotAI (DungeonLoiterController).
+// Is (x,y) a SAFE place to stand a bot? Snaps z to ground and rejects lava/slime and deep (swimming)
+// water -- the fix for loiterers spawning into the Molten Core lava lake and drowning. Returns the
+// ground z in `z`.
+static bool LoiterSpotSafe(uint32 mapId, float x, float y, float& z)
+{
+    TerrainInfo const* terrain = sTerrainMgr.LoadTerrain(mapId);
+    if (!terrain)
+        return false;
+    float gz = terrain->GetHeightStatic(x, y, z + 8.0f);
+    if (gz <= INVALID_HEIGHT)
+        return false;                       // no ground here (hole / off mesh)
+    z = gz + 0.5f;
+    GridMapLiquidData data;
+    GridMapLiquidStatus st = terrain->getLiquidStatus(x, y, z, MAP_ALL_LIQUIDS, &data);
+    if (st == LIQUID_MAP_NO_WATER)
+        return true;                        // dry ground
+    if (data.type_flags & (MAP_LIQUID_TYPE_MAGMA | MAP_LIQUID_TYPE_SLIME))
+        return false;                       // lava / slime -> never stand here
+    if (st & LIQUID_MAP_UNDER_WATER)
+        return false;                       // deep water (would be swimming)
+    return true;                            // shallow water at the shore is fine
+}
+
+void RandomPlayerbotMgr::PopulateDungeonEntrances()
+{
+    if (!sPlayerbotAIConfig.dungeonLoiterers)
+        return;
+    if (sWorld.GetUptime() < 600)
+        return;
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_dungeonNextMs)
+        return;
+    m_dungeonNextMs = now + 3000;
+
+    // Build the entrance table ONCE from the AreaTrigger DBC (source pos) + areatrigger_teleport
+    // (required level + destination map -> dungeon/raid classification).
+    if (!m_dungeonBuilt)
+    {
+        for (uint32 id = 1; id < sAreaTriggerStore.GetNumRows(); ++id)
+        {
+            AreaTriggerEntry const* src = sAreaTriggerStore.LookupEntry(id);
+            if (!src)
+                continue;
+            const MapEntry* srcMap = sMapStore.LookupEntry(src->mapid);
+            if (!srcMap || !srcMap->IsContinent())        // entrance must be out in the open world
+                continue;
+            AreaTriggerTeleport const* tp = sObjectMgr.GetAreaTriggerTeleport(id);
+            if (!tp)
+                continue;
+            const MapEntry* dstMap = sMapStore.LookupEntry(tp->destination.mapId);
+            if (!dstMap || !dstMap->IsDungeon())          // must lead into a dungeon or raid
+                continue;
+            DungeonEntrance e;
+            e.map = src->mapid; e.x = src->x; e.y = src->y; e.z = src->z;
+            e.minLevel = tp->requiredLevel;
+            e.isRaid = dstMap->IsRaid();
+            e.destMap = tp->destination.mapId;
+            e.destX = tp->destination.x; e.destY = tp->destination.y; e.destZ = tp->destination.z;
+            float cz = e.z;
+            if (!LoiterSpotSafe(e.map, e.x, e.y, cz))
+                continue;                    // entrance itself sits in lava/deep water (e.g. Molten Core) -> no loitering
+            // RING SAMPLE: the portal PLATFORM can be dry while the walk-ring around it is lava
+            // (Blackrock Mountain/MC ledges -- 110 environment deaths in zone 25). If ANY of 8
+            // points on the loiter ring is unsafe, the whole entrance is unusable for loitering.
+            bool ringSafe = true;
+            for (int ri = 0; ri < 8 && ringSafe; ++ri)
+            {
+                const float ra = ri * (2.0f * M_PI_F / 8.0f);
+                float rx = e.x + cos(ra) * 14.0f, ry = e.y + sin(ra) * 14.0f, rz = cz;
+                if (!LoiterSpotSafe(e.map, rx, ry, rz))
+                    ringSafe = false;
+            }
+            if (!ringSafe)
+                continue;
+            e.z = cz;
+            m_dungeonEntrances.push_back(e);
+        }
+        m_dungeonBuilt = true;
+        sLog.outString("DungeonLoiter: registered %u dungeon/raid entrances", (uint32)m_dungeonEntrances.size());
+    }
+    if (m_dungeonEntrances.empty())
+        return;
+
+    PlayerBotMap& bots = GetAllBots();
+    if (bots.empty())
+        return;
+
+    auto rp = GetRealPlayerSnapshot();
+    auto humanNear = [&](Player* b, float range) -> bool {
+        for (auto const& p : rp->players) {
+            if (p.guidLow == 0xFFFFFFFEu || p.mapId != b->GetMapId()) continue;
+            const float dx = p.x - b->GetPositionX(), dy = p.y - b->GetPositionY();
+            if (dx*dx + dy*dy < range*range) return true;
+        }
+        return false;
+    };
+
+    // DEADLOCK FIX: m_dungeonMutex must NEVER be held across TeleportTo. The world thread was
+    // teleporting while holding it, while map threads blocked on IsDungeonLoiterer -> AB-BA with
+    // the map locks -> world-update freeze (allocator/evac/deaths all stopped; watchdog blind
+    // because one map thread kept bot_events fresh). Bookkeeping happens under the lock; the
+    // teleports run AFTER it is released.
+    struct PendingPlace { Player* bot; float x, y, z; uint32 map; };
+    std::vector<PendingPlace> toPlace;
+    {
+    std::lock_guard<std::mutex> lock(m_dungeonMutex);
+
+    // 1) expire finished roles (rotation) + count who is currently assigned per entrance
+    std::vector<uint32> perEntrance(m_dungeonEntrances.size(), 0);
+    for (auto it = m_dungeonRoles.begin(); it != m_dungeonRoles.end(); )
+    {
+        auto bit = bots.find(it->first);
+        Player* b = (bit != bots.end()) ? bit->second : nullptr;
+        if (now >= it->second.expiryMs || !b || !b->IsInWorld())
+            it = m_dungeonRoles.erase(it);                // released -> back to normal life
+        else { if (it->second.entranceIdx < perEntrance.size()) perEntrance[it->second.entranceIdx]++; ++it; }
+    }
+
+    // 2) fill under-count entrances -- a few slots per tick so the work spreads over time
+    uint32 filled = 0;
+    auto itb = bots.upper_bound(m_dungeonCursor);
+    for (uint32 scanned = 0; scanned < 500 && filled < 6; ++scanned)
+    {
+        if (itb == bots.end()) { itb = bots.begin(); if (itb == bots.end()) break; }
+        Player* bot = itb->second; const uint32 guid = itb->first; m_dungeonCursor = guid; ++itb;
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive()) continue;
+        if (!IsRandomBot(bot) || IsCityResident(guid)) continue;
+        if (m_dungeonRoles.count(guid)) continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster() || bot->GetGroup() || bot->IsInCombat()) continue;
+        if (bot->InBattleGround() || bot->InBattleGroundQueue()) continue;
+        if (humanNear(bot, 250.0f)) continue;             // never yank a bot a human can see (Goal 3)
+        const uint8 lv = bot->GetLevel();
+        for (uint32 ei = 0; ei < m_dungeonEntrances.size(); ++ei)
+        {
+            const DungeonEntrance& e = m_dungeonEntrances[ei];
+            // varied crowd size per entrance, drifting every ~15 min so it's never a hard count:
+            // dungeons 20-30, raids 20-60 (different entrances have different-sized crowds).
+            uint32 seed = ei * 2654435761u + (now / 900000u); seed ^= seed >> 13;
+            const uint32 want = e.isRaid ? (20u + seed % 41u) : (20u + seed % 11u);
+            if (perEntrance[ei] >= want) continue;
+            if (lv < e.minLevel) continue;                                  // must meet the level req
+            if (e.minLevel < 55 && lv > (uint32)e.minLevel + 15) continue;  // keep it level-appropriate
+            uint32 h = guid * 2654435761u; h ^= h >> 15;
+            const float ox = ((h & 0xFFFF) / 65535.0f - 0.5f) * 24.0f;      // spread ~24y around portal
+            const float oy = (((h >> 16) & 0xFFFF) / 65535.0f - 0.5f) * 24.0f;
+            float sx = e.x + ox, sy = e.y + oy, sz = e.z;
+            if (!LoiterSpotSafe(e.map, sx, sy, sz))                          // that spot is lava/water/hole
+            { sx = e.x; sy = e.y; sz = e.z; }                               // -> stand at the safe entrance center
+            toPlace.push_back({ bot, sx, sy, sz, e.map });                   // teleport AFTER the lock is released
+            LoiterRole role;
+            role.entranceIdx = ei;
+            role.expiryMs = now + (8u + h % 18u) * 60000u;                  // 8-25 min, staggered
+            role.zoneIn = (h % 6 == 0);                                     // ~1 in 6 walks in + zones in
+            m_dungeonRoles[guid] = role;
+            perEntrance[ei]++; ++filled;
+            break;
+        }
+    }
+    } // release m_dungeonMutex BEFORE any teleports
+
+    for (auto& p : toPlace)
+    {
+        p.bot->TeleportTo(p.map, p.x, p.y, p.z, frand(0, 2 * M_PI_F));
+        sGuideFollowMgr.ResetCursor(p.bot);
+    }
+}
+
+bool RandomPlayerbotMgr::IsDungeonLoiterer(uint32 guidLow) const
+{
+    std::lock_guard<std::mutex> lk(m_dungeonMutex);
+    return m_dungeonRoles.find(guidLow) != m_dungeonRoles.end();
+}
+
+bool RandomPlayerbotMgr::GetDungeonLoiterSpot(uint32 guidLow, uint32& mapId, float& x, float& y, float& z, bool& zoneIn) const
+{
+    std::lock_guard<std::mutex> lk(m_dungeonMutex);
+    auto it = m_dungeonRoles.find(guidLow);
+    if (it == m_dungeonRoles.end() || it->second.entranceIdx >= m_dungeonEntrances.size())
+        return false;
+    const DungeonEntrance& e = m_dungeonEntrances[it->second.entranceIdx];
+    mapId = e.map; x = e.x; y = e.y; z = e.z; zoneIn = it->second.zoneIn;
+    return true;
+}
+
+void RandomPlayerbotMgr::EndDungeonRole(uint32 guidLow)
+{
+    std::lock_guard<std::mutex> lk(m_dungeonMutex);
+    m_dungeonRoles.erase(guidLow);
+}
+
+void RandomPlayerbotMgr::QueueBotTeleport(uint32 guidLow, uint32 mapId, float x, float y, float z, bool forLevel, bool resurrect)
+{
+    std::lock_guard<std::mutex> lk(m_teleMutex);
+    if (m_teleRequests.size() > 500)      // backstop against runaway queueing
+        return;
+    m_teleRequests.push_back({ guidLow, mapId, x, y, z, forLevel, resurrect });
+}
+
+// WORLD THREAD: execute teleports requested by map-thread AI (never teleport from a map tick --
+// that is the documented cross-map corruption source; two SIGSEGVs traced to the loiter zone-in +
+// idle-rescue doing exactly that).
+void RandomPlayerbotMgr::DrainBotTeleports()
+{
+    std::vector<BotTeleRequest> reqs;
+    {
+        std::lock_guard<std::mutex> lk(m_teleMutex);
+        if (m_teleRequests.empty())
+            return;
+        reqs.swap(m_teleRequests);
+    }
+    uint32 done = 0;
+    for (auto& r : reqs)
+    {
+        Player* bot = GetPlayer(r.guid);
+        if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
+            continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster())
+            continue;
+        if (r.resurrect && !bot->IsAlive())
+        {
+            bot->ResurrectPlayer(1.0f);
+            bot->SpawnCorpseBones();
+        }
+        if (r.forLevel)
+            RandomTeleportForLevel(bot, false);
+        else
+            bot->TeleportTo(r.map, r.x, r.y, r.z, bot->GetOrientation());
+        if (++done >= 30)                  // pace per world tick
+        {
+            std::lock_guard<std::mutex> lk(m_teleMutex);
+            m_teleRequests.insert(m_teleRequests.end(), reqs.begin() + (&r - &reqs[0]) + 1, reqs.end());
+            break;
+        }
+    }
+}
+
+// instance destination behind this bot's entrance (where "zone in" teleports it)
+bool RandomPlayerbotMgr::GetDungeonZoneInDest(uint32 guidLow, uint32& mapId, float& x, float& y, float& z) const
+{
+    std::lock_guard<std::mutex> lk(m_dungeonMutex);
+    auto it = m_dungeonRoles.find(guidLow);
+    if (it == m_dungeonRoles.end() || it->second.entranceIdx >= m_dungeonEntrances.size())
+        return false;
+    const DungeonEntrance& e = m_dungeonEntrances[it->second.entranceIdx];
+    if (!e.destMap && e.destX == 0.0f && e.destY == 0.0f)
+        return false;
+    mapId = e.destMap; x = e.destX; y = e.destY; z = e.destZ;
+    return true;
+}
+
+void RandomPlayerbotMgr::MarkLoitererZonedIn(uint32 guidLow)
+{
+    std::lock_guard<std::mutex> lk(m_dungeonMutex);
+    auto it = m_dungeonRoles.find(guidLow);
+    if (it != m_dungeonRoles.end())
+        it->second.zonedInMs = WorldTimer::getMSTime();
+}
+
+// a bot that walked into the instance dwells ~2 min (afk/dormant inside), then should leave so
+// instances don't accumulate occupants.
+bool RandomPlayerbotMgr::LoitererDwellExpired(uint32 guidLow) const
+{
+    std::lock_guard<std::mutex> lk(m_dungeonMutex);
+    auto it = m_dungeonRoles.find(guidLow);
+    if (it == m_dungeonRoles.end() || !it->second.zonedInMs)
+        return false;
+    return WorldTimer::getMSTime() - it->second.zonedInMs > 120000;
+}
+
+// True when a real player is online -- heavy background SETUP walkers throttle hard so the
+// player's nearby active bots stay responsive (their brains were being starved by setup churn).
+bool RandomPlayerbotMgr::RealPlayerActive()
+{
+    auto rp = GetRealPlayerSnapshot();
+    for (auto const& p : rp->players)
+        if (p.guidLow != 0xFFFFFFFEu)   // ignore the virtual observer sentinel
+            return true;
+    return false;
+}
+
 void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
 #ifdef MEMORY_MONITOR
@@ -1544,7 +2693,42 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     sMemoryMonitor.LogCount(sConfig.GetStringDefault("LogsDir") + "/" + "memory.csv");
 #endif
 
+    // WORLD HEARTBEAT: stamp logs/world_alive.hb every ~10s from the world loop. The external
+    // watchdog kills the process if this goes stale >120s -- TRUE freeze detection, independent
+    // of bot ramp phase or bursty CSVs (which false-positived boot-kills all morning and then
+    // missed real freezes when loosened).
+    {
+        static uint32 s_hbNextMs = 0;
+        const uint32 hbNow = WorldTimer::getMSTime();
+        if (hbNow >= s_hbNextMs)
+        {
+            s_hbNextMs = hbNow + 10000;
+            if (FILE* hb = fopen("logs/world_alive.hb", "w"))
+            {
+                fprintf(hb, "%ld\n", (long)time(nullptr));
+                fclose(hb);
+            }
+        }
+    }
+
+    DrainBgFillRequests();       // world thread performs BG fills queued by map-thread session handlers
+    SpawnMockBattlegrounds();    // bot-only observation games (AiPlayerbot.MockBgGames)
+    EvacuateStrandedBgBots();    // pull bots out of dead/stuck mock BGs (a crash source) when mocks off
+    DrainBotTeleports();         // execute map-thread teleport requests (rescue/zone-in) safely here
+    MockBgWatch();               // 20s telemetry on live WSGs
+    DrainPendingBgPorts();       // port enqueued BG bots the tick they get invited
+    RebuildRealPlayerSnapshot(); // map-thread readers use this, never the raw players map
+    RebuildActiveBrainSet();     // proximity brain allocator (100-200 brains chase players)
+    SpreadFleetLevels();         // one-time 1-60 spread walk (paced, self-disarming)
+    PromoteSixtyCampaign();      // hold L60 population at target: promote+gear+teleport to L60 zones
+    ZoneMismatchSweep();         // move high-level bots out of low-level zones
+    PopulateCapitalCities();     // city-life: sit high-level residents in capitals (fuller world)
+    PopulateDungeonEntrances();  // rotating loiterers at dungeon/raid entrances (fake LFG groups)
+    ContainLowLevelBots();       // keep <L5 bots in their starter zone (continuous, ungated)
     DrainQueuedBotLogouts(); // map-worker logout requests run here, on the world thread
+    DrainQueuedBotTeleports(); // rescue teleports likewise — never from map threads
+    UpdateSyntheticProgress(); // dormant-tier xp/gold trickle, same world-thread safe point
+    SweepNakedMaxLevelBots();  // self-healing T2 kit for naked 60s (incl. raid members)
 
     const uint32 totalUpdateStart = WorldTimer::getMSTime();
     uint32 updateSessionsTime = 0;
@@ -1592,6 +2776,12 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
         {
             s_nextCampGroupMs = nowMs + 12000;   // proactively group co-located same-quest bots
             FormQuestCampGroups();
+        }
+        static uint32 s_nextPartyFormMs = 0;
+        if (sPlayerbotAIConfig.autonomousParties && (!s_nextPartyFormMs || nowMs >= s_nextPartyFormMs))
+        {
+            s_nextPartyFormMs = nowMs + 15000;   // broader grinding-party formation (active cohort)
+            FormGrindingParties();
         }
     }
 
@@ -2024,9 +3214,13 @@ void RandomPlayerbotMgr::LoginFreeBots()
 
                 if (!IsRandomBot(bot) && GetPlayerBot(guid)) //Place bot in player manager.
                 {
-                    for (auto& [mGuid, master] : players)
+                    for (auto& [mGuid, masterStored] : players)
                     {
                         ObjectGuid masterGuid(ObjectGuid(HIGHGUID_PLAYER, mGuid));
+                        // live re-resolve: never trust the stored pointer (stale-after-DC class)
+                        Player* master = sObjectMgr.GetPlayer(masterGuid);
+                        if (!master || !master->IsInWorld())
+                            continue;
                         if (accountId == sObjectMgr.GetPlayerAccountIdByGUID(masterGuid))
                         {
                             PlayerbotMgr* mgr = master->GetPlayerbotMgr();
@@ -2454,6 +3648,629 @@ void RandomPlayerbotMgr::LoadBattleMastersCache()
     sLog.outString();
 }
 
+
+// Hold the fleet's L60 population at AiPlayerbot.Level60Target (default 2000). The old
+// HandlePromote60 whisper command proved the per-bot kit (GiveLevel + factory Randomize +
+// deterministic T2 gear) but never TELEPORTED anyone -- which is why all 532 sixties sat in
+// capitals/starter zones while EPL/Winterspring/Silithus were empty. This campaign promotes
+// from the overpopulated low brackets, gears, then RandomTeleportForLevel disperses them
+// across L60 zones. Self-healing: counts every pass, so it survives restarts and keeps the
+// population topped up as new low bots spawn in.
+void RandomPlayerbotMgr::PromoteSixtyCampaign()
+{
+    if (!sPlayerbotAIConfig.level60Target || sWorld.GetUptime() < 600)
+        return;
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_promote60NextMs)
+        return;
+    m_promote60NextMs = now + 2000;
+
+    PlayerBotMap& bots = GetAllBots();
+    if (bots.empty())
+        return;
+    uint32 count60 = 0;
+    for (auto& pr : bots)
+        if (pr.second && pr.second->IsInWorld() && pr.second->GetLevel() >= 60)
+            ++count60;
+    if (count60 >= sPlayerbotAIConfig.level60Target)
+        return;
+
+    auto rp = GetRealPlayerSnapshot();
+    auto nearRealPlayer = [&](Player* b, float range)
+    {
+        for (auto const& pl : rp->players)
+        {
+            if (pl.mapId != b->GetMapId())
+                continue;
+            const float dx = pl.x - b->GetPositionX(), dy = pl.y - b->GetPositionY();
+            if (dx * dx + dy * dy < range * range)
+                return true;
+        }
+        return false;
+    };
+
+    // the full factory Randomize is the heavy path -- tiny batches, lighter while a player is on
+    const uint32 budget = RealPlayerActive() ? 1u : 4u;
+    uint32 promoted = 0;
+    auto it = bots.upper_bound(m_promote60Cursor);
+    for (uint32 scanned = 0; scanned < 500 && promoted < budget; ++scanned)
+    {
+        if (it == bots.end())
+        {
+            it = bots.begin();
+            if (it == bots.end())
+                break;
+        }
+        Player* bot = it->second;
+        m_promote60Cursor = it->first;
+        ++it;
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->GetLevel() >= 55)
+            continue;
+        if (!IsRandomBot(bot) || bot->GetGroup() || bot->IsInCombat() || bot->IsHardcore())
+            continue;
+        if (bot->InBattleGround() || bot->InBattleGroundQueue())
+            continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster())
+            continue;
+        if (IsCityResident(bot->GetGUIDLow()))
+            continue;                       // residents keep filling the capitals
+        if (nearRealPlayer(bot, 200.0f))
+            continue;                       // never morph a bot in front of a player
+
+        bot->GiveLevel(60);
+        bot->InitTalentForLevel();
+        PlayerbotFactory factory(bot, 60, ITEM_QUALITY_EPIC);
+        factory.Randomize(false, false, true);   // talents/spells/skills/consumables
+        std::string fails;
+        const uint32 equipped = PlayerbotGearRaidTier(bot, fails);  // deterministic T2 kit + jewelry fill
+        bot->DurabilityRepairAll(false, 1.0f);
+        bot->SetHealth(bot->GetMaxHealth());
+        RandomTeleportForLevel(bot, false);      // THE missing piece: disperse into L60 zones
+        sGuideFollowMgr.ResetCursor(bot);        // stale guide cursor would haul it back cross-continent
+        ++promoted;
+        ++count60;
+        sLog.outString("PROMOTE60 %s -> L60 equipped=%u zone=%u (%u/%u sixties)",
+            bot->GetName(), equipped, bot->GetZoneId(), count60, sPlayerbotAIConfig.level60Target);
+    }
+}
+
+// Teleport high-level bots squatting in low-level zones (1935 bots L40+ were sitting in the six
+// starter zones) to level-appropriate content. Rolling cursor, few checks per pass, max 2
+// teleports -- drains the mismatch over minutes without tick spikes or visible mass blink-outs.
+void RandomPlayerbotMgr::ZoneMismatchSweep()
+{
+    if (sWorld.GetUptime() < 600)
+        return;
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_zoneFixNextMs)
+        return;
+    m_zoneFixNextMs = now + 250;
+
+    PlayerBotMap& bots = GetAllBots();
+    if (bots.empty())
+        return;
+    auto rp = GetRealPlayerSnapshot();
+    uint32 checked = 0, moved = 0;
+    auto it = bots.upper_bound(m_zoneFixCursor);
+    while (checked < 40 && moved < 4)   // drain misplaced high-level bots faster (was 30/2)
+    {
+        if (it == bots.end())
+        {
+            it = bots.begin();
+            if (it == bots.end())
+                break;
+        }
+        Player* bot = it->second;
+        m_zoneFixCursor = it->first;
+        ++it;
+        ++checked;
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->GetLevel() < 25)
+            continue;
+        if (!IsRandomBot(bot) || bot->GetGroup() || bot->IsInCombat())
+            continue;
+        if (bot->InBattleGround() || bot->InBattleGroundQueue() || bot->GetMap()->IsDungeon())
+            continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster())
+            continue;
+        if (IsCityResident(bot->GetGUIDLow()))
+            continue;                       // capital residents are placed there on purpose
+        if (IsDungeonLoiterer(bot->GetGUIDLow()))
+            continue;                       // loiterers hold their entrance post on purpose
+        const uint32 zoneId = bot->GetZoneId();
+        // capitals carry AreaLevel=10 in this core, but a capital FULL of 60s is what a real
+        // server looks like -- never sweep them (SW/IF/Darn/Org/TB/UC).
+        if (zoneId == 1519 || zoneId == 1537 || zoneId == 1657 || zoneId == 1637 || zoneId == 1638 || zoneId == 1497)
+            continue;
+        const AreaEntry* zone = AreaEntry::GetById(zoneId);
+        if (!zone || zone->AreaLevel <= 0)
+            continue;                       // unknown areas: leave alone
+        if ((int32)bot->GetLevel() <= zone->AreaLevel + 12)
+            continue;                       // fits the zone
+        bool nearPlayer = false;
+        for (auto const& pl : rp->players)
+        {
+            if (pl.guidLow == 0xFFFFFFFEu)   // the virtual observer must NOT protect misplaced bots
+                continue;                    // from the sweep (it has no census rescue behind it)
+            if (pl.mapId != bot->GetMapId())
+                continue;
+            const float dx = pl.x - bot->GetPositionX(), dy = pl.y - bot->GetPositionY();
+            if (dx * dx + dy * dy < 250.0f * 250.0f) { nearPlayer = true; break; }
+        }
+        if (nearPlayer)
+            continue;                       // near-player strays are the census rescue's job
+        RandomTeleportForLevel(bot, false);
+        sGuideFollowMgr.ResetCursor(bot);
+        ++moved;
+        sLog.outString("ZONEFIX %s L%u left zone=%u (area level %d)",
+            bot->GetName(), bot->GetLevel(), zone->Id, zone->AreaLevel);
+    }
+}
+
+// Session opcodes are handled on MAP threads in this core, so the "player joined a BG queue"
+// hook must NOT touch the BG queue or our pending-port state directly -- it races the world
+// thread (symptom: fills logged 'enqueued 7 bots' but the world-thread drain never saw a single
+// pending entry, and off-thread AddGroup/Update left bots queued-but-never-invited). The hook
+// only records a request here; DrainBgFillRequests performs it on the world thread.
+void RandomPlayerbotMgr::QueueInstantFillBg(uint32 playerGuidLow, uint32 bgTypeId, uint32 bracketId)
+{
+    std::lock_guard<std::mutex> lock(m_bgFillMutex);
+    m_bgFillRequests.push_back({ playerGuidLow, bgTypeId, bracketId });
+}
+
+void RandomPlayerbotMgr::DrainBgFillRequests()
+{
+    std::vector<BgFillRequest> reqs;
+    {
+        std::lock_guard<std::mutex> lock(m_bgFillMutex);
+        reqs.swap(m_bgFillRequests);
+    }
+    for (auto const& r : reqs)
+    {
+        Player* p = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, r.playerGuidLow));
+        if (!p || !p->IsInWorld())
+            continue;
+        sLog.outString("BGFILL world-thread fill for %s bg=%u bracket=%u", p->GetName(), r.bgTypeId, r.bracketId);
+        InstantFillBgQueue(p, r.bgTypeId, r.bracketId);
+    }
+}
+
+// Bot-only battlegrounds so tactics can be observed and fixed WITHOUT a real player babysitting
+// (user: "run a few mock bgs parallel and watch all the games"). Spawned once after boot settles.
+// Pull bots out of dead/stuck mock BGs. A leftover mock WSG (no real player, bots endlessly
+// fighting/flag-grabbing) was SIGSEGVing the server. When mock BGs are OFF and no real player is
+// online, any bot sitting in a battleground is stranded -> LeaveBattleground it (proper removal +
+// teleport to entry point). Once drained this is a cheap no-op.
+void RandomPlayerbotMgr::EvacuateStrandedBgBots()
+{
+    if (sPlayerbotAIConfig.mockBgGames)   // mock BGs intentionally running -> leave them be
+        return;
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_bgEvacNextMs)
+        return;
+    m_bgEvacNextMs = now + 2000;
+
+    // Blanket "skip while a real player is online" made evac NEVER run whenever the user was
+    // in-game -- so the 40 chars saved on map 489 kept re-logging into the dead WSG every ramp
+    // and sat there (crash fuel). Correct granularity: protect only BG maps that CONTAIN a real
+    // player (their legit match); bot-only BG maps drain regardless.
+    auto rp = GetRealPlayerSnapshot();
+    auto realPlayerOnMap = [&](uint32 mapId) {
+        for (auto const& p : rp->players)
+            if (p.guidLow != 0xFFFFFFFEu && p.mapId == mapId)
+                return true;
+        return false;
+    };
+
+    // Iterate ALL in-world players (ObjectAccessor), not GetAllBots(): the stuck map-489 cohort
+    // (RNDBOT guids 1802-1846) kept ticking BG-tactics AI while the GetAllBots()-based sweep saw
+    // none of them -- whatever holder owns them, the accessor sees every in-world Player.
+    uint32 evac = 0, onBgMaps = 0;
+    for (auto& itp : sObjectAccessor.GetPlayers())
+    {
+        Player* bot = itp.second;
+        if (!bot || !bot->IsInWorld())
+            continue;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (!ai || ai->HasRealPlayerMaster())
+            continue;                     // never touch real players or player-owned bots
+        // ALSO purge their BG QUEUE slots: LeaveBattleground alone left the bot queued, so the
+        // queue re-INVITED it seconds later (auto-accept) and the dead WSG refilled 0->40 in
+        // minutes -- the actual re-formation loop behind the recurring map-489 SIGSEGV.
+        if (bot->InBattleGroundQueue())
+        {
+            for (uint32 qi = 0; qi < PLAYER_MAX_BATTLEGROUND_QUEUES; ++qi)
+            {
+                BattleGroundQueueTypeId qtid = bot->GetBattleGroundQueueTypeId(qi);
+                if (qtid == BATTLEGROUND_QUEUE_NONE)
+                    continue;
+                sBattleGroundMgr.m_BattleGroundQueues[qtid].RemovePlayer(bot->GetObjectGuid(), true);
+                bot->RemoveBattleGroundQueueId(qtid);
+            }
+        }
+        const bool onBgMap = bot->GetMap() && bot->GetMap()->IsBattleGround();
+        if (onBgMap)
+            ++onBgMaps;
+        if (onBgMap && realPlayerOnMap(bot->GetMapId()))
+            continue;                     // a human is IN this BG -> it's a real match, leave it be
+        if (bot->InBattleGround())
+        {
+            bot->LeaveBattleground(true);
+            if (++evac >= 20)             // pace: max 20 per 2s pass
+                break;
+        }
+        // ORPHANED-BG-MAP bots: saved on a BG map, relogged after the battleground object died ->
+        // InBattleGround() is FALSE so the branch above skips them, and they run BG-tactics AI on a
+        // dead map forever (flag-interact spam -> the recurring WSG SIGSEGV). Detect by MAP TYPE and
+        // hard-relocate them to level content (world thread here, so direct teleport is safe).
+        else if (onBgMap)
+        {
+            RandomTeleportForLevel(bot, false);
+            if (++evac >= 20)
+                break;
+        }
+    }
+    if (evac || onBgMaps)
+        sLog.outString("BGEVAC: saw %u bots on BG maps, evacuated %u", onBgMaps, evac);
+    // Heartbeat (60s): prove the sweep runs and what it sees -- 40 bots brawled on map 489 while
+    // this function reported nothing, so its actual view must be observable, not assumed.
+    static uint32 s_evacBeatMs = 0;
+    if (now - s_evacBeatMs > 60000)
+    {
+        s_evacBeatMs = now;
+        uint32 total = 0;
+        for (auto& itp2 : sObjectAccessor.GetPlayers())
+            if (itp2.second && itp2.second->IsInWorld())
+                ++total;
+        sLog.outString("BGEVAC-BEAT: accessorPlayers=%u onBgMaps=%u evac=%u mock=%u", total, onBgMaps, evac, sPlayerbotAIConfig.mockBgGames);
+    }
+}
+
+void RandomPlayerbotMgr::SpawnMockBattlegrounds()
+{
+    if (!sPlayerbotAIConfig.mockBgGames || m_mockBgSpawned || sWorld.GetUptime() < 660)
+        return;
+    m_mockBgSpawned = true;
+    const BattleGroundBracketId bracket = sBattleGroundMgr.GetBattleGroundBracketIdFromLevel(BATTLEGROUND_WS, 60);
+    for (uint32 i = 0; i < sPlayerbotAIConfig.mockBgGames; ++i)
+    {
+        sLog.outString("MOCKBG spawning bot-only WSG %u/%u", i + 1, sPlayerbotAIConfig.mockBgGames);
+        InstantFillBgQueue(nullptr, BATTLEGROUND_WS, bracket);
+    }
+}
+
+// 20s telemetry for every live WSG: status, score, flag carriers, and HOW MANY BOTS ACTUALLY
+// PLAY (moving/fighting) vs stand AFK -- with names, so a statue is a traceable bug.
+void RandomPlayerbotMgr::MockBgWatch()
+{
+    const uint32 now = WorldTimer::getMSTime();
+    if (now < m_mockWatchMs)
+        return;
+    m_mockWatchMs = now + 20000;
+
+    for (auto itr = sBattleGroundMgr.GetBattleGroundsBegin(BATTLEGROUND_WS); itr != sBattleGroundMgr.GetBattleGroundsEnd(BATTLEGROUND_WS); ++itr)
+    {
+        BattleGroundWS* bg = (BattleGroundWS*)itr->second;
+        if (!bg || bg->GetStatus() == STATUS_WAIT_LEAVE)
+            continue;
+        uint32 moving = 0, fighting = 0, dead = 0, afk = 0, total = 0, deadUnreleased = 0;
+        std::string afkNames, carriers;
+        for (auto const& pr : bg->GetPlayers())
+        {
+            Player* pl = sObjectMgr.GetPlayer(pr.first);
+            if (!pl || !pl->IsInWorld())
+                continue;
+            ++total;
+            if (pl->HasAura(BG_WS_SPELL_WARSONG_FLAG) || pl->HasAura(BG_WS_SPELL_SILVERWING_FLAG))
+            {
+                carriers += pl->GetName();
+                carriers += " ";
+            }
+            if (!pl->IsAlive())
+            {
+                ++dead;
+                if (pl->GetDeathState() == CORPSE)   // died but never released spirit
+                    ++deadUnreleased;
+                // GHOST AUTO-REZ: released bots sat dead for 30+ MINUTES (spirit-healer queue
+                // never picks them up) -- the "8 dead never rejoin" match decay. Spirit-heal
+                // any bot ghost dead >45s: full rez, back into the fight like a real player.
+                else if (pl->GetPlayerbotAI())
+                {
+                    static std::unordered_map<uint32, uint32> s_ghostSince;
+                    const uint32 gNow = WorldTimer::getMSTime();
+                    uint32& t0 = s_ghostSince[pl->GetGUIDLow()];
+                    if (!t0) t0 = gNow;
+                    else if (gNow - t0 > 45000)
+                    {
+                        t0 = 0;
+                        pl->ResurrectPlayer(1.0f);
+                        pl->SpawnCorpseBones();
+                        sLog.outString("MOCKBG spirit-rez %s (ghost >45s)", pl->GetName());
+                    }
+                }
+                continue;
+            }
+            if (pl->IsInCombat()) { ++fighting; continue; }
+            if (pl->IsMoving()) { ++moving; continue; }
+            ++afk;
+            if (afkNames.size() < 180)
+            {
+                afkNames += pl->GetName();
+                // strategy-loss marker: '!' = the battleground strategy is GONE from this bot's
+                // noncombat engine (the match-decay suspect); '*' = still present
+                PlayerbotAI* pai = pl->GetPlayerbotAI();
+                afkNames += (pai && pai->HasStrategy("battleground", BotState::BOT_STATE_NON_COMBAT)) ? "* " : "! ";
+            }
+        }
+        // SCOREBOARD PROOF (goal: "confirm bots are fighting via scoreboard"): total killing
+        // blows + deaths across the match, and the top fragger by name.
+        uint32 kbTotal = 0, deathsTotal = 0, topKb = 0;
+        std::string topName;
+        for (auto sc = bg->GetPlayerScoresBegin(); sc != bg->GetPlayerScoresEnd(); ++sc)
+        {
+            kbTotal += sc->second->KillingBlows;
+            deathsTotal += sc->second->Deaths;
+            if (sc->second->KillingBlows > topKb)
+            {
+                topKb = sc->second->KillingBlows;
+                Player* tp = sObjectMgr.GetPlayer(sc->first);
+                topName = tp ? tp->GetName() : "?";
+            }
+        }
+        // MELEE STICKINESS (goal: "on top of their target 90%"): share of fighting melee bots
+        // within 8y of their victim right now.
+        uint32 meleeFighting = 0, meleeOnTarget = 0;
+        for (auto const& pr : bg->GetPlayers())
+        {
+            Player* pl = sObjectMgr.GetPlayer(pr.first);
+            if (!pl || !pl->IsInWorld() || !pl->IsAlive() || !pl->IsInCombat())
+                continue;
+            const uint8 c = pl->getClass();
+            if (c != CLASS_WARRIOR && c != CLASS_ROGUE && c != CLASS_PALADIN)
+                continue;
+            Unit* victim = pl->GetVictim();
+            if (!victim)
+                continue;
+            ++meleeFighting;
+            if (pl->GetDistance(victim) <= 8.0f)
+                ++meleeOnTarget;
+        }
+        sLog.outString("MOCKBG ws=%u status=%u time=%u A:%u-H:%u players=%u moving=%u fighting=%u dead=%u(unreleased=%u) AFK=%u KB=%u deaths=%u top=%s(%u) meleeOnTgt=%u/%u carriers=[%s] afk=[%s]",
+            bg->GetInstanceID(), (uint32)bg->GetStatus(), bg->GetStartTime() / 1000,
+            bg->GetTeamScore(ALLIANCE), bg->GetTeamScore(HORDE),
+            total, moving, fighting, dead, deadUnreleased, afk,
+            kbTotal, deathsTotal, topName.c_str(), topKb, meleeOnTarget, meleeFighting,
+            carriers.c_str(), afkNames.c_str());
+    }
+}
+
+void RandomPlayerbotMgr::DrainPendingBgPorts()
+{
+    if (m_pendingBgPort.empty())
+        return;
+    const uint32 now = WorldTimer::getMSTime();
+    if (now > m_pendingBgPortUntilMs)   // timed out waiting for invites
+    {
+        for (auto const& p : m_pendingBgPort)
+            if (Player* bot = GetPlayer(p.guidLow))
+                sLog.outString("BGPORT timeout bot=%s inQueue=%d inBG=%d", bot->GetName(),
+                    bot->InBattleGroundQueue() ? 1 : 0, bot->InBattleGround() ? 1 : 0);
+        m_pendingBgPort.clear();
+        return;
+    }
+
+    // Queue updates are EVENT-SCHEDULED in this core (m_QueueUpdateScheduler): the single
+    // synchronous Update() at enqueue time was the ONLY invite attempt, and if the match
+    // check missed that tick nothing ever retried -- bots sat queued-but-never-invited while
+    // the real player fought alone. Re-kick the queue update every 2s while ports are pending.
+    if (now >= m_pendingBgKickMs)
+    {
+        m_pendingBgKickMs = now + 2000;
+        std::set<std::pair<uint32, uint32>> kicked;
+        for (auto const& p : m_pendingBgPort)
+            if (kicked.insert({ p.queueTypeId, p.bracketId }).second)
+                sBattleGroundMgr.m_BattleGroundQueues[p.queueTypeId].Update(
+                    (BattleGroundTypeId)p.bgTypeId, (BattleGroundBracketId)p.bracketId);
+    }
+
+    const bool diag = now >= m_pendingBgDiagMs;
+    if (diag)
+        m_pendingBgDiagMs = now + 5000;
+
+    for (auto it = m_pendingBgPort.begin(); it != m_pendingBgPort.end(); )
+    {
+        Player* bot = GetPlayer(it->guidLow);
+        if (!bot || !bot->IsInWorld())
+        {
+            it = m_pendingBgPort.erase(it);
+            continue;
+        }
+        if (bot->InBattleGround())
+        {
+            sLog.outString("BGPORT entered bot=%s map=%u", bot->GetName(), bot->GetMapId());
+            it = m_pendingBgPort.erase(it);
+            continue;
+        }
+        if (!bot->InBattleGroundQueue())
+        {
+            sLog.outString("BGPORT dropped-from-queue bot=%s", bot->GetName());
+            it = m_pendingBgPort.erase(it);
+            continue;
+        }
+        if (diag)
+        {
+            BattleGroundQueue& q = sBattleGroundMgr.m_BattleGroundQueues[it->queueTypeId];
+            GroupQueueInfo gi;
+            const bool inQ = q.GetPlayerGroupInfoData(bot->GetObjectGuid(), &gi);
+            sLog.outString("BGPORT wait bot=%s ginfo=%d invited=%u", bot->GetName(),
+                inQ ? 1 : 0, inQ ? gi.IsInvitedToBGInstanceGUID : 0);
+        }
+        // retry the server-side port -- a no-op until the queue invites the bot, then it enters
+        WorldPacket port(CMSG_BATTLEFIELD_PORT, 20);
+        port << it->mapId << uint8(1);
+        bot->GetSession()->HandleBattlefieldPortOpcode(port);
+        if (bot->InBattleGround())
+        {
+            sLog.outString("BGPORT entered bot=%s map=%u", bot->GetName(), bot->GetMapId());
+            if (PlayerbotAI* ai = bot->GetPlayerbotAI())
+                ai->ResetStrategies(false);
+            it = m_pendingBgPort.erase(it);
+        }
+        else
+            ++it;
+    }
+}
+
+void RandomPlayerbotMgr::InstantFillBgQueue(Player* realPlayer, uint32 bgTypeIdU, uint32 bracketIdU)
+{
+    // v5 -- QUEUE BYPASS, group-finder style. Three generations of queue-path fixes each hit a
+    // different wall (map-thread races, event-scheduled invites that never retry, invite state
+    // not visible to server-side ports). The dungeon group finder works because it never asks
+    // the matchmaker: it picks bots, groups them, teleports them. Same here: create the BG
+    // instance directly, set each participant's invite+bg id (what MovementHandler's arrival
+    // hook needs to call bg->AddPlayer), and send everyone to their faction's start location.
+    // realPlayer == nullptr -> MOCK GAME: bot-only match for autonomous tactics observation
+    const bool mock = realPlayer == nullptr;
+    BattleGroundTypeId bgTypeId = (BattleGroundTypeId)bgTypeIdU;
+    BattleGroundBracketId bracketId = (BattleGroundBracketId)bracketIdU;
+    BattleGround* bgt = sBattleGroundMgr.GetBattleGroundTemplate(bgTypeId);
+    if (!bgt)
+        return;
+    // FULL teams, no empty slots: WSG 10v10, AB 15v15, AV 40v40 (max, not min)
+    const uint32 perTeam = bgt->GetMaxPlayersPerTeam() ? bgt->GetMaxPlayersPerTeam() : bgt->GetMinPlayersPerTeam();
+    if (!perTeam)
+        return;
+    const BattleGroundQueueTypeId queueTypeId = BattleGroundMgr::BGQueueTypeId(bgTypeId);
+
+    BattleGround* bg = sBattleGroundMgr.CreateNewBattleGround(bgTypeId, bracketId);
+    if (!bg)
+    {
+        sLog.outError("BGDIRECT: CreateNewBattleGround failed bg=%u bracket=%u", bgTypeIdU, bracketIdU);
+        return;
+    }
+    // 15s to the bell with 10s/5s warnings. Must shrink the EVENT TABLE, not m_StartDelayTime:
+    // the first player porting in resets the delay to the table's FIRST entry (stock 2 min).
+    bg->SetStartDelayTimeTable(15000, 10000, 5000);
+    // REGISTER the instance -- StartBattleGround() is what puts the new BG into
+    // m_BattleGrounds (the GetBattleGround lookup) and the free-slot/update lists. Without it
+    // the instance is an orphan: the player's accept fails with "instance not found" and
+    // arriving bots can't register (the exact BGPORT-H failure the diagnostics caught).
+    bg->StartBattleGround();
+
+    // BOT insert routine -- mirrors HandleBattlefieldPortOpcode's action=1 body minus the
+    // queue/invite prerequisites, with an INSTRUMENTED teleport (v5's silent failure mode)
+    auto sendIn = [&](Player* p)
+    {
+        if (!p->IsAlive())
+        {
+            p->ResurrectPlayer(1.0f);
+            p->SpawnCorpseBones();
+        }
+        if (p->IsInCombat())
+            p->CombatStop(true);
+        uint32 qslot = p->GetBattleGroundQueueIndex(queueTypeId);
+        if (qslot >= PLAYER_MAX_BATTLEGROUND_QUEUES)
+            qslot = p->AddBattleGroundQueueId(queueTypeId);
+        p->SetInviteForBattleGroundQueueType(queueTypeId, bg->GetInstanceID()); // arrival hook requires this
+        p->SetBattleGroundEntryPoint();
+        p->SetBattleGroundId(bg->GetInstanceID(), bgTypeId, qslot);
+        p->SetBGTeam(p->GetTeam());
+        float sx, sy, sz, so;
+        bg->GetTeamStartLoc(p->GetTeam(), sx, sy, sz, so);
+        const bool ok = p->TeleportTo(bg->GetMapId(), sx, sy, sz, so);
+        if (!ok)
+            sLog.outString("BGDIRECT: teleport FAILED for %s (inBG=%d beingTele=%d combat=%d taxi=%d dead=%d)",
+                p->GetName(), p->InBattleGround() ? 1 : 0, p->IsBeingTeleported() ? 1 : 0,
+                p->IsInCombat() ? 1 : 0, p->IsTaxiFlying() ? 1 : 0, p->IsAlive() ? 0 : 1);
+        if (PlayerbotAI* ai = p->GetPlayerbotAI())
+        {
+            ai->ResetStrategies(false);   // InBattleGround() is true now -> BG tactics strategies apply
+            // mirror BGStatusAction's post-join ritual: without a bg role the BGTactics engine
+            // has no objective assignment -> bots stand at spawn (the stuck-warriors-in-WSG bug)
+            AiObjectContext* ctx = ai->GetAiObjectContext();
+            ctx->GetValue<uint32>("bg type")->Set((uint32)queueTypeId);
+            ctx->GetValue<uint32>("bg role")->Set(urand(0, 9));
+            ai::PositionMap& posMap = ctx->GetValue<ai::PositionMap&>("position")->Get();
+            ai::PositionEntry pos = posMap["bg objective"];
+            pos.Reset();
+            posMap["bg objective"] = pos;
+        }
+        return ok;
+    };
+
+    // THE REAL PLAYER GOES THROUGH THE NATIVE INVITE PATH -- queue -> QUEUE-POP DIALOG ->
+    // Enter Battle -> standard handler. Mock games have no real player at all.
+    BattleGroundQueue& bgQueue = sBattleGroundMgr.m_BattleGroundQueues[queueTypeId];
+    (void)bgQueue;
+
+    uint32 needA = perTeam, needH = perTeam;
+    if (!mock)
+    {
+        if (realPlayer->GetTeam() == ALLIANCE) --needA;
+        else                                   --needH;
+    }
+
+    std::vector<Player*> picked;
+    auto fill = [&](Team team, uint32 count)
+    {
+        uint32 added = 0;
+        for (auto& pr : GetAllBots())
+        {
+            if (added >= count) break;
+            Player* bot = pr.second;
+            if (!bot || !bot->IsInWorld()) continue;
+            if (!IsRandomBot(bot) || bot->GetGroup() || bot->InBattleGround() || bot->InBattleGroundQueue()) continue;
+            if (bot->GetTeam() != team || bot->IsHardcore()) continue;
+            if (sBattleGroundMgr.GetBattleGroundBracketIdFromLevel(bgTypeId, bot->GetLevel()) != bracketId) continue;
+            PlayerbotAI* ai = bot->GetPlayerbotAI();
+            if (!ai || ai->HasRealPlayerMaster()) continue;
+            if (ai->IsColdDormant())
+                ai->SetColdDormant(false);
+            picked.push_back(bot);
+            ++added;
+        }
+    };
+    fill(ALLIANCE, needA);
+    fill(HORDE, needH);
+
+    // invite the player via their existing queue entry (they joined the queue normally)
+    bool playerInvited = false;
+    if (!mock)
+    {
+        auto qitr = bgQueue.m_QueuedPlayers.find(realPlayer->GetObjectGuid());
+        if (qitr != bgQueue.m_QueuedPlayers.end() && qitr->second.GroupInfo)
+        {
+            qitr->second.GroupInfo->IsInvitedToBGInstanceGUID = bg->GetInstanceID();
+            qitr->second.GroupInfo->RemoveInviteTime = WorldTimer::getMSTime() + INVITE_ACCEPT_WAIT_TIME;
+            const uint32 qslot = realPlayer->GetBattleGroundQueueIndex(queueTypeId);
+            realPlayer->SetInviteForBattleGroundQueueType(queueTypeId, bg->GetInstanceID());
+            WorldPacket status;
+            sBattleGroundMgr.BuildBattleGroundStatusPacket(&status, bg, qslot, STATUS_WAIT_JOIN, INVITE_ACCEPT_WAIT_TIME, 0);
+            realPlayer->GetSession()->SendPacket(&status);   // <- the queue-pop dialog
+            playerInvited = true;
+        }
+    }
+    if (!mock && !playerInvited)
+        sendIn(realPlayer);   // not in queue somehow -> direct insert as fallback
+
+    uint32 botsIn = 0;
+    std::string names;
+    for (Player* bot : picked)
+    {
+        if (sendIn(bot))
+        {
+            ++botsIn;
+            names += bot->GetName();
+            names += " ";
+        }
+    }
+    sLog.outString("BGDIRECT: bots in: %s", names.c_str());
+
+    sLog.outString("BGDIRECT: bg=%u instance=%u bracket=%u: %s invited via queue-pop=%d, bots teleported %u/%zu",
+        bgTypeIdU, bg->GetInstanceID(), bracketIdU, mock ? "MOCK" : realPlayer->GetName(), playerInvited ? 1 : 0, botsIn, picked.size());
+}
+
 void RandomPlayerbotMgr::CheckBgQueue()
 {
     if (!BgCheckTimer)
@@ -2487,9 +4304,11 @@ void RandomPlayerbotMgr::CheckBgQueue()
         }
     }
 
-    for (auto i : players)
+    for (auto i : GetPlayersCopy())
     {
-        Player* player = i.second;
+        // LIVE lookup by guid -- the stored Player* can be stale after a disconnect
+        // (18:09 SIGSEGV in CheckLfgQueue: same class as the LogPlayerLocation crashes)
+        Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, i.first));
 
         if (!player || !player->IsInWorld())
             continue;
@@ -2497,7 +4316,7 @@ void RandomPlayerbotMgr::CheckBgQueue()
         if (!player->InBattleGroundQueue())
             continue;
 
-        if (player->InBattleGround() && player->GetBattleGround()->GetStatus() == STATUS_WAIT_LEAVE)
+        if (player->InBattleGround() && player->GetBattleGround() && player->GetBattleGround()->GetStatus() == STATUS_WAIT_LEAVE)
             continue;
 
         for (int i = 0; i < PLAYER_MAX_BATTLEGROUND_QUEUES; ++i)
@@ -2549,7 +4368,7 @@ void RandomPlayerbotMgr::CheckBgQueue()
                 }
                 if (player->InArena())
                 {
-                    if (player->GetBattleGround()->IsRated())
+                    if (player->GetBattleGround() && player->GetBattleGround()->IsRated())
                         TeamId = 1;
                     else
                         TeamId = 0;
@@ -2592,7 +4411,7 @@ void RandomPlayerbotMgr::CheckBgQueue()
                         }
                         if (player->InArena())
                         {
-                            if (player->GetBattleGround()->IsRated()/* && (ginfo.isRated && ginfo.arenaTeamId && ginfo.arenaTeamRating && ginfo.opponentsTeamRating)*/)
+                            if (player->GetBattleGround() && player->GetBattleGround()->IsRated()/* && (ginfo.isRated && ginfo.arenaTeamId && ginfo.arenaTeamRating && ginfo.opponentsTeamRating)*/)
                                 TeamId = 1;
                             else
                                 TeamId = 0;
@@ -2608,7 +4427,7 @@ void RandomPlayerbotMgr::CheckBgQueue()
             else
                 BgPlayers[queueTypeId][bracketId][TeamId]++;
 
-            if (!player->IsInvitedForBattleGroundQueueType(queueTypeId) && (!player->InBattleGround() || player->GetBattleGround()->GetTypeId() != sServerFacade.BgTemplateId(queueTypeId)))
+            if (!player->IsInvitedForBattleGroundQueueType(queueTypeId) && (!player->InBattleGround() || !player->GetBattleGround() || player->GetBattleGround()->GetTypeId() != sServerFacade.BgTemplateId(queueTypeId)))
             {
 #ifndef MANGOSBOT_ZERO
                 if (ArenaType arenaType = sServerFacade.BgArenaType(queueTypeId))
@@ -2678,7 +4497,7 @@ void RandomPlayerbotMgr::CheckBgQueue()
                 }
                 if (bot->InArena())
                 {
-                    if (bot->GetBattleGround()->IsRated())
+                    if (bot->GetBattleGround() && bot->GetBattleGround()->IsRated())
                         TeamId = 1;
                     else
                         TeamId = 0;
@@ -2707,7 +4526,7 @@ void RandomPlayerbotMgr::CheckBgQueue()
                         }
                         if (bot->InArena())
                         {
-                            if (bot->GetBattleGround()->IsRated()/* && (ginfo.isRated && ginfo.arenaTeamId && ginfo.arenaTeamRating && ginfo.opponentsTeamRating)*/)
+                            if (bot->GetBattleGround() && bot->GetBattleGround()->IsRated()/* && (ginfo.isRated && ginfo.arenaTeamId && ginfo.arenaTeamRating && ginfo.opponentsTeamRating)*/)
                                 TeamId = 1;
                             else
                                 TeamId = 0;
@@ -2814,9 +4633,11 @@ void RandomPlayerbotMgr::CheckLfgQueue()
     LfgDungeons[HORDE].clear();
     LfgDungeons[ALLIANCE].clear();
 
-    for (auto i : players)
+    for (auto i : GetPlayersCopy())
     {
-        Player* player = i.second;
+        // LIVE lookup by guid -- the stored Player* can be stale after a disconnect
+        // (18:09 SIGSEGV in CheckLfgQueue: same class as the LogPlayerLocation crashes)
+        Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, i.first));
 
         if (!player || !player->IsInWorld())
             continue;
@@ -3131,11 +4952,12 @@ void RandomPlayerbotMgr::CheckPlayers()
 
     uint32 newPlayersLevel = 0;
 
-    for (auto i : players)
+    for (auto i : GetPlayersCopy())
     {
-        Player* player = i.second;
+        // LIVE lookup by guid -- stored Player* can be stale (same crash class as CheckLfgQueue)
+        Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, i.first));
 
-        if (player->IsGameMaster())
+        if (!player || !player->IsInWorld() || player->IsGameMaster())
             continue;
 
         //if (player->GetSession()->GetSecurity() > SEC_PLAYER)
@@ -3514,7 +5336,7 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
 
     if (locs.empty())
     {
-        sLog.outError("Cannot teleport bot %s - no locations available", bot->GetName());
+        sLog.outError("TELEFAIL A bot=%s lvl=%u: level cache EMPTY", bot->GetName(), bot->GetLevel());
         return;
     }
 
@@ -3527,6 +5349,29 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
 
     //Do not teleport to maps disabled in config
     tlocs.erase(std::remove_if(tlocs.begin(), tlocs.end(), [](const WorldPosition& l) {std::vector<uint32>::iterator i = find(sPlayerbotAIConfig.randomBotMaps.begin(), sPlayerbotAIConfig.randomBotMaps.end(), l.getMapId()); return i == sPlayerbotAIConfig.randomBotMaps.end(); }), tlocs.end());
+
+    // FACTION-AWARE DISPERSAL (observed live 2026-07-08): the level tele-cache is faction-BLIND (built
+    // from every level-appropriate creature spawn on all maps), so a Horde bot is scattered into
+    // Alliance zones (and vice versa) ~half the time. Result watched in-world: Horde bots stranded in
+    // Alliance Westfall/Redridge lock onto cross-faction bots and chase them fruitlessly for 15-20 min,
+    // gaining ZERO xp, instead of grinding their own faction's zones like a real player would. Keep only
+    // CONTESTED zones (AREATEAM_NONE) + the bot's OWN faction zones. Fall back to the unfiltered list if
+    // filtering would strand the bot (better a wrong zone than no teleport at all).
+    {
+        const Team botTeam = bot->GetTeam();
+        std::vector<WorldPosition> factionLocs;
+        factionLocs.reserve(tlocs.size());
+        for (const auto& l : tlocs)
+        {
+            AreaTableEntry const* area = l.GetArea();
+            const uint32 at = area ? area->Team : uint32(AREATEAM_NONE);
+            if (at == AREATEAM_ALLY && botTeam != ALLIANCE) continue;   // enemy (Alliance) territory
+            if (at == AREATEAM_HORDE && botTeam != HORDE)    continue;   // enemy (Horde) territory
+            factionLocs.push_back(l);
+        }
+        if (!factionLocs.empty())
+            tlocs.swap(factionLocs);
+    }
 
     //Random shuffle based on distance. Closer distances are more likely (but not exclusively) to be at the begin of the list.
     tlocs = WorldPosition(bot).GetNextPoint(tlocs, 0);
@@ -3699,12 +5544,13 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
                 return RandomTeleportForLevel(bot, false);
         }
 
-        sLog.outError("Cannot teleport bot %s - no locations available", bot->GetName());
+        sLog.outError("TELEFAIL B bot=%s lvl=%u: raw=%zu, 0 left after filters", bot->GetName(), bot->GetLevel(), locs.size());
 
         return;
     }
 
     auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "RandomTeleportByLocations");
+    uint32 rejNoMap = 0, rejNoArea = 0, rejNoHeight = 0;   // TELEFAIL C reject profile
 
     int index = 0;
 
@@ -3729,14 +5575,25 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
             float y = loc.coord_y + (attemtps > 0 ? urand(0, sPlayerbotAIConfig.grindDistance) - sPlayerbotAIConfig.grindDistance / 2 : 0);
             float z = loc.coord_z;
 
-            Map* map = sMapMgr.FindMap(loc.mapid, 0);
-            if (!map)
+            // NO MAP LOOKUP AT ALL: continents are split into lazily-created region instances
+            // in this core, so ANY FindMap variant fails for empty destination zones -- exactly
+            // the zones we teleport into (that's the whole point of dispersal). The Map object
+            // was only used for GetHeight; terrain data answers that straight from disk with no
+            // map/grid instantiation, and TeleportTo() creates the region instance on arrival.
+            TerrainInfo* terrain = sTerrainMgr.LoadTerrain(loc.mapid);
+            if (!terrain)
+            {
+                ++rejNoMap;
                 continue;
+            }
 
             uint32 areaId = sTerrainMgr.GetAreaId(loc.mapid, x, y, z);
             AreaTableEntry const* area = GetAreaEntryByAreaID(areaId);
             if (!area)
+            {
+                ++rejNoArea;
                 continue;
+            }
 
 #ifndef MANGOSBOT_ZERO
             // Do not teleport to outland before portal opening (allow new races zones)
@@ -3745,12 +5602,15 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
 #endif
 
 #ifdef MANGOSBOT_TWO
-            float ground = map->GetHeight(bot->GetPhaseMask(), x, y, z + 0.5f);
+            float ground = terrain->GetHeightStatic(x, y, z + 0.5f);
 #else
-            float ground = map->GetHeight(x, y, z + 0.5f);
+            float ground = terrain->GetHeightStatic(x, y, z + 0.5f);
 #endif
             if (ground <= INVALID_HEIGHT)
+            {
+                ++rejNoHeight;
                 continue;
+            }
 
             z = 0.05f + ground;
             sLog.outDetail("Random teleporting bot %s to %s %f,%f,%f (%u/%zu locations)",
@@ -3792,7 +5652,30 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation> 
         }
     }
 
-    sLog.outError("Cannot teleport bot %s - no locations available", bot->GetName());
+    sLog.outError("TELEFAIL C bot=%s lvl=%u: tlocs=%zu all rejected (nomap=%u noarea=%u noheight=%u)",
+        bot->GetName(), bot->GetLevel(), tlocs.size(), rejNoMap, rejNoArea, rejNoHeight);
+
+    // FALLBACK: every candidate was rejected. The cached z originates from a real creature
+    // spawn point, so it IS valid ground -- teleport to the first (distance-weighted) location
+    // as-is rather than stranding the bot (stranded promotions = L60s piling up in Durotar).
+    for (auto const& cand : tlocs)
+    {
+        WorldLocation loc = cand;
+        if (hearth)
+        {
+            uint32 areaId = sTerrainMgr.GetAreaId(loc.mapid, loc.coord_x, loc.coord_y, loc.coord_z);
+            if (AreaTableEntry const* area = GetAreaEntryByAreaID(areaId))
+                bot->SetHomebindToLocation(loc, area->ID);
+        }
+        bot->GetMotionMaster()->Clear();
+        bot->TeleportTo(loc.mapid, loc.coord_x, loc.coord_y, loc.coord_z + 0.5f, 0);
+        bot->SendHeartBeat();
+        if (bot->GetPlayerbotAI())
+            bot->GetPlayerbotAI()->Reset(true);
+        sLog.outString("TELEFALLBACK bot=%s lvl=%u -> map=%u %.0f,%.0f (cached spawn z)",
+            bot->GetName(), bot->GetLevel(), loc.mapid, loc.coord_x, loc.coord_y);
+        return;
+    }
 }
 
 std::vector<std::pair<uint32, uint32>> RandomPlayerbotMgr::RpgLocationsNear(WorldLocation pos, const std::map<uint32, std::map<uint32, std::vector<std::string>>>& areaNames, uint32 radius)
@@ -4065,6 +5948,41 @@ void RandomPlayerbotMgr::PrintTeleportCache()
             }
         }
     }
+}
+
+bool RandomPlayerbotMgr::GetNearestGrindSpot(Player* bot, float minDist, float& outX, float& outY, float& outZ)
+{
+    if (!bot)
+        return false;
+    const uint32 mapId = bot->GetMapId();
+    const float bx = bot->GetPositionX(), by = bot->GetPositionY();
+    const Team botTeam = bot->GetTeam();
+    const float minD2 = minDist * minDist;
+
+    (void)botTeam;
+    float bestD2 = 1e18f;
+    bool found = false;
+    // Nearest cached mob-spawn on the bot's map in its level bracket (+/-2). Cheap distance-only scan
+    // (no per-candidate zone lookup -- that would be too slow at fleet scale). Faction of the ZONE is
+    // not filtered here: walking to the nearest hostile mob camp is fine even in contested/enemy land.
+    const int lvl = (int)bot->GetLevel();
+    for (int L = std::max(1, lvl - 2); L <= lvl + 2; ++L)
+    {
+        auto it = locsPerLevelCache.find((uint8)L);
+        if (it == locsPerLevelCache.end())
+            continue;
+        for (const WorldLocation& loc : it->second)
+        {
+            if (loc.mapid != mapId)
+                continue;
+            const float dx = loc.coord_x - bx, dy = loc.coord_y - by;
+            const float d2 = dx * dx + dy * dy;
+            if (d2 < minD2 || d2 >= bestD2)
+                continue;                                      // too close (same camp) or not nearer
+            bestD2 = d2; outX = loc.coord_x; outY = loc.coord_y; outZ = loc.coord_z; found = true;
+        }
+    }
+    return found;
 }
 
 void RandomPlayerbotMgr::RandomTeleportForLevel(Player* bot, bool activeOnly)

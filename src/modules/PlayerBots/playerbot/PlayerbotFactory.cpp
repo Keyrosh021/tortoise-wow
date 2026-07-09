@@ -201,12 +201,14 @@ void PlayerbotFactory::Prepare()
     }
 }
 
-void PlayerbotFactory::Randomize(bool incremental, bool syncWithMaster)
+void PlayerbotFactory::Randomize(bool incremental, bool syncWithMaster, bool forceFull)
 {
     sLog.outDetail("Preparing to %s randomize...", (incremental ? "incremental" : "full"));
     Prepare();
 
-    if (sPlayerbotAIConfig.disableRandomLevels)
+    // DisableRandomLevels freezes ORGANIC fleet re-rolls; explicit promotions (raid fills,
+    // promote60) pass forceFull to get the complete level+gear+spells roll they asked for.
+    if (sPlayerbotAIConfig.disableRandomLevels && !forceFull)
     {
         return;
     }
@@ -2615,16 +2617,20 @@ bool PlayerbotFactory::CanEquipArmor(ItemPrototype const* proto)
     if (proto->Quality <= ITEM_QUALITY_NORMAL)
         return true;
 
-    for (uint8 slot = 0; slot < EQUIPMENT_SLOT_END; ++slot)
+    // Off-hand sanity (was a no-op slot loop that filtered NOTHING — the reason rogues spawned
+    // holding lantern-class frills): melee dual-wielders never equip HOLDABLE off-hand items;
+    // their off-hand is a weapon. Shield classes keep shields; casters keep frills.
+    if (proto->InventoryType == INVTYPE_HOLDABLE)
     {
-       if (slot == EQUIPMENT_SLOT_TABARD || slot == EQUIPMENT_SLOT_BODY)
-          continue;
-
-    if (slot == EQUIPMENT_SLOT_OFFHAND && bot->getClass() == CLASS_ROGUE && proto->Class != ITEM_CLASS_WEAPON)
-       continue;
-
-    if (slot == EQUIPMENT_SLOT_OFFHAND && bot->getClass() == CLASS_PALADIN && proto->SubClass != ITEM_SUBCLASS_ARMOR_SHIELD)
-       continue;
+        switch (bot->getClass())
+        {
+            case CLASS_ROGUE:
+            case CLASS_WARRIOR:
+            case CLASS_HUNTER:
+                return false;
+            default:
+                break;
+        }
     }
 
     uint8 sp = 0, ap = 0, tank = 0;
@@ -4829,8 +4835,11 @@ void PlayerbotFactory::InitMounts()
         if (bot->GetLevel() < fourthmount && type == 3)
             continue;
 
-        uint32 index = urand(0, mounts[bot->getRace()][type].size() - 1);
-        uint32 spell = mounts[bot->getRace()][type][index];
+        std::vector<uint32>& pool = mounts[bot->getRace()][type];
+        if (pool.empty())   // vanilla flying pools + half-initialized bots -> no mount here
+            continue;       // (size()-1 on an empty vector underflows to SIZE_MAX -> OOB crash)
+        uint32 index = urand(0, pool.size() - 1);
+        uint32 spell = pool[index];
         if (spell)
         {
             bot->learnSpell(spell, false);

@@ -118,11 +118,25 @@ bool WaitForAttackStrategy::ShouldWait(PlayerbotAI* ai)
 
             if (!enemyPlayer)
             {
+                // END THE WAIT EARLY once the TANK (or the master) already holds threat on the
+                // target -- a real DPS only holds ~1-2 GCDs for the tank to grab aggro, not a flat
+                // timer. This removes the "bots stand around doing 0 DPS for 10s every pull" bug.
+                Unit* tgt = ai->GetAiObjectContext()->GetValue<Unit*>("current target")->Get();
+                if (tgt)
+                {
+                    Unit* victimOf = tgt->GetVictim();
+                    if (victimOf)
+                    {
+                        Player* vp = dynamic_cast<Player*>(victimOf);
+                        if (vp && (ai->IsTank(vp) || vp == ai->GetMaster()))
+                            return false;   // tank has aggro -> go
+                    }
+                }
                 // Check if bot is currently in combat
                 const time_t combatStartTime = AI_VALUE(time_t, "combat start time");
                 if (combatStartTime > 0)
                 {
-                    // Check the amount of time elapsed from the combat start
+                    // Fallback timer (now short) if the tank hasn't visibly taken the mob yet.
                     const time_t elapsedTime = time(0) - combatStartTime;
                     return elapsedTime < GetWaitTime(ai);
                 }

@@ -277,3 +277,119 @@ bool MoveAwayFromCreature::IsHazardNearby(const WorldPosition& point, const std:
 
     return false;
 }
+bool ai::RunOutOfGroupAction::Execute(Event& event)
+{
+    Group* group = bot->GetGroup();
+    if (!group)
+        return false;
+
+    float spread = 15.0f;
+    if (float stored = AI_VALUE(float, "run out distance"))
+        spread = stored;
+
+    // centroid of the other members
+    float cx = 0, cy = 0; uint32 n = 0;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->getSource();
+        if (!member || member == bot || !member->IsInWorld() || member->GetMapId() != bot->GetMapId())
+            continue;
+        cx += member->GetPositionX(); cy += member->GetPositionY(); ++n;
+    }
+    if (!n)
+        return false;
+    cx /= n; cy /= n;
+
+    // straight away from the centroid, try a few angles for a pathable point
+    float away = atan2(bot->GetPositionY() - cy, bot->GetPositionX() - cx);
+    for (uint8 k = 0; k < 5; ++k)
+    {
+        const float a = away + ((k % 2) ? -1.0f : 1.0f) * (float)(k / 2) * (M_PI_F / 4.0f);
+        const float tx = bot->GetPositionX() + cosf(a) * spread;
+        const float ty = bot->GetPositionY() + sinf(a) * spread;
+        float tz = bot->GetPositionZ();
+        bot->UpdateAllowedPositionZ(tx, ty, tz);
+        if (MoveTo(bot->GetMapId(), tx, ty, tz, false, false))
+            return true;
+    }
+    return false;
+}
+
+bool ai::TankFaceAwayAction::Execute(Event& event)
+{
+    Unit* victim = bot->GetVictim();
+    Group* group = bot->GetGroup();
+    if (!victim || !group)
+        return false;
+
+    float cx = 0, cy = 0; uint32 n = 0;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->getSource();
+        if (!member || member == bot || !member->IsInWorld() || member->GetMapId() != bot->GetMapId())
+            continue;
+        cx += member->GetPositionX(); cy += member->GetPositionY(); ++n;
+    }
+    if (!n)
+        return false;
+    cx /= n; cy /= n;
+
+    // far side of the boss: away from the centroid, at melee range
+    float dx = victim->GetPositionX() - cx, dy = victim->GetPositionY() - cy;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.1f)
+        return false;
+    const float melee = 3.5f;
+    float tx = victim->GetPositionX() + (dx / len) * melee;
+    float ty = victim->GetPositionY() + (dy / len) * melee;
+    float tz = victim->GetPositionZ();
+    bot->UpdateAllowedPositionZ(tx, ty, tz);
+    return MoveTo(bot->GetMapId(), tx, ty, tz, false, false);
+}
+
+bool ai::TauntSwapAction::Execute(Event& event)
+{
+    ObjectGuid bossGuid = AI_VALUE(ObjectGuid, "attack target");
+    Unit* boss = ai->GetUnit(bossGuid);
+    if (!boss || !boss->IsAlive())
+        return false;
+
+    // pick up the boss as our target and taunt with the class tool
+    bot->SetSelectionGuid(bossGuid);
+    SET_AI_VALUE(Unit*, "current target", boss);
+
+    switch (bot->getClass())
+    {
+        case CLASS_WARRIOR:
+            if (ai->CastSpell("taunt", boss))
+                return true;
+            return ai->CastSpell("mocking blow", boss);
+        case CLASS_DRUID:
+            if (ai->CastSpell("growl", boss))
+                return true;
+            break;
+        case CLASS_PALADIN:
+            // vanilla paladin has no taunt: build threat instead
+            return ai->CastSpell("holy shield", bot) || ai->CastSpell("consecration", bot);
+        default:
+            break;
+    }
+    return false;
+}
+
+bool ai::StagedTankHoldAction::Execute(Event& event)
+{
+    Unit* boss = ai->GetUnit(AI_VALUE(ObjectGuid, "attack target"));
+    if (!boss)
+        return false;
+    float stage = 18.0f;
+    if (float stored = AI_VALUE(float, "run out distance"))
+        stage = stored;
+
+    float a = atan2(bot->GetPositionY() - boss->GetPositionY(), bot->GetPositionX() - boss->GetPositionX());
+    float tx = boss->GetPositionX() + cosf(a) * stage;
+    float ty = boss->GetPositionY() + sinf(a) * stage;
+    float tz = boss->GetPositionZ();
+    bot->UpdateAllowedPositionZ(tx, ty, tz);
+    return MoveTo(bot->GetMapId(), tx, ty, tz, false, false);
+}

@@ -11,6 +11,10 @@ namespace ai
 		virtual bool Execute(Event& event) override;
         virtual bool isUseful() override;
         virtual bool CanDeadFollow(Unit* target);
+    protected:
+        // humanized follow for real-player masters: world-anchored personal slot + reaction
+        // latency + stragglers, instead of the facing-locked core MoveFollow "pet ring"
+        bool LooseFollow(Unit* master);
 	};
 
 	class StopFollowAction : public MovementAction {

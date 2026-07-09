@@ -356,7 +356,12 @@ class Spell
 
         Spell(Unit* caster, SpellEntry const *info, bool triggered, ObjectGuid originalCasterGUID = ObjectGuid(), SpellEntry const* triggeredBy = nullptr, Unit* victim = nullptr, SpellEntry const* triggeredByParent = nullptr, bool bCanIgnoreLOS = false);
         Spell(GameObject* caster, SpellEntry const *info, bool triggered, ObjectGuid originalCasterGUID = ObjectGuid(), SpellEntry const* triggeredBy = nullptr, Unit* victim = nullptr, SpellEntry const* triggeredByParent = nullptr, bool bCanIgnoreLOS = false);
-        ~Spell();
+        // VIRTUAL: the playerbot module derives BotUseItemSpell (+8 bytes) and the spell
+        // system deletes through Spell* (SpellEvent::~SpellEvent -> Delete -> delete this).
+        // With a non-virtual dtor that is undefined behavior and fed the allocator a wrong
+        // size on EVERY bot item use -- the heap corruption behind the fleet's random
+        // SIGSEGVs (ASAN: new-delete-type-mismatch, allocated 744 vs deallocated 736).
+        virtual ~Spell();
 
         SpellCastResult prepare(SpellCastTargets targets, Aura* triggeredByAura = nullptr, uint32 chance = 0);
         SpellCastResult prepare(Aura* triggeredByAura = nullptr, uint32 chance = 0);

@@ -829,7 +829,7 @@ void ScriptMgr::LoadScripts(ScriptMapMap& scripts, const char* tablename)
                 {
                     if (tmp.dealDamage.damage > 100)
                     {
-                        sLog.outErrorDb("Table `%s` has datalong = %u above 100% with datalong2 = %u in SCRIPT_COMMAND_DEAL_DAMAGE for script id %u.", tablename, tmp.dealDamage.damage, tmp.dealDamage.isPercent, tmp.id);
+                        sLog.outErrorDb("Table `%s` has datalong = %u above 100%% with datalong2 = %u in SCRIPT_COMMAND_DEAL_DAMAGE for script id %u.", tablename, tmp.dealDamage.damage, tmp.dealDamage.isPercent, tmp.id);
                         continue;
                     }
                 }
@@ -850,7 +850,7 @@ void ScriptMgr::LoadScripts(ScriptMapMap& scripts, const char* tablename)
                 {
                     if (tmp.invincibility.health > 100)
                     {
-                        sLog.outErrorDb("Table `%s` has datalong = %u above 100% with datalong2 = %u in SCRIPT_COMMAND_INVINCIBILITY for script id %u.", tablename, tmp.invincibility.health, tmp.invincibility.isPercent, tmp.id);
+                        sLog.outErrorDb("Table `%s` has datalong = %u above 100%% with datalong2 = %u in SCRIPT_COMMAND_INVINCIBILITY for script id %u.", tablename, tmp.invincibility.health, tmp.invincibility.isPercent, tmp.id);
                         continue;
                     }
                 }

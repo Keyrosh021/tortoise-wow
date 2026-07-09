@@ -278,10 +278,60 @@ public:
     uint32 lodColdUpdateMs;
     // LOD COLD radius (yards): a bot with no real player within this range goes dormant.
     float lodColdRange;
+    // 10K TWO-TIER FLEET: exactly ~ActiveCohortSize bots run fully active (full CPU, real
+    // questing/killing); every other random bot goes LOD-dormant (invisible, brain parked)
+    // unless a real player is nearby. Dormant bots still PROGRESS (xp/gold) via the synthetic
+    // progression manager, at rates measured live from the active cohort. Cohort membership
+    // rotates every CohortRotateMinutes so all bots get real playtime eventually.
+    // ActiveCohortSize = 0 disables the split (everyone active).
+    // humanized group-follow (world-anchored slots + reaction latency) for real-player masters
+    bool looseFollow;
+    uint32 instanceReactDelay;  // faster brain cadence (ms) for bots inside dungeons/raids/BGs
+    // virtual observer: with no real players online, plant a synthetic "player" in the
+    // world so the proximity allocator + active-vs-parked telemetry run and verify 24/7
+    // one-time fleet level-spread: pace bots up to hash-assigned 1-60 targets so the world
+    // is populated across all brackets/zones (5k illusion needs mid-level zones alive too)
+    // CITY LIFE: a band of bots LIVE in capital cities (sit AFK with gear) to make the world
+    // feel full. cityResidents = how many; cityResidentMinLevel = they skew high-level (60s).
+    uint32 cityResidents;
+    uint32 cityResidentMinLevel;
+    bool dungeonLoiterers;   // rotate bots to loiter at dungeon/raid entrances (fake LFG groups)
+    bool levelSpreadEnabled;
+    uint32 levelSpreadPerTick;
+    bool virtualObserver;
+    uint32 virtualObserverRotateMinutes;
+    uint32 activeBrainBudget;   // proximity allocator: how many bots run full brains (100-200)
+    uint32 level60Target;       // grow/hold the fleet's L60 population at this size (promote+gear+teleport)
+    float activeRenderRange;    // every bot within this range of a player gets a full-speed brain (uncapped)
+    uint32 mockBgGames;         // spawn N bot-only WSGs at boot for autonomous tactics observation
+    bool parkVisible;           // parked bots stay visible to populate the world
+    uint32 activeCohortSize;    // legacy hash-cohort size (superseded by activeBrainBudget)
+    uint32 cohortRotateMinutes;
+    bool fastPathEnabled;   // UpdateAI not-due fast path; toggle for A/B + instant rollback
+    bool syntheticProgressEnabled;
+    float syntheticRateFactor;           // dormant progression as a fraction of measured active rates
+    uint32 syntheticXpFallbackPerHour;   // used per bracket (scaled) until live rates exist
+    uint32 syntheticGoldFallbackPerHour; // copper/hour fallback
     // SUPERVISOR MODE: keep the whole (small) fleet at full foreground cadence even with NO player
     // online, and write an honest per-second visible-activity trace (logs/supervisor.csv) so bot
     // behaviour can be watched/measured autonomously. Only sane for a small fleet (~50 bots).
     bool supervisorMode;
+    // AUTONOMOUS FSM: deterministic state-machine brain that replaces the relevance-churn
+    // decision-making for autonomous (no real master), out-of-combat, random bots. Fixes the
+    // measured pathology (apm up to 966 with moving=0/combat=0 -- the engine re-picks an action
+    // that never executes). Issues ONE concrete action then COMMITS (suppresses re-decision until
+    // the action's observable effect resolves or a break event fires). Rollback: set to 0.
+    bool autonomousFsm;
+    // COMBAT DIRECTOR: snappy "stick to your target" for autonomous random bots in combat. Fixes the
+    // measured chase-stall (68% of in-combat bots not moving) + over-thinking (apm median 283, max 916)
+    // by forcing a healthy melee bot that is out of range to CHASE its target (persistent MoveChase)
+    // with a short re-check delay, instead of letting the engine dither/re-pick. Rollback: set to 0.
+    bool combatDirector;
+    // AUTONOMOUS PARTIES: form grinding parties from nearby active-cohort autonomous bots so the world
+    // has real group content (bots stick to a leader + focus-fire like real players) instead of the
+    // 0.7% that ever group. Formation runs on the world thread (creates Groups only, no AI mutation);
+    // the follow/assist behavior lives in the map-thread FSM. Rollback: set to 0.
+    bool autonomousParties;
     bool forceActiveWhenNearPlayer;
     bool limitCombatActivity;
     bool guildOrderAlwaysActive;
@@ -458,6 +508,8 @@ public:
     //LM BEGIN
     std::string llmApiEndpoint, llmApiKey, llmApiJson, llmPrePrompt, llmPreRpgPrompt, llmPrompt, llmPostPrompt, llmResponseStartPattern, llmResponseEndPattern, llmResponseDeletePattern, llmResponseSplitPattern;
     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+    bool llmCommandBridgeEnabled;
+    std::string llmCommandPrompt;
     bool llmGlobalContext;
     ParsedUrl llmEndPointUrl;
     std::set<uint32> llmBlockedReplyChannels;

@@ -1,0 +1,8614 @@
+{
+ "black_morass/chronormu": {
+  "instance": "black_morass",
+  "boss": "chronormu",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "CLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SAND_BREATH",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "TIME_LAPSE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "ENRAGE",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Cleave_": [
+    6000,
+    8000
+   ],
+   "SandBreath_": [
+    30000,
+    30000
+   ],
+   "TimeStop_": [
+    40000,
+    40000
+   ],
+   "Frenzy_": [
+    120000,
+    120000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "black_morass/gerastrasz": {
+  "instance": "black_morass",
+  "boss": "gerastrasz",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "FIRE_NOVA",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "RainOfFire_": [
+    16000,
+    24000
+   ],
+   "Cleave_": [
+    6000,
+    8000
+   ],
+   "BloodFunnel_": [
+    10350,
+    10350
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "ECHO_OF_GERASTRASZ",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "blackrock_depths/anubshiah": {
+  "instance": "blackrock_depths",
+  "boss": "anubshiah",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "SHADOWBOLT",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CURSEOFTONGUES",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "CURSEOFWEAKNESS",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "DEMONARMOR",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "ENVELOPINGWEB",
+    "spell_id": null,
+    "target": "target"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_depths/emperor_dagran_thaurissan": {
+  "instance": "blackrock_depths",
+  "boss": "emperor_dagran_thaurissan",
+  "boss_entry": null,
+  "spells": {
+   "HANDOFTHAURISSAN": 17492,
+   "AVATAROFFLAME": 15636,
+   "IRONFOE": 15642,
+   "HEAL": 15586,
+   "RENEW": 10929,
+   "SHIELD": 10901,
+   "MINDBLAST": 15587,
+   "SHADOWWORDPAIN": 15654,
+   "SMITE": 10934,
+   "SHADOW_BOLT": 15537,
+   "OPEN_PORTAL": 13912
+  },
+  "casts": [
+   {
+    "spell": "HANDOFTHAURISSAN",
+    "spell_id": "17492",
+    "target": "victim"
+   },
+   {
+    "spell": "AVATAROFFLAME",
+    "spell_id": "15636",
+    "target": "self"
+   },
+   {
+    "spell": "MINDBLAST",
+    "spell_id": "15587",
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOWWORDPAIN",
+    "spell_id": "15654",
+    "target": "victim"
+   },
+   {
+    "spell": "SMITE",
+    "spell_id": "10934",
+    "target": "victim"
+   },
+   {
+    "spell": "HEAL",
+    "spell_id": "15586",
+    "target": "pEmperor"
+   }
+  ],
+  "timers_ms": {
+   "HandOfThaurissan_": [
+    10000,
+    15000
+   ],
+   "AvatarOfFlame_": [
+    18000,
+    18000
+   ],
+   "Ironfoe": [
+    9000,
+    9000
+   ],
+   "CallForHelp_": [
+    20000,
+    20000
+   ],
+   "Heal_": [
+    10000,
+    10000
+   ],
+   "MindBlast_": [
+    14000,
+    14000
+   ],
+   "ShadowWordPain_": [
+    18000,
+    18000
+   ],
+   "Smite_": [
+    10000,
+    10000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_depths/general_angerforge": {
+  "instance": "blackrock_depths",
+  "boss": "general_angerforge",
+  "boss_entry": null,
+  "spells": {
+   "SUNDER_ARMOR": 15572
+  },
+  "casts": [
+   {
+    "spell": "SUNDER_ARMOR",
+    "spell_id": "15572",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Alarm": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [
+   30.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_depths/gorosh_the_dervish": {
+  "instance": "blackrock_depths",
+  "boss": "gorosh_the_dervish",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "WHIRLWIND",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "MORTALSTRIKE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "BLOODLUST",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   51.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_depths/grizzle": {
+  "instance": "blackrock_depths",
+  "boss": "grizzle",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "GROUNDTREMOR",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   51.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_depths/high_interrogator_gerstahn": {
+  "instance": "blackrock_depths",
+  "boss": "high_interrogator_gerstahn",
+  "boss_entry": null,
+  "spells": {
+   "SHADOWWORDPAIN": 14032,
+   "MANABURN": 14033,
+   "PSYCHICSCREAM": 13704,
+   "SHADOWSHIELD": 12040
+  },
+  "casts": [
+   {
+    "spell": "SHADOWWORDPAIN",
+    "spell_id": "14032",
+    "target": "random"
+   },
+   {
+    "spell": "MANABURN",
+    "spell_id": "14033",
+    "target": "random"
+   },
+   {
+    "spell": "PSYCHICSCREAM",
+    "spell_id": "13704",
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOWSHIELD",
+    "spell_id": "12040",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "ShadowWordPain_": [
+    7000,
+    7000
+   ],
+   "ManaBurn_": [
+    10000,
+    10000
+   ],
+   "PsychicScream_": [
+    30000,
+    30000
+   ],
+   "ShadowShield_": [
+    25000,
+    25000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_depths/magmus": {
+  "instance": "blackrock_depths",
+  "boss": "magmus",
+  "boss_entry": null,
+  "spells": {
+   "FIERYBURST": 13900,
+   "WARSTOMP": 24375
+  },
+  "casts": [
+   {
+    "spell": "FIERYBURST",
+    "spell_id": "13900",
+    "target": "victim"
+   },
+   {
+    "spell": "WARSTOMP",
+    "spell_id": "24375",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "FieryBurst_": [
+    6000,
+    6000
+   ],
+   "WarStomp_": [
+    8000,
+    8000
+   ]
+  },
+  "health_phase_thresholds": [
+   51.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_depths/tomb_of_seven": {
+  "instance": "blackrock_depths",
+  "boss": "tomb_of_seven",
+  "boss_entry": null,
+  "spells": {
+   "SMELT_DARK_IRON": 14891,
+   "LEARN_SMELT": 14894,
+   "SHADOWBOLTVOLLEY": 15245,
+   "IMMOLATE": 12742,
+   "CURSEOFWEAKNESS": 12493,
+   "DEMONARMOR": 13787,
+   "SUMMON_VOIDWALKERS": 15092
+  },
+  "casts": [
+   {
+    "spell": "SHADOWBOLTVOLLEY",
+    "spell_id": "15245",
+    "target": "victim"
+   },
+   {
+    "spell": "IMMOLATE",
+    "spell_id": "12742",
+    "target": "target"
+   },
+   {
+    "spell": "CURSEOFWEAKNESS",
+    "spell_id": "12493",
+    "target": "victim"
+   },
+   {
+    "spell": "DEMONARMOR",
+    "spell_id": "13787",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "ShadowVolley_": [
+    12000,
+    12000
+   ],
+   "Immolate_": [
+    25000,
+    25000
+   ],
+   "CurseOfWeakness_": [
+    45000,
+    45000
+   ],
+   "DemonArmor_": [
+    300000,
+    300000
+   ],
+   "CallToFight_": [
+    0,
+    0
+   ],
+   "WipeCheck_": [
+    50000,
+    50000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/halycon": {
+  "instance": "blackrock_spire",
+  "boss": "halycon",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "CROWDPUMMEL",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "MIGHTYBLOW",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/highlord_omokk": {
+  "instance": "blackrock_spire",
+  "boss": "highlord_omokk",
+  "boss_entry": null,
+  "spells": {
+   "WARSTOMP": 24375,
+   "STRIKE": 18368,
+   "REND": 18106,
+   "SUNDERARMOR": 24317,
+   "KNOCKAWAY": 20686,
+   "SLOW": 22356
+  },
+  "casts": [
+   {
+    "spell": "WARSTOMP",
+    "spell_id": "24375",
+    "target": "self"
+   },
+   {
+    "spell": "STRIKE",
+    "spell_id": "18368",
+    "target": "victim"
+   },
+   {
+    "spell": "REND",
+    "spell_id": "18106",
+    "target": "victim"
+   },
+   {
+    "spell": "SUNDERARMOR",
+    "spell_id": "24317",
+    "target": "victim"
+   },
+   {
+    "spell": "KNOCKAWAY",
+    "spell_id": "20686",
+    "target": "self"
+   },
+   {
+    "spell": "SLOW",
+    "spell_id": "22356",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "WarStomp": [
+    14000,
+    14000
+   ],
+   "Strike": [
+    10000,
+    10000
+   ],
+   "Rend": [
+    18000,
+    18000
+   ],
+   "SunderArmor": [
+    25000,
+    25000
+   ],
+   "KnockAway": [
+    12000,
+    12000
+   ],
+   "Slow": [
+    18000,
+    18000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/mother_smolderweb": {
+  "instance": "blackrock_spire",
+  "boss": "mother_smolderweb",
+  "boss_entry": null,
+  "spells": {
+   "CRYSTALIZE": 16104,
+   "MOTHERSMILK": 16468,
+   "SUMMON_SPIRE_SPIDERLING": 16103
+  },
+  "casts": [
+   {
+    "spell": "SUMMON_SPIRE_SPIDERLING",
+    "spell_id": "16103",
+    "target": "self"
+   },
+   {
+    "spell": "CRYSTALIZE",
+    "spell_id": "16104",
+    "target": "self"
+   },
+   {
+    "spell": "MOTHERSMILK",
+    "spell_id": "16468",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "MothersMilk": [
+    5000,
+    12500
+   ],
+   "Crystalize": [
+    15000,
+    15000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/overlord_wyrmthalak": {
+  "instance": "blackrock_spire",
+  "boss": "overlord_wyrmthalak",
+  "boss_entry": null,
+  "spells": {
+   "BLASTWAVE": 11130,
+   "SHOUT": 23511,
+   "CLEAVE": 20691,
+   "KNOCKAWAY": 20686
+  },
+  "casts": [
+   {
+    "spell": "BLASTWAVE",
+    "spell_id": "11130",
+    "target": "self"
+   },
+   {
+    "spell": "SHOUT",
+    "spell_id": "23511",
+    "target": "self"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": "20691",
+    "target": "victim"
+   },
+   {
+    "spell": "KNOCKAWAY",
+    "spell_id": "20686",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "BlastWave": [
+    20000,
+    20000
+   ],
+   "Shout": [
+    10000,
+    10000
+   ],
+   "Cleave": [
+    7000,
+    7000
+   ],
+   "Knockaway": [
+    14000,
+    14000
+   ]
+  },
+  "health_phase_thresholds": [
+   51.0
+  ],
+  "summons": [
+   {
+    "npc": "SPIRESTONE_WARLORD",
+    "entry": 9216
+   },
+   {
+    "npc": "SMOLDERTHORN_BERSERKER",
+    "entry": 9268
+   }
+  ],
+  "review_status": "draft"
+ },
+ "blackrock_spire/pyroguard_emberseer": {
+  "instance": "blackrock_spire",
+  "boss": "pyroguard_emberseer",
+  "boss_entry": null,
+  "spells": {
+   "STRIKE": 15580,
+   "FIRENOVA": 23462,
+   "FLAMEBUFFET": 23341,
+   "PYROBLAST": 20228,
+   "ENCAGE_EMBERSEEER": 15281,
+   "SELF_CAGE": 15282,
+   "PLAYER_ENCAGE": 16045,
+   "LIBERATION": 16047,
+   "GROWTH": 16048
+  },
+  "casts": [
+   {
+    "spell": "FIRENOVA",
+    "spell_id": "23462",
+    "target": "self"
+   },
+   {
+    "spell": "FLAMEBUFFET",
+    "spell_id": "23341",
+    "target": "self"
+   },
+   {
+    "spell": "PYROBLAST",
+    "spell_id": "20228",
+    "target": "random"
+   },
+   {
+    "spell": "STRIKE",
+    "spell_id": "15580",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Encage": [
+    20000,
+    40000
+   ],
+   "Strike": [
+    7900,
+    14000
+   ],
+   "FireNova": [
+    6000,
+    6000
+   ],
+   "FlameBuffet": [
+    14000,
+    14000
+   ],
+   "PyroBlast": [
+    14000,
+    14000
+   ]
+  },
+  "health_phase_thresholds": [
+   15.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/quartermaster_zigris": {
+  "instance": "blackrock_spire",
+  "boss": "quartermaster_zigris",
+  "boss_entry": null,
+  "spells": {
+   "SHOOT": 16496,
+   "STUNBOMB": 16497,
+   "HEALING_POTION": 15504,
+   "HOOKEDNET": 15609
+  },
+  "casts": [
+   {
+    "spell": "SHOOT",
+    "spell_id": "16496",
+    "target": "victim"
+   },
+   {
+    "spell": "STUNBOMB",
+    "spell_id": "16497",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Shoot": [
+    1750,
+    1750
+   ],
+   "StunBomb": [
+    14000,
+    14000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/shadow_hunter_voshgajin": {
+  "instance": "blackrock_spire",
+  "boss": "shadow_hunter_voshgajin",
+  "boss_entry": null,
+  "spells": {
+   "CURSEOFBLOOD": 24673,
+   "HEX": 16708,
+   "CLEAVE": 20691
+  },
+  "casts": [
+   {
+    "spell": "CURSEOFBLOOD",
+    "spell_id": "24673",
+    "target": "self"
+   },
+   {
+    "spell": "HEX",
+    "spell_id": "16708",
+    "target": "random"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": "20691",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "CurseOfBlood": [
+    45000,
+    45000
+   ],
+   "Hex": [
+    8000,
+    8000
+   ],
+   "Cleave": [
+    7000,
+    7000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/the_beast": {
+  "instance": "blackrock_spire",
+  "boss": "the_beast",
+  "boss_entry": null,
+  "spells": {
+   "FLAMEBREAK": 16785,
+   "TERRIFYINGROAR": 14100,
+   "BERSERKER_CHARGE": 16636,
+   "FIREBALL": 16788,
+   "FIREBLAST": 14144,
+   "SUMMON_FINKLE": 16710
+  },
+  "casts": [
+   {
+    "spell": "FLAMEBREAK",
+    "spell_id": "16785",
+    "target": "self"
+   },
+   {
+    "spell": "IMMOLATE",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "TERRIFYINGROAR",
+    "spell_id": "14100",
+    "target": "self"
+   },
+   {
+    "spell": "BERSERKER_CHARGE",
+    "spell_id": "16636",
+    "target": "random"
+   },
+   {
+    "spell": "FIREBALL",
+    "spell_id": "16788",
+    "target": "random"
+   },
+   {
+    "spell": "FIREBLAST",
+    "spell_id": "14144",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "Flamebreak": [
+    14000,
+    20000
+   ],
+   "FireBlast": [
+    14000,
+    20000
+   ],
+   "Immolate": [
+    8000,
+    12000
+   ],
+   "TerrifyingRoar": [
+    16000,
+    18000
+   ],
+   "BeserkerCharge": [
+    15000,
+    20000
+   ],
+   "Fireball": [
+    10000,
+    12000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/urok": {
+  "instance": "blackrock_spire",
+  "boss": "urok",
+  "boss_entry": null,
+  "spells": {
+   "DECLENCHER_DEFIS": 16447,
+   "UROK_SUMMONED": 16473,
+   "UROK_ADD_SUMMONED": 16562,
+   "KILL_UROK_ADD": 16452,
+   "DESTROY_SPEAR": 16557,
+   "DESTROY_SPEAR2": 16558,
+   "STRIKE": 14516,
+   "BLOODLUST": 6742,
+   "SLOW": 13747,
+   "ARCANE_BOLT": 15979
+  },
+  "casts": [
+   {
+    "spell": "STRIKE",
+    "spell_id": "14516",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Strike_": [
+    10000,
+    18000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackrock_spire/warmaster_voone": {
+  "instance": "blackrock_spire",
+  "boss": "warmaster_voone",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "SNAPKICK",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "UPPERCUT",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "MORTALSTRIKE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "PUMMEL",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "THROWAXE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackwing_lair/broodlord_lashlayer": {
+  "instance": "blackwing_lair",
+  "boss": "broodlord_lashlayer",
+  "boss_entry": null,
+  "spells": {
+   "CLEAVE": 15284,
+   "BLAST_WAVE": 23331,
+   "MORTAL_STRIKE": 24573,
+   "KNOCK_AWAY": 18670
+  },
+  "casts": [
+   {
+    "spell": "CLEAVE",
+    "spell_id": "15284",
+    "target": "victim"
+   },
+   {
+    "spell": "BLAST_WAVE",
+    "spell_id": "23331",
+    "target": "self"
+   },
+   {
+    "spell": "MORTAL_STRIKE",
+    "spell_id": "24573",
+    "target": "victim"
+   },
+   {
+    "spell": "KNOCK_AWAY",
+    "spell_id": "18670",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "KnockAway": [
+    12000,
+    25000
+   ],
+   "Cleave": [
+    13000,
+    20000
+   ],
+   "BlastWave": [
+    20000,
+    35000
+   ],
+   "MortalStrike": [
+    20000,
+    30000
+   ],
+   "InCombat": [
+    2000,
+    2000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackwing_lair/chromaggus": {
+  "instance": "blackwing_lair",
+  "boss": "chromaggus",
+  "boss_entry": null,
+  "spells": {
+   "FIRE_VULNERABILITY": 22277,
+   "FROST_VULNERABILITY": 22278,
+   "SHADOW_VULNERABILITY": 22279,
+   "NATURE_VULNERABILITY": 22280,
+   "ARCANE_VULNERABILITY": 22281,
+   "CHROMA_HEAL": 23168,
+   "INCINERATE": 23308,
+   "TIME_LAPSE": 23310,
+   "CORROSIVE_ACID": 23313,
+   "IGNITE_FLESH": 23315,
+   "FROST_BURN": 23187,
+   "BROODAF_BLUE": 23153,
+   "BROODAF_BLACK": 23154,
+   "BROODAF_RED": 23155,
+   "BROODAF_BRONZE": 23170,
+   "BROODAF_GREEN": 23169,
+   "CHROMATIC_MUT_1": 23174,
+   "FRENZY": 23128,
+   "ENRAGE": 28747
+  },
+  "casts": [
+   {
+    "spell": "CHROMA_HEAL",
+    "spell_id": "23168",
+    "target": "self"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": "23128",
+    "target": "self"
+   },
+   {
+    "spell": "ENRAGE",
+    "spell_id": "28747",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "MovetoLever": [
+    2000,
+    2000
+   ],
+   "Shimmer": [
+    20000,
+    20000
+   ],
+   "BreathOne": [
+    60000,
+    60000
+   ],
+   "BreathTwo": [
+    60000,
+    60000
+   ],
+   "Affliction": [
+    7500,
+    7500
+   ],
+   "Frenzy": [
+    15000,
+    15000
+   ]
+  },
+  "health_phase_thresholds": [
+   20.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackwing_lair/ebonroc": {
+  "instance": "blackwing_lair",
+  "boss": "ebonroc",
+  "boss_entry": null,
+  "spells": {
+   "SHADOW_FLAME": 22539,
+   "WING_BUFFET": 23339,
+   "SHADOW_OF_EBONROC": 23340,
+   "THRASH": 3391
+  },
+  "casts": [
+   {
+    "spell": "SHADOW_FLAME",
+    "spell_id": "22539",
+    "target": "self"
+   },
+   {
+    "spell": "WING_BUFFET",
+    "spell_id": "23339",
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOW_OF_EBONROC",
+    "spell_id": "23340",
+    "target": "victim"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": "3391",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "ShadowFlame": [
+    16000,
+    16000
+   ],
+   "WingBuffet": [
+    30000,
+    30000
+   ],
+   "ShadowOfEbonroc": [
+    8000,
+    8000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackwing_lair/firemaw": {
+  "instance": "blackwing_lair",
+  "boss": "firemaw",
+  "boss_entry": null,
+  "spells": {
+   "SHADOW_FLAME": 22539,
+   "WING_BUFFET": 23339,
+   "FLAME_BUFFET": 23341,
+   "THRASH": 3391
+  },
+  "casts": [
+   {
+    "spell": "SHADOW_FLAME",
+    "spell_id": "22539",
+    "target": "self"
+   },
+   {
+    "spell": "WING_BUFFET",
+    "spell_id": "23339",
+    "target": "victim"
+   },
+   {
+    "spell": "FLAME_BUFFET",
+    "spell_id": "23341",
+    "target": "self"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": "3391",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "FlameBuffet": [
+    1800,
+    3000
+   ],
+   "ShadowFlame": [
+    16000,
+    16000
+   ],
+   "WingBuffet": [
+    30000,
+    30000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackwing_lair/flamegor": {
+  "instance": "blackwing_lair",
+  "boss": "flamegor",
+  "boss_entry": null,
+  "spells": {
+   "SHADOW_FLAME": 22539,
+   "WING_BUFFET": 23339,
+   "FRENZY": 23342,
+   "THRASH": 3391
+  },
+  "casts": [
+   {
+    "spell": "SHADOW_FLAME",
+    "spell_id": "22539",
+    "target": "self"
+   },
+   {
+    "spell": "WING_BUFFET",
+    "spell_id": "23339",
+    "target": "victim"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": "23342",
+    "target": "self"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": "3391",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "ShadowFlame": [
+    16000,
+    16000
+   ],
+   "WingBuffet": [
+    30000,
+    30000
+   ],
+   "Frenzy": [
+    10000,
+    10000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackwing_lair/nefarian": {
+  "instance": "blackwing_lair",
+  "boss": "nefarian",
+  "boss_entry": 11583,
+  "spells": {
+   "WINDFURY_TOTEM_PASSIVE": 10612,
+   "WINDFURY_TOTEM": 10610,
+   "SHADOWFLAME_INITIAL": 22992,
+   "SHADOWFLAME": 22539,
+   "BELLOWING_ROAR": 22686,
+   "VEIL_OF_SHADOW": 22687,
+   "CLEAVE": 20691,
+   "TAIL_LASH": 23364,
+   "MAGE": 23410,
+   "WARRIOR": 23397,
+   "DRUID": 23398,
+   "PRIEST": 23401,
+   "PALADIN": 23418,
+   "SHAMAN": 23425,
+   "WARLOCK": 23427,
+   "HUNTER": 23436,
+   "ROGUE": 23414,
+   "POLYMORPH": 23603,
+   "HOVER": 17131,
+   "ROOT_SELF": 17507,
+   "AVOIDANCE": 23198,
+   "STONESKIN": 10405,
+   "HEALING_STREAM": 10461,
+   "FIRE_NOVA": 11311
+  },
+  "casts": [
+   {
+    "spell": "SHADOWFLAME",
+    "spell_id": "22539",
+    "target": "self"
+   },
+   {
+    "spell": "BELLOWING_ROAR",
+    "spell_id": "22686",
+    "target": "self"
+   },
+   {
+    "spell": "VEIL_OF_SHADOW",
+    "spell_id": "22687",
+    "target": "victim"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": "20691",
+    "target": "victim"
+   },
+   {
+    "spell": "TAIL_LASH",
+    "spell_id": "23364",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   20.0
+  ],
+  "summons": [
+   {
+    "npc": "CORRUPTED_INFERNAL",
+    "entry": 14668
+   },
+   {
+    "npc": "CORRUPTED_INFERNAL",
+    "entry": 14668
+   },
+   {
+    "npc": "BONE_CONSTRUCT",
+    "entry": 14605
+   }
+  ],
+  "review_status": "draft"
+ },
+ "blackwing_lair/razorgore": {
+  "instance": "blackwing_lair",
+  "boss": "razorgore",
+  "boss_entry": null,
+  "spells": {
+   "CLEAVE": 19632,
+   "WARSTOMP": 24375,
+   "FIREBALL_VOLLEY": 22425,
+   "CONFLAGRATION": 23023,
+   "SUMMON_PLAYER": 24776,
+   "EXPLOSION": 20038,
+   "POSSESS_ORB": 19832,
+   "POSSESS": 23014
+  },
+  "casts": [
+   {
+    "spell": "CLEAVE",
+    "spell_id": "19632",
+    "target": "victim"
+   },
+   {
+    "spell": "WARSTOMP",
+    "spell_id": "24375",
+    "target": "self"
+   },
+   {
+    "spell": "FIREBALL_VOLLEY",
+    "spell_id": "22425",
+    "target": "self"
+   },
+   {
+    "spell": "CONFLAGRATION",
+    "spell_id": "23023",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Cleave": [
+    5000,
+    10000
+   ],
+   "WarStomp": [
+    25000,
+    45000
+   ],
+   "FireballVolley": [
+    15000,
+    20000
+   ],
+   "Conflagration": [
+    15000,
+    25000
+   ],
+   "OutOfReach": [
+    10000,
+    10000
+   ],
+   "Init": [
+    5000,
+    5000
+   ],
+   "EvadeTroops": [
+    0,
+    0
+   ],
+   "Pop": [
+    15000,
+    15000
+   ],
+   "Check": [
+    5000,
+    5000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "blackwing_lair/vaelastrasz": {
+  "instance": "blackwing_lair",
+  "boss": "vaelastrasz",
+  "boss_entry": null,
+  "spells": {
+   "ESSENCE_OF_THE_RED": 23513,
+   "FLAME_BREATH": 23461,
+   "FIRE_NOVA": 23462,
+   "TAIL_SWEEP": 15847,
+   "BURNING_ADRENALINE": 23620,
+   "BURNING_ADRENALINE2": 23478,
+   "BURNING_ADRENALINE3": 23644,
+   "BURNING_ADRENALINE4": 24701,
+   "CLEAVE": 19983,
+   "BANISHEMENT_OF_SCALE": 16404,
+   "NEFARIUS_CORRUPTION": 23642,
+   "MARK_DETONATION": 22438,
+   "MARK_FLAMES": 25050,
+   "COMMANDING_SHOUT": 22440,
+   "CLEAVE2": 15496,
+   "AURA_FLAMES": 22436,
+   "FRENZY": 22428,
+   "FLAME_BUFFET": 22433
+  },
+  "casts": [
+   {
+    "spell": "ESSENCE_OF_THE_RED",
+    "spell_id": "23513",
+    "target": "self"
+   },
+   {
+    "spell": "ESSENCE_OF_THE_RED",
+    "spell_id": "23513",
+    "target": "self"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": "19983",
+    "target": "victim"
+   },
+   {
+    "spell": "FLAME_BREATH",
+    "spell_id": "23461",
+    "target": "victim"
+   },
+   {
+    "spell": "FIRE_NOVA",
+    "spell_id": "23462",
+    "target": "self"
+   },
+   {
+    "spell": "TAIL_SWEEP",
+    "spell_id": "15847",
+    "target": "self"
+   },
+   {
+    "spell": "AURA_FLAMES",
+    "spell_id": "22436",
+    "target": "self"
+   },
+   {
+    "spell": "COMMANDING_SHOUT",
+    "spell_id": "22440",
+    "target": "self"
+   },
+   {
+    "spell": "CLEAVE2",
+    "spell_id": "15496",
+    "target": "victim"
+   },
+   {
+    "spell": "COMMANDING_SHOUT",
+    "spell_id": "22440",
+    "target": "self"
+   },
+   {
+    "spell": "MARK_FLAMES",
+    "spell_id": "25050",
+    "target": "pUnit"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": "22428",
+    "target": "self"
+   },
+   {
+    "spell": "FLAME_BUFFET",
+    "spell_id": "22433",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Cleave": [
+    4000,
+    8000
+   ],
+   "FlameBreath": [
+    5000,
+    10000
+   ],
+   "TailSweep": [
+    4000,
+    6000
+   ],
+   "CommandingShout": [
+    12000,
+    25000
+   ],
+   "FlameBuffet": [
+    8000,
+    12000
+   ],
+   "Speech": [
+    0,
+    0
+   ],
+   "BurningAdrenalineCaster": [
+    15000,
+    15000
+   ],
+   "BurningAdrenalineTank": [
+    45000,
+    45000
+   ],
+   "FireNova": [
+    2000,
+    2000
+   ],
+   "Selectable": [
+    0,
+    0
+   ],
+   "Intro": [
+    0,
+    0
+   ],
+   "Init": [
+    2000,
+    2000
+   ],
+   "MarkDetonation": [
+    20000,
+    20000
+   ],
+   "MarkFlames": [
+    15000,
+    15000
+   ],
+   "Frenzy": [
+    15000,
+    15000
+   ]
+  },
+  "health_phase_thresholds": [
+   15.0
+  ],
+  "summons": [
+   {
+    "npc": "LORD_NEFARIAN_VAEL",
+    "entry": 10162
+   }
+  ],
+  "review_status": "draft"
+ },
+ "blackwing_lair/victor_nefarius": {
+  "instance": "blackwing_lair",
+  "boss": "victor_nefarius",
+  "boss_entry": null,
+  "spells": {
+   "NEFARIUS_BARRIER": 22663,
+   "SHADOWBOLT": 22677,
+   "SHADOWBOLT_VOLLEY": 22665,
+   "FEAR": 22678,
+   "SILENCE": 22666,
+   "SHADOW_COMMAND": 22667,
+   "SHADOW_BLINK": 22664,
+   "ROOT": 17507,
+   "VISUAL_EFFECT": 24180,
+   "HOVER": 17131
+  },
+  "casts": [
+   {
+    "spell": "NEFARIUS_BARRIER",
+    "spell_id": "22663",
+    "target": "self"
+   },
+   {
+    "spell": "ROOT",
+    "spell_id": "17507",
+    "target": "self"
+   },
+   {
+    "spell": "ROOT",
+    "spell_id": "17507",
+    "target": "self"
+   },
+   {
+    "spell": "SHADOWBOLT",
+    "spell_id": "22677",
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOWBOLT_VOLLEY",
+    "spell_id": "22665",
+    "target": "victim"
+   },
+   {
+    "spell": "FEAR",
+    "spell_id": "22678",
+    "target": "random"
+   },
+   {
+    "spell": "SILENCE",
+    "spell_id": "22666",
+    "target": "random"
+   },
+   {
+    "spell": "ROOT",
+    "spell_id": "17507",
+    "target": "self"
+   },
+   {
+    "spell": "ROOT",
+    "spell_id": "17507",
+    "target": "self"
+   },
+   {
+    "spell": "SHADOW_COMMAND",
+    "spell_id": "22667",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "AddChromaSpawn": [
+    7000,
+    9000
+   ],
+   "AddSpawn": [
+    6000,
+    7000
+   ],
+   "ShadowBolt": [
+    3000,
+    6000
+   ],
+   "Fear": [
+    15000,
+    25000
+   ],
+   "Silence": [
+    25000,
+    40000
+   ],
+   "ShadowBlink": [
+    20000,
+    25000
+   ],
+   "MindControl": [
+    25000,
+    40000
+   ],
+   "ShadowBoltVolley": [
+    15000,
+    15000
+   ],
+   "Event": [
+    4000,
+    4000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "CHROMATIC_DRAKANOID",
+    "entry": 14302
+   },
+   {
+    "npc": "CHROMATIC_DRAKANOID",
+    "entry": 14302
+   },
+   {
+    "npc": "NEFARIAN",
+    "entry": 11583
+   }
+  ],
+  "review_status": "draft"
+ },
+ "deadmines/mr_smite": {
+  "instance": "deadmines",
+  "boss": "mr_smite",
+  "boss_entry": null,
+  "spells": {
+   "NIBLE_REFLEXES": 6433,
+   "SMITE_SLAM": 6435,
+   "SMITE_STOMP": 6432,
+   "SMITE_HAMMER": 6436,
+   "THRASH": 3391
+  },
+  "casts": [
+   {
+    "spell": "SMITE_HAMMER",
+    "spell_id": "6436",
+    "target": "self"
+   },
+   {
+    "spell": "SMITE_STOMP",
+    "spell_id": "6432",
+    "target": "self"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": "3391",
+    "target": "victim"
+   },
+   {
+    "spell": "SMITE_STOMP",
+    "spell_id": "6432",
+    "target": "self"
+   },
+   {
+    "spell": "SMITE_SLAM",
+    "spell_id": "6435",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Thrash": [
+    1500,
+    4000
+   ],
+   "Equip": [
+    2500,
+    2500
+   ],
+   "Slam": [
+    11000,
+    11000
+   ]
+  },
+  "health_phase_thresholds": [
+   66.0,
+   33.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "dire_maul/gordok_king": {
+  "instance": "dire_maul",
+  "boss": "gordok_king",
+  "boss_entry": null,
+  "spells": {
+   "BERSERKER_CHARGE": 22886,
+   "MORTAL_STRIKE": 15708,
+   "WAR_STOMP": 16727,
+   "SUNDER_ARMOR": 15572,
+   "ARCANE_EXPLOSION": 13745,
+   "FIREBALL": 17290,
+   "FROST_NOVA": 15331,
+   "BLOODLUST": 16170,
+   "CHAIN_LIGHTNING": 15305,
+   "EARTHGRAB_TOTEM": 8376,
+   "HEALING_WAVE": 15982,
+   "LIGHTNING_BOLT": 15234,
+   "MIND_BLAST": 17194,
+   "HEAL": 22883,
+   "POWER_WORD_SHIELD": 17139,
+   "PSYCHIC_SCREAM": 22884
+  },
+  "casts": [
+   {
+    "spell": "SUNDER_ARMOR",
+    "spell_id": "15572",
+    "target": "random"
+   },
+   {
+    "spell": "MORTAL_STRIKE",
+    "spell_id": "15708",
+    "target": "victim"
+   },
+   {
+    "spell": "WAR_STOMP",
+    "spell_id": "16727",
+    "target": "self"
+   },
+   {
+    "spell": "FIREBALL",
+    "spell_id": "17290",
+    "target": "victim"
+   },
+   {
+    "spell": "BLOODLUST",
+    "spell_id": "16170",
+    "target": "random"
+   },
+   {
+    "spell": "ARCANE_EXPLOSION",
+    "spell_id": "13745",
+    "target": "self"
+   },
+   {
+    "spell": "FROST_NOVA",
+    "spell_id": "15331",
+    "target": "self"
+   },
+   {
+    "spell": "EARTHGRAB_TOTEM",
+    "spell_id": "8376",
+    "target": "self"
+   },
+   {
+    "spell": "HEALING_WAVE",
+    "spell_id": "15982",
+    "target": "random"
+   },
+   {
+    "spell": "LIGHTNING_BOLT",
+    "spell_id": "15234",
+    "target": "victim"
+   },
+   {
+    "spell": "CHAIN_LIGHTNING",
+    "spell_id": "15305",
+    "target": "victim"
+   },
+   {
+    "spell": "HEAL",
+    "spell_id": "22883",
+    "target": "random"
+   },
+   {
+    "spell": "MIND_BLAST",
+    "spell_id": "17194",
+    "target": "victim"
+   },
+   {
+    "spell": "POWER_WORD_SHIELD",
+    "spell_id": "17139",
+    "target": "random"
+   },
+   {
+    "spell": "PSYCHIC_SCREAM",
+    "spell_id": "22884",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "WarStomp_": [
+    20000,
+    30000
+   ],
+   "MortalStrike_": [
+    12000,
+    20000
+   ],
+   "SunderArmor_": [
+    5000,
+    15000
+   ],
+   "BerserkerCharge_": [
+    25000,
+    30000
+   ],
+   "LinkCheck": [
+    2500,
+    2500
+   ]
+  },
+  "health_phase_thresholds": [
+   50.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "dire_maul/immol_thar": {
+  "instance": "dire_maul",
+  "boss": "immol_thar",
+  "boss_entry": null,
+  "spells": {
+   "TRAMPLE": 5568,
+   "INFECTED_BITE": 16128,
+   "EYE_OF_IMMOL_THAR": 22899,
+   "PORTAL_OF_IMMOL_THAR": 22950,
+   "ENRAGE": 8269
+  },
+  "casts": [
+   {
+    "spell": "TRAMPLE",
+    "spell_id": "5568",
+    "target": "self"
+   },
+   {
+    "spell": "INFECTED_BITE",
+    "spell_id": "16128",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Trample": [
+    5000,
+    9000
+   ],
+   "InfectedBite": [
+    2000,
+    4000
+   ],
+   "EyeOfImmolThar": [
+    7000,
+    12000
+   ],
+   "PortalOfImmolThar": [
+    10000,
+    14000
+   ],
+   "Enrage": [
+    50000,
+    50000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "dire_maul/tendris_warpwood": {
+  "instance": "dire_maul",
+  "boss": "tendris_warpwood",
+  "boss_entry": null,
+  "spells": {
+   "TRAMPLE": 5568,
+   "UPPERCUT": 22916,
+   "GRASPING_VINES": 22924,
+   "ENCHEVETREMENT": 22994,
+   "ENRAGE": 8269
+  },
+  "casts": [
+   {
+    "spell": "TRAMPLE",
+    "spell_id": "5568",
+    "target": "self"
+   },
+   {
+    "spell": "UPPERCUT",
+    "spell_id": "22916",
+    "target": "victim"
+   },
+   {
+    "spell": "GRASPING_VINES",
+    "spell_id": "22924",
+    "target": "self"
+   },
+   {
+    "spell": "ENCHEVETREMENT",
+    "spell_id": "22994",
+    "target": "pUnit"
+   }
+  ],
+  "timers_ms": {
+   "Trample": [
+    5000,
+    9000
+   ],
+   "Uppercut": [
+    2000,
+    4000
+   ],
+   "GraspingVines": [
+    9000,
+    12000
+   ],
+   "Invocation_": [
+    10000,
+    15000
+   ]
+  },
+  "health_phase_thresholds": [
+   30.0
+  ],
+  "summons": [
+   {
+    "npc": "ANCIENT_EQUINE_SPIRIT",
+    "entry": 14566
+   }
+  ],
+  "review_status": "draft"
+ },
+ "dire_maul/zevrim": {
+  "instance": "dire_maul",
+  "boss": "zevrim",
+  "boss_entry": null,
+  "spells": {
+   "INTENSIVE_PAIN": 22478,
+   "SACRIFICE": 22651
+  },
+  "casts": [
+   {
+    "spell": "INTENSIVE_PAIN",
+    "spell_id": "22478",
+    "target": "self"
+   },
+   {
+    "spell": "SACRIFICE",
+    "spell_id": "22651",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "IntensePain": [
+    20000,
+    26000
+   ],
+   "Sacrifice": [
+    15000,
+    18000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "dragonmaw_retreat/bogpaw_truthsay": {
+  "instance": "dragonmaw_retreat",
+  "boss": "bogpaw_truthsay",
+  "boss_entry": null,
+  "spells": {
+   "ENTANGLING_ROOTS": 22415,
+   "LIGHTNING_CLOUD": 19513,
+   "HEALING_WAVE": 10395
+  },
+  "casts": [
+   {
+    "spell": "HEALING_WAVE",
+    "spell_id": "10395",
+    "target": "random"
+   },
+   {
+    "spell": "LIGHTNING_CLOUD",
+    "spell_id": "19513",
+    "target": "random"
+   },
+   {
+    "spell": "ENTANGLING_ROOTS",
+    "spell_id": "22415",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "dragonmaw_retreat/gowlfang": {
+  "instance": "dragonmaw_retreat",
+  "boss": "gowlfang",
+  "boss_entry": null,
+  "spells": {
+   "INTIMIDATING_ROAR": 8715
+  },
+  "casts": [
+   {
+    "spell": "INTIMIDATING_ROAR",
+    "spell_id": "8715",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "dragonmaw_retreat/halgan_redbrand": {
+  "instance": "dragonmaw_retreat",
+  "boss": "halgan_redbrand",
+  "boss_entry": null,
+  "spells": {
+   "CURSE_OF_AGONY": 11711,
+   "MIND_FLAY": 17311,
+   "PSYCHIC_SCREAM": 22884
+  },
+  "casts": [
+   {
+    "spell": "PSYCHIC_SCREAM",
+    "spell_id": "22884",
+    "target": "victim"
+   },
+   {
+    "spell": "CURSE_OF_AGONY",
+    "spell_id": "11711",
+    "target": "random"
+   },
+   {
+    "spell": "MIND_FLAY",
+    "spell_id": "17311",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "dragonmaw_retreat/searistrasz": {
+  "instance": "dragonmaw_retreat",
+  "boss": "searistrasz",
+  "boss_entry": null,
+  "spells": {
+   "FIREBALL": 8401,
+   "FLAME_BREATH": 16396,
+   "WING_FLAP": 12882
+  },
+  "casts": [
+   {
+    "spell": "WING_FLAP",
+    "spell_id": "12882",
+    "target": "random"
+   },
+   {
+    "spell": "FLAME_BREATH",
+    "spell_id": "16396",
+    "target": "victim"
+   },
+   {
+    "spell": "FIREBALL",
+    "spell_id": "8401",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "WingFlap": [
+    500,
+    1500
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "dragonmaw_retreat/zuluhed_the_whacked": {
+  "instance": "dragonmaw_retreat",
+  "boss": "zuluhed_the_whacked",
+  "boss_entry": null,
+  "spells": {
+   "SOUL_DOMINATION": 52042,
+   "WITHERING_SOUL": 52044,
+   "DEBILITATED_SOUL": 52045,
+   "EMPOWERED_SOUL": 52046
+  },
+  "casts": [
+   {
+    "spell": "SOUL_DOMINATION",
+    "spell_id": "52042",
+    "target": "random"
+   },
+   {
+    "spell": "WITHERING_SOUL",
+    "spell_id": "52044",
+    "target": "self"
+   },
+   {
+    "spell": "DEBILITATED_SOUL",
+    "spell_id": "52045",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "SoulSequence": [
+    6500,
+    6500
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "emerald_sanctum/solnius": {
+  "instance": "emerald_sanctum",
+  "boss": "solnius",
+  "boss_entry": null,
+  "spells": {
+   "SLEEP_VISUAL": 25148,
+   "TELEPORT_VISUAL": 26638
+  },
+  "casts": [
+   {
+    "spell": "TELEPORT_VISUAL",
+    "spell_id": "26638",
+    "target": "self"
+   },
+   {
+    "spell": "CALL_OF_NIGHTMARE",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "EXPULSION_OF_CORRUPTION",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "ACID_BREATH",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "EMERALD_ROT",
+    "spell_id": null,
+    "target": "pPlayer"
+   },
+   {
+    "spell": "CORROSIVE_BOLT",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "EMERALD_ROT",
+    "spell_id": null,
+    "target": "pPlayer"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "SANCTUM_DREAMER",
+    "entry": null
+   },
+   {
+    "npc": "SANCTUM_DREAMER",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "frostmane_hollow/hailar_the_frigid": {
+  "instance": "frostmane_hollow",
+  "boss": "hailar_the_frigid",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "FROSTMANE_RITUAL",
+    "spell_id": null,
+    "target": "hailar"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "gilneas_city/celia": {
+  "instance": "gilneas_city",
+  "boss": "celia",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "BLAST_WAVE",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "IMMOLATE",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "SHADOW_WORD_PAIN",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "CORRUPTION",
+    "spell_id": null,
+    "target": "target"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "gilneas_city/lord_mortimer": {
+  "instance": "gilneas_city",
+  "boss": "lord_mortimer",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "BLAST_WAVE",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "HOLY_STRIKE",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "CONSECRATION",
+    "spell_id": null,
+    "target": "target"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "gnomeregan/thermaplugg": {
+  "instance": "gnomeregan",
+  "boss": "thermaplugg",
+  "boss_entry": null,
+  "spells": {
+   "ACTIVATE_BOMB_A": 11511,
+   "ACTIVATE_BOMB_B": 11795,
+   "KNOCK_AWAY": 10101,
+   "KNOCK_AWAY_AOE": 11130,
+   "WALKING_BOMB_EFFECT": 11504
+  },
+  "casts": [
+   {
+    "spell": "KNOCK_AWAY_AOE",
+    "spell_id": "11130",
+    "target": "self"
+   },
+   {
+    "spell": "KNOCK_AWAY",
+    "spell_id": "10101",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "KnockAway": [
+    17000,
+    20000
+   ],
+   "ActivateBomb": [
+    10000,
+    15000
+   ],
+   "Bomb": [
+    10000,
+    25000
+   ]
+  },
+  "health_phase_thresholds": [
+   50.0
+  ],
+  "summons": [
+   {
+    "npc": "WALKING_BOMB",
+    "entry": 7915
+   }
+  ],
+  "review_status": "draft"
+ },
+ "hateforge_quarry/bargul_blackhammer": {
+  "instance": "hateforge_quarry",
+  "boss": "bargul_blackhammer",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "STUNNING_STRIKE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "MORTAL_STRIKE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "DEMORALIZING_SHOUT",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "StunningStrike_": [
+    25000,
+    25000
+   ],
+   "MortalStrike_": [
+    35000,
+    35000
+   ],
+   "DemoralizingShout_": [
+    40000,
+    40000
+   ],
+   "VoiceScriptOOC_": [
+    300000,
+    300000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "hateforge_quarry/engineer_figgles": {
+  "instance": "hateforge_quarry",
+  "boss": "engineer_figgles",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "CORROSIVE_POISON",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "CorrosivePoison_": [
+    10000,
+    10000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "hateforge_quarry/hargesh_doomcaller": {
+  "instance": "hateforge_quarry",
+  "boss": "hargesh_doomcaller",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "IMMOLATE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOW_BOLT_VOLLEY",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOW_BOLT",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Immolate_": [
+    30000,
+    30000
+   ],
+   "ShadowBoltVolley_": [
+    90000,
+    90000
+   ],
+   "ShadowBolt_": [
+    10000,
+    10000
+   ],
+   "CheckIfAddsAreDead_": [
+    500,
+    500
+   ],
+   "RaidWipeCheck_": [
+    5000,
+    5000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "FACELESS_TERROR",
+    "entry": null
+   },
+   {
+    "npc": "FACELESS_TERROR",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "hateforge_quarry/hatereaver_annhilator": {
+  "instance": "hateforge_quarry",
+  "boss": "hatereaver_annhilator",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "KNOCKBACK",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "WAR_STOMP",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Knockback_": [
+    30000,
+    30000
+   ],
+   "Cleave_": [
+    40000,
+    40000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "lower_karazhan_halls/blackwald_ii": {
+  "instance": "lower_karazhan_halls",
+  "boss": "blackwald_ii",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "lower_karazhan_halls/brood_queen_araxxna": {
+  "instance": "lower_karazhan_halls",
+  "boss": "brood_queen_araxxna",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "lower_karazhan_halls/clawlord_howlfang": {
+  "instance": "lower_karazhan_halls",
+  "boss": "clawlord_howlfang",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "lower_karazhan_halls/grizikil": {
+  "instance": "lower_karazhan_halls",
+  "boss": "grizikil",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "lower_karazhan_halls/moroes": {
+  "instance": "lower_karazhan_halls",
+  "boss": "moroes",
+  "boss_entry": null,
+  "spells": {
+   "GLITTERING_DUST": 57095,
+   "SMOKE_BOMB": 57096,
+   "SHUFFLE_KICK": 57097,
+   "AGONIZING_CONCUSSION": 57098,
+   "SHADOW_BLAST": 57099,
+   "MOROES_CURSE": 57100,
+   "TELEPORT": 12980,
+   "REFLECTION": 27564
+  },
+  "casts": [
+   {
+    "spell": "SHADOW_BLAST",
+    "spell_id": "57099",
+    "target": "random"
+   },
+   {
+    "spell": "MOROES_CURSE",
+    "spell_id": "57100",
+    "target": "self"
+   },
+   {
+    "spell": "REFLECTION",
+    "spell_id": "27564",
+    "target": "self"
+   },
+   {
+    "spell": "SHADOW_BLAST",
+    "spell_id": "57099",
+    "target": "random"
+   },
+   {
+    "spell": "MOROES_CURSE",
+    "spell_id": "57100",
+    "target": "self"
+   },
+   {
+    "spell": "REFLECTION",
+    "spell_id": "27564",
+    "target": "self"
+   },
+   {
+    "spell": "SMOKE_BOMB",
+    "spell_id": "57096",
+    "target": "random"
+   },
+   {
+    "spell": "GLITTERING_DUST",
+    "spell_id": "57095",
+    "target": "victim"
+   },
+   {
+    "spell": "SHUFFLE_KICK",
+    "spell_id": "57097",
+    "target": "random"
+   },
+   {
+    "spell": "AGONIZING_CONCUSSION",
+    "spell_id": "57098",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "maraudon/celebras_the_cursed": {
+  "instance": "maraudon",
+  "boss": "celebras_the_cursed",
+  "boss_entry": null,
+  "spells": {
+   "CHANNEL": 21916
+  },
+  "casts": [
+   {
+    "spell": "WRATH",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "ENTANGLINGROOTS",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CORRUPT_FORCES",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "maraudon/landslide": {
+  "instance": "maraudon",
+  "boss": "landslide",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "KNOCKAWAY",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "TRAMPLE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "LANDSLIDE",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   50.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "maraudon/noxxion": {
+  "instance": "maraudon",
+  "boss": "noxxion",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "TOXICVOLLEY",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "UPPERCUT",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "maraudon/princess_theradras": {
+  "instance": "maraudon",
+  "boss": "princess_theradras",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "DUSTFIELD",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "BOULDER",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "REPULSIVEGAZE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "molten_core/baron_geddon": {
+  "instance": "molten_core",
+  "boss": "baron_geddon",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "LIVINGBOMB",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "IGNITEMANA",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "INFERNO",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "IgniteMana": [
+    20000,
+    30000
+   ],
+   "LivingBomb": [
+    12000,
+    15000
+   ],
+   "Inferno": [
+    18000,
+    24000
+   ],
+   "RestoreTarget": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [
+   5.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "molten_core/garr": {
+  "instance": "molten_core",
+  "boss": "garr",
+  "boss_entry": null,
+  "spells": {
+   "ANTIMAGICPULSE": 19492,
+   "MAGMASHACKLES": 19496,
+   "ENRAGE": 19516,
+   "IMMOLATE": 15733,
+   "THRASH": 8876,
+   "SEPARATION_ANXIETY": 23492,
+   "ADD_ERUPTION": 19497,
+   "MASSIVE_ERUPTION": 20483,
+   "ERUPTION_TRIGGER": 20482
+  },
+  "casts": [
+   {
+    "spell": "ENRAGE",
+    "spell_id": "19516",
+    "target": "self"
+   },
+   {
+    "spell": "ANTIMAGICPULSE",
+    "spell_id": "19492",
+    "target": "self"
+   },
+   {
+    "spell": "MAGMASHACKLES",
+    "spell_id": "19496",
+    "target": "self"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": "8876",
+    "target": "self"
+   },
+   {
+    "spell": "IMMOLATE",
+    "spell_id": "15733",
+    "target": "self"
+   },
+   {
+    "spell": "SEPARATION_ANXIETY",
+    "spell_id": "23492",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "AntiMagicPulse": [
+    20000,
+    20000
+   ],
+   "MagmaShackles": [
+    15000,
+    15000
+   ],
+   "Explode": [
+    20000,
+    20000
+   ],
+   "Anxiety": [
+    5000,
+    5000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "molten_core/gehennas": {
+  "instance": "molten_core",
+  "boss": "gehennas",
+  "boss_entry": null,
+  "spells": {
+   "GEHENNAS_CURSE": 19716,
+   "RAIN_OF_FIRE": 19717,
+   "SHADOW_BOLT_RANDOM": 19728,
+   "SHADOW_BOLT_TARGET": 19729
+  },
+  "casts": [
+   {
+    "spell": "GEHENNAS_CURSE",
+    "spell_id": "19716",
+    "target": "self"
+   },
+   {
+    "spell": "SHADOW_BOLT_TARGET",
+    "spell_id": "19729",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "molten_core/golemagg": {
+  "instance": "molten_core",
+  "boss": "golemagg",
+  "boss_entry": null,
+  "spells": {
+   "MAGMASPLASH": 13879,
+   "PYROBLAST": 20228,
+   "EARTHQUAKE": 19798,
+   "ENRAGE": 19953,
+   "GOLEMAGG_TRUST": 20553,
+   "MANGLE": 19820,
+   "TRASH": 3391
+  },
+  "casts": [
+   {
+    "spell": "PYROBLAST",
+    "spell_id": "20228",
+    "target": "random"
+   },
+   {
+    "spell": "ENRAGE",
+    "spell_id": "19953",
+    "target": "self"
+   },
+   {
+    "spell": "GOLEMAGG_TRUST",
+    "spell_id": "20553",
+    "target": "self"
+   },
+   {
+    "spell": "EARTHQUAKE",
+    "spell_id": "19798",
+    "target": "victim"
+   },
+   {
+    "spell": "MANGLE",
+    "spell_id": "19820",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   50.0,
+   10.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "molten_core/lucifron": {
+  "instance": "molten_core",
+  "boss": "lucifron",
+  "boss_entry": null,
+  "spells": {
+   "IMPENDINGDOOM": 19702,
+   "CURSE": 19703,
+   "SHADOWSHOCK": 19460
+  },
+  "casts": [
+   {
+    "spell": "ImpendingDoom",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "Curse",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "ShadowShock",
+    "spell_id": null,
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "molten_core/magmadar": {
+  "instance": "molten_core",
+  "boss": "magmadar",
+  "boss_entry": null,
+  "spells": {
+   "LAVA_BREATH": 19272,
+   "FRENZY": 19451,
+   "MAGMASPIT": 19449,
+   "PANIC": 19408,
+   "LAVABOMB": 19411,
+   "LAVABOMB_MANA": 20474
+  },
+  "casts": [
+   {
+    "spell": "FRENZY",
+    "spell_id": "19451",
+    "target": "self"
+   },
+   {
+    "spell": "PANIC",
+    "spell_id": "19408",
+    "target": "victim"
+   },
+   {
+    "spell": "LAVABOMB",
+    "spell_id": "19411",
+    "target": "random"
+   },
+   {
+    "spell": "LAVABOMB_MANA",
+    "spell_id": "20474",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "Frenzy": [
+    15000,
+    20000
+   ],
+   "Panic": [
+    30000,
+    35000
+   ],
+   "LavaBomb": [
+    12000,
+    15000
+   ],
+   "LavaBombMana": [
+    12000,
+    15000
+   ],
+   "RestoreTarget": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "molten_core/majordomo_executus": {
+  "instance": "molten_core",
+  "boss": "majordomo_executus",
+  "boss_entry": null,
+  "spells": {
+   "MAGIC_REFLECTION": 20619,
+   "DAMAGE_REFLECTION": 21075,
+   "BLASTWAVE": 20229,
+   "AEGIS": 20620,
+   "TELEPORT": 20618,
+   "SUMMON_RAGNAROS": 19774,
+   "RAGNAROS_EMERGE": 20568,
+   "ELEMENTAL_FIRE": 19773,
+   "VISUAL_TELEPORT": 19484
+  },
+  "casts": [
+   {
+    "spell": "AEGIS",
+    "spell_id": "20620",
+    "target": "self"
+   },
+   {
+    "spell": "BLASTWAVE",
+    "spell_id": "20229",
+    "target": "self"
+   },
+   {
+    "spell": "TELEPORT",
+    "spell_id": "20618",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   50.0
+  ],
+  "summons": [
+   {
+    "npc": "RAGNAROS",
+    "entry": 11502
+   }
+  ],
+  "review_status": "draft"
+ },
+ "molten_core/ragnaros": {
+  "instance": "molten_core",
+  "boss": "ragnaros",
+  "boss_entry": null,
+  "spells": {
+   "ELEMENTAL_FIRE_KILL": 19773,
+   "ELEMENTAL_FIRE_AURA": 20563,
+   "MELT_WEAPON_AURA": 21387,
+   "WRATH_OF_RAGNAROS": 20566,
+   "MAGMA_BLAST": 20565,
+   "MIGHT_OF_RAGNAROS": 21154,
+   "INTENSE_HEAT": 21155,
+   "LAVASHIELD": 21857,
+   "SUBMERGE_VISUAL": 26234,
+   "SUBMERGE_FADE": 21107,
+   "SUBMERGE_EFFECT": 21859,
+   "EMERGE_VISUAL": 20568
+  },
+  "casts": [
+   {
+    "spell": "MELT_WEAPON_AURA",
+    "spell_id": "21387",
+    "target": "self"
+   },
+   {
+    "spell": "ELEMENTAL_FIRE_AURA",
+    "spell_id": "20563",
+    "target": "self"
+   },
+   {
+    "spell": "EMERGE_VISUAL",
+    "spell_id": "20568",
+    "target": "self"
+   },
+   {
+    "spell": "SUBMERGE_VISUAL",
+    "spell_id": "26234",
+    "target": "self"
+   },
+   {
+    "spell": "WRATH_OF_RAGNAROS",
+    "spell_id": "20566",
+    "target": "self"
+   },
+   {
+    "spell": "MIGHT_OF_RAGNAROS",
+    "spell_id": "21154",
+    "target": "random"
+   },
+   {
+    "spell": "MAGMA_BLAST",
+    "spell_id": "20565",
+    "target": "target"
+   }
+  ],
+  "timers_ms": {
+   "WrathOfRagnaros": [
+    25000,
+    30000
+   ],
+   "MightOfRagnaros": [
+    9000,
+    14000
+   ],
+   "LavaBurst": [
+    10000,
+    15000
+   ],
+   "MagmaBlast": [
+    2500,
+    2500
+   ],
+   "RestoreTarget": [
+    800,
+    800
+   ],
+   "LavaBurstSecondary": [
+    0,
+    0
+   ],
+   "LavaBurstTertiary": [
+    0,
+    0
+   ],
+   "SubmergeState": [
+    1500,
+    1500
+   ],
+   "EmergeState": [
+    2900,
+    2900
+   ],
+   "EnterCombat": [
+    0,
+    0
+   ],
+   "Attack": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "SON_OF_FLAME",
+    "entry": 12143
+   },
+   {
+    "npc": "SUBMERGED_VISUAL",
+    "entry": 21000
+   }
+  ],
+  "review_status": "draft"
+ },
+ "molten_core/shazzrah": {
+  "instance": "molten_core",
+  "boss": "shazzrah",
+  "boss_entry": null,
+  "spells": {
+   "ARCANEEXPLOSION": 19712,
+   "SHAZZRAHCURSE": 19713,
+   "DEADENMAGIC": 19714,
+   "COUNTERSPELL": 19715,
+   "GATE_DUMMY": 23138
+  },
+  "casts": [
+   {
+    "spell": "ARCANEEXPLOSION",
+    "spell_id": "19712",
+    "target": "victim"
+   },
+   {
+    "spell": "SHAZZRAHCURSE",
+    "spell_id": "19713",
+    "target": "victim"
+   },
+   {
+    "spell": "DEADENMAGIC",
+    "spell_id": "19714",
+    "target": "self"
+   },
+   {
+    "spell": "COUNTERSPELL",
+    "spell_id": "19715",
+    "target": "victim"
+   },
+   {
+    "spell": "GATE_DUMMY",
+    "spell_id": "23138",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "molten_core/sulfuron_harbinger": {
+  "instance": "molten_core",
+  "boss": "sulfuron_harbinger",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "DEMORALIZINGSHOUT",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "INSPIRE",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "INSPIRE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "KNOCKDOWN",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "FLAMESPEAR",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "DARKSTRIKE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "naxxramas/anubrekhan": {
+  "instance": "naxxramas",
+  "boss": "anubrekhan",
+  "boss_entry": null,
+  "spells": {
+   "IMPALE": 28783,
+   "LOCUSTSWARM": 28785,
+   "SELF_SPAWN_5": 29105,
+   "SELF_SPAWN_10": 28864,
+   "CRYPTGUARD_ENRAGE": 28747,
+   "CRYPTGUARD_CLEAVE": 26350,
+   "CRYPTGUARD_WEB": 28991,
+   "CRYPTGUARD_ACID": 28969
+  },
+  "casts": [
+   {
+    "spell": "LOCUSTSWARM",
+    "spell_id": "28785",
+    "target": "self"
+   },
+   {
+    "spell": "CRYPTGUARD_ENRAGE",
+    "spell_id": "28747",
+    "target": "self"
+   },
+   {
+    "spell": "CRYPTGUARD_WEB",
+    "spell_id": "28991",
+    "target": "self"
+   },
+   {
+    "spell": "CRYPTGUARD_CLEAVE",
+    "spell_id": "26350",
+    "target": "victim"
+   },
+   {
+    "spell": "CRYPTGUARD_ACID",
+    "spell_id": "28969",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "CorpseExplosion": [
+    10000,
+    20000
+   ],
+   "RestoreTarget": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "naxxramas/faerlina": {
+  "instance": "naxxramas",
+  "boss": "faerlina",
+  "boss_entry": null,
+  "spells": {
+   "POSIONBOLT_VOLLEY": 28796,
+   "ENRAGE": 28798,
+   "RAINOFFIRE": 28794,
+   "WIDOWS_EMBRACE": 28732
+  },
+  "casts": [
+   {
+    "spell": "POSIONBOLT_VOLLEY",
+    "spell_id": "28796",
+    "target": "victim"
+   },
+   {
+    "spell": "RAINOFFIRE",
+    "spell_id": "28794",
+    "target": "random"
+   },
+   {
+    "spell": "ENRAGE",
+    "spell_id": "28798",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Enrage": [
+    60000,
+    60000
+   ],
+   "PoisonBoltVolley": [
+    2500,
+    2500
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "naxxramas/four_horsemen": {
+  "instance": "naxxramas",
+  "boss": "four_horsemen",
+  "boss_entry": null,
+  "spells": {
+   "SHIELDWALL": 29061,
+   "BESERK": 26662,
+   "MARK": 28836,
+   "SUMMON_PLAYER": 25104,
+   "MARK_OF_BLAUMEUX": 28833,
+   "SPIRIT_OF_BLAUMEUX": 28931,
+   "VOIDZONE": 28863,
+   "MARK_OF_MOGRAINE": 28834,
+   "SPIRIT_OF_MOGRAINE": 28928,
+   "RIGHTEOUS_FIRE": 28881,
+   "MARK_OF_KORTHAZZ": 28832,
+   "SPIRIT_OF_KORTHAZZ": 28932,
+   "METEOR": 28884,
+   "MARK_OF_ZELIEK": 28835,
+   "SPIRIT_OF_ZELIEK": 28934,
+   "HOLY_WRATH": 28883
+  },
+  "casts": [
+   {
+    "spell": "SHIELDWALL",
+    "spell_id": "29061",
+    "target": "self"
+   },
+   {
+    "spell": "SHIELDWALL",
+    "spell_id": "29061",
+    "target": "self"
+   },
+   {
+    "spell": "METEOR",
+    "spell_id": "28884",
+    "target": "random"
+   },
+   {
+    "spell": "HOLY_WRATH",
+    "spell_id": "28883",
+    "target": "pTar"
+   }
+  ],
+  "timers_ms": {
+   "Mark": [
+    12000,
+    12000
+   ]
+  },
+  "health_phase_thresholds": [
+   50.0,
+   20.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "naxxramas/gluth": {
+  "instance": "naxxramas",
+  "boss": "gluth",
+  "boss_entry": null,
+  "spells": {
+   "DOUBLE_ATTACK": 19818,
+   "MORTALWOUND": 25646,
+   "DECIMATE": 28374,
+   "DECIMATE_OTHER": 28375,
+   "FRENZY": 28371,
+   "BERSERK": 26662,
+   "TERRIFYING_ROAR": 29685,
+   "INFECTED_WOUND": 29307
+  },
+  "casts": [
+   {
+    "spell": "DECIMATE_OTHER",
+    "spell_id": "28375",
+    "target": "pPlayer"
+   },
+   {
+    "spell": "MORTALWOUND",
+    "spell_id": "25646",
+    "target": "victim"
+   },
+   {
+    "spell": "DECIMATE",
+    "spell_id": "28374",
+    "target": "self"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": "28371",
+    "target": "self"
+   },
+   {
+    "spell": "BERSERK",
+    "spell_id": "26662",
+    "target": "self"
+   },
+   {
+    "spell": "TERRIFYING_ROAR",
+    "spell_id": "29685",
+    "target": "self"
+   },
+   {
+    "spell": "DECIMATE_OTHER",
+    "spell_id": "28375",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "ZOMBIE_CHOW",
+    "entry": 16360
+   },
+   {
+    "npc": "ZOMBIE_CHOW",
+    "entry": 16360
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/gothik": {
+  "instance": "naxxramas",
+  "boss": "gothik",
+  "boss_entry": null,
+  "spells": {
+   "TELEPORT_LEFT": 28025,
+   "TELEPORT_RIGHT": 28026,
+   "HARVESTSOUL": 28679,
+   "SHADOWBOLT": 29317,
+   "IMMUNE_ALL": 29230,
+   "A_TO_ANCHOR_1": 27892,
+   "B_TO_ANCHOR_1": 27928,
+   "C_TO_ANCHOR_1": 27935,
+   "A_TO_ANCHOR_2": 27893,
+   "B_TO_ANCHOR_2": 27929,
+   "C_TO_ANCHOR_2": 27936,
+   "A_TO_SKULL": 27915,
+   "B_TO_SKULL": 27931,
+   "C_TO_SKULL": 27937
+  },
+  "casts": [
+   {
+    "spell": "TELEPORT_RIGHT",
+    "spell_id": "28026",
+    "target": "self"
+   },
+   {
+    "spell": "SHADOWBOLT",
+    "spell_id": "29317",
+    "target": "random"
+   },
+   {
+    "spell": "HARVESTSOUL",
+    "spell_id": "28679",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Teleport": [
+    15000,
+    20000
+   ],
+   "Shadowbolt": [
+    1600,
+    2000
+   ],
+   "Speech": [
+    5000,
+    5000
+   ],
+   "Summon": [
+    0,
+    0
+   ],
+   "HarvestSoul": [
+    20000,
+    20000
+   ]
+  },
+  "health_phase_thresholds": [
+   30.0
+  ],
+  "summons": [
+   {
+    "npc": "SUB_BOSS_TRIGGER",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/grobbulus": {
+  "instance": "naxxramas",
+  "boss": "grobbulus",
+  "boss_entry": null,
+  "spells": {
+   "SLIME_STREAM": 28137,
+   "MUTATING_INJECTION": 28169,
+   "SLIME_SPRAY": 28157,
+   "BERSERK": 26662,
+   "POISON_CLOUD": 28240,
+   "POISON_CLOUD_PASSIVE": 28158
+  },
+  "casts": [
+   {
+    "spell": "MUTATING_INJECTION",
+    "spell_id": "28169",
+    "target": "random"
+   },
+   {
+    "spell": "SLIME_STREAM",
+    "spell_id": "28137",
+    "target": "self"
+   },
+   {
+    "spell": "POISON_CLOUD",
+    "spell_id": "28240",
+    "target": "self"
+   },
+   {
+    "spell": "SLIME_SPRAY",
+    "spell_id": "28157",
+    "target": "victim"
+   },
+   {
+    "spell": "BERSERK",
+    "spell_id": "26662",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "SlimeStream": [
+    3000,
+    3000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "FALLOUT_SLIME",
+    "entry": 16290
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/heigan": {
+  "instance": "naxxramas",
+  "boss": "heigan",
+  "boss_entry": null,
+  "spells": {
+   "ERUPTION": 29371,
+   "DECREPIT_FEVER": 29998,
+   "PLAGUE_CLOUD": 29350,
+   "TELEPORT_SELF": 30211,
+   "MANABURN": 29310
+  },
+  "casts": [
+   {
+    "spell": "TELEPORT_SELF",
+    "spell_id": "30211",
+    "target": "self"
+   },
+   {
+    "spell": "MANABURN",
+    "spell_id": "29310",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "PLAGUE_FISSURE",
+    "entry": 533001
+   },
+   {
+    "npc": "PLAGUE_FISSURE",
+    "entry": 533001
+   },
+   {
+    "npc": "PLAGUE_CLOUD",
+    "entry": 533002
+   },
+   {
+    "npc": "PLAGUE_FISSURE",
+    "entry": 533001
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/kelthuzad": {
+  "instance": "naxxramas",
+  "boss": "kelthuzad",
+  "boss_entry": null,
+  "spells": {
+   "VISUAL_CHANNEL": 29423,
+   "FROST_BOLT": 28478,
+   "FROST_BOLT_NOVA": 28479,
+   "CHAINS_OF_KELTHUZAD": 28408,
+   "CHAINS_OF_KELTHUZAD_SCALE": 28409,
+   "CHAINS_OF_KELTHUZAD_EFFECTS": 28410,
+   "MANA_DETONATION": 27819,
+   "SHADOW_FISSURE": 27810,
+   "VOID_BLAST": 27812,
+   "FROST_BLAST": 27808,
+   "BERSERK": 28498,
+   "DISPELL_SHACKLES": 28471,
+   "SUMMON_PLAYER": 25104,
+   "BLOOD_TAP": 28470,
+   "WAIL_SOULS_AUR": 28460,
+   "DARK_BLAST_AUR": 28458,
+   "DARK_BLAST_TRIG": 28457,
+   "MORTAL_WOUND": 25646
+  },
+  "casts": [
+   {
+    "spell": "CHAINS_OF_KELTHUZAD",
+    "spell_id": "28408",
+    "target": "self"
+   },
+   {
+    "spell": "FROST_BOLT_NOVA",
+    "spell_id": "28479",
+    "target": "self"
+   },
+   {
+    "spell": "FROST_BLAST",
+    "spell_id": "27808",
+    "target": "pUnit"
+   },
+   {
+    "spell": "FROST_BOLT",
+    "spell_id": "28478",
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOW_FISSURE",
+    "spell_id": "27810",
+    "target": "pUnit"
+   },
+   {
+    "spell": "MANA_DETONATION",
+    "spell_id": "27819",
+    "target": "pUnit"
+   },
+   {
+    "spell": "MORTAL_WOUND",
+    "spell_id": "25646",
+    "target": "victim"
+   },
+   {
+    "spell": "BLOOD_TAP",
+    "spell_id": "28470",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   40.0
+  ],
+  "summons": [
+   {
+    "npc": "SOLDIER_FROZEN",
+    "entry": null
+   },
+   {
+    "npc": "UNSTOPPABLE_ABOM",
+    "entry": null
+   },
+   {
+    "npc": "SOUL_WEAVER",
+    "entry": null
+   },
+   {
+    "npc": "GUARDIAN",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/loatheb": {
+  "instance": "naxxramas",
+  "boss": "loatheb",
+  "boss_entry": null,
+  "spells": {
+   "CORRUPTED_MIND": 29201,
+   "POISON_AURA": 29865,
+   "INEVITABLE_DOOM": 29204,
+   "REMOVE_CURSE": 30281,
+   "FUNGAL_BLOOM": 29232,
+   "RETCHING_PLAGUE": 30079,
+   "MIND_FLAY": 29407
+  },
+  "casts": [
+   {
+    "spell": "MIND_FLAY",
+    "spell_id": "29407",
+    "target": "victim"
+   },
+   {
+    "spell": "REMOVE_CURSE",
+    "spell_id": "30281",
+    "target": "self"
+   },
+   {
+    "spell": "CORRUPTED_MIND",
+    "spell_id": "29201",
+    "target": "self"
+   },
+   {
+    "spell": "POISON_AURA",
+    "spell_id": "29865",
+    "target": "self"
+   },
+   {
+    "spell": "INEVITABLE_DOOM",
+    "spell_id": "29204",
+    "target": "self"
+   },
+   {
+    "spell": "REMOVE_CURSE",
+    "spell_id": "30281",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "EyeStalk",
+    "entry": null
+   },
+   {
+    "npc": "SPORE",
+    "entry": 16286
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/maexxna": {
+  "instance": "naxxramas",
+  "boss": "maexxna",
+  "boss_entry": null,
+  "spells": {
+   "WEBWRAP": 28622,
+   "WEBSPRAY": 29484,
+   "POISONSHOCK": 28741,
+   "NECROTICPOISON": 28776,
+   "ENRAGE": 28747,
+   "SUMMON_SPIDERLING": 29434,
+   "DOUBLE_ATTACK": 19818,
+   "WEBWRAP_2": 28673,
+   "SUMMON_SPIDERLING_1": 29434,
+   "SUMMON_SPIDERLING_2": 30076,
+   "SUMMON_WEB_WRAP": 28627,
+   "WEB_WRAP_UNKNOWN": 28617,
+   "WEB_WRAP_1": 28618,
+   "WEB_WRAP_2": 28619,
+   "WEB_WRAP_3": 28620,
+   "WEB_WRAP_4": 28621,
+   "WEB_WRAP_TRIGGERED": 28622,
+   "CLEAR_WEB_WRAP": 28629
+  },
+  "casts": [
+   {
+    "spell": "WEBSPRAY",
+    "spell_id": "29484",
+    "target": "victim"
+   },
+   {
+    "spell": "POISONSHOCK",
+    "spell_id": "28741",
+    "target": "victim"
+   },
+   {
+    "spell": "NECROTICPOISON",
+    "spell_id": "28776",
+    "target": "victim"
+   },
+   {
+    "spell": "SUMMON_SPIDERLING",
+    "spell_id": "29434",
+    "target": "self"
+   },
+   {
+    "spell": "ENRAGE",
+    "spell_id": "28747",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "WebWrap": [
+    0,
+    0
+   ],
+   "CheckExploit": [
+    500,
+    500
+   ]
+  },
+  "health_phase_thresholds": [
+   30.0
+  ],
+  "summons": [
+   {
+    "npc": "WEB_WRAP",
+    "entry": 16486
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/noth": {
+  "instance": "naxxramas",
+  "boss": "noth",
+  "boss_entry": null,
+  "spells": {
+   "TP_CENTER": 29231,
+   "TP_BALC": 29216,
+   "CRIPPLE": 29212,
+   "CURSE_PLAGUEBRINGER": 29213,
+   "IMMUNE_ALL": 29230,
+   "BLINK_1": 29208,
+   "BLINK_2": 29209,
+   "BLINK_3": 29210,
+   "BLINK_4": 29211,
+   "SUM_WARR_SW": 29247,
+   "SUM_WARR_NW": 29248,
+   "SUM_WARR_NE": 29249,
+   "SUM_CHAMP_SW1": 29217,
+   "SUM_CHAMP_SW2": 29224,
+   "SUM_CHAMP_SW3": 29225,
+   "SUM_CHAMP_SW4": 29227,
+   "SUM_CHAMP_W": 29238,
+   "SUM_CHAMP_NW1": 29255,
+   "SUM_CHAMP_NW2": 29267,
+   "SUM_CHAMP_NW3": 29257,
+   "SUM_CHAMP_NE1": 29258,
+   "SUM_CHAMP_NE2": 29262,
+   "SUM_GUARD_NE": 29226,
+   "SUM_GUARD_NW": 29239,
+   "SUM_GUARD_SW1": 29256,
+   "SUM_GUARD_SW2": 29268
+  },
+  "casts": [
+   {
+    "spell": "SUM_WARR_SW",
+    "spell_id": "29247",
+    "target": "self"
+   },
+   {
+    "spell": "SUM_WARR_NW",
+    "spell_id": "29248",
+    "target": "self"
+   },
+   {
+    "spell": "SUM_WARR_NE",
+    "spell_id": "29249",
+    "target": "self"
+   },
+   {
+    "spell": "CRIPPLE",
+    "spell_id": "29212",
+    "target": "self"
+   },
+   {
+    "spell": "CURSE_PLAGUEBRINGER",
+    "spell_id": "29213",
+    "target": "random"
+   },
+   {
+    "spell": "TP_BALC",
+    "spell_id": "29216",
+    "target": "self"
+   },
+   {
+    "spell": "TP_CENTER",
+    "spell_id": "29231",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "PLAGUED_CONSTRUCT",
+    "entry": 16982
+   },
+   {
+    "npc": "PLAGUED_CONSTRUCT",
+    "entry": 16982
+   },
+   {
+    "npc": "PLAGUED_CONSTRUCT",
+    "entry": 16982
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/patchwerk": {
+  "instance": "naxxramas",
+  "boss": "patchwerk",
+  "boss_entry": null,
+  "spells": {
+   "SUMMON_PLAYER": 20477,
+   "HATEFUL_STRIKE": 28308,
+   "ENRAGE": 28131,
+   "BERSERK": 27680,
+   "SLIMEBOLT": 32309
+  },
+  "casts": [
+   {
+    "spell": "ENRAGE",
+    "spell_id": "28131",
+    "target": "self"
+   },
+   {
+    "spell": "BERSERK",
+    "spell_id": "27680",
+    "target": "self"
+   },
+   {
+    "spell": "SLIMEBOLT",
+    "spell_id": "32309",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   5.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "naxxramas/razuvious": {
+  "instance": "naxxramas",
+  "boss": "razuvious",
+  "boss_entry": null,
+  "spells": {
+   "UNBALANCING_STRIKE": 26613,
+   "DISRUPTING_SHOUT": 29107,
+   "HOPELESS": 29125
+  },
+  "casts": [
+   {
+    "spell": "HOPELESS",
+    "spell_id": "29125",
+    "target": "self"
+   },
+   {
+    "spell": "UNBALANCING_STRIKE",
+    "spell_id": "26613",
+    "target": "victim"
+   },
+   {
+    "spell": "DISRUPTING_SHOUT",
+    "spell_id": "29107",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "DK_UNDERSTUDY",
+    "entry": 16803
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/sapphiron": {
+  "instance": "naxxramas",
+  "boss": "sapphiron",
+  "boss_entry": null,
+  "spells": {
+   "ICEBOLT": 28522,
+   "STUN_IMMUNE": 28782,
+   "SUMM_ICEBLOCK": 28535,
+   "FROST_BREATH": 28524,
+   "FROST_BREATH_DUMMY": 30101,
+   "FROST_AURA": 28529,
+   "LIFE_DRAIN": 28542,
+   "BESERK": 26662,
+   "CLEAVE": 19983,
+   "TAIL_SWEEP": 15847,
+   "SUMMON_BLIZ1": 28561,
+   "SUMMON_BLIZ2": 28560,
+   "BLIZZARD_PERIODIC": 28534,
+   "BLIZZARD": 28547,
+   "PERIODIC_BUFFET": 29327,
+   "WING_BUFFET": 29328,
+   "SAPPHIRON_DIES": 29357
+  },
+  "casts": [
+   {
+    "spell": "ICEBOLT",
+    "spell_id": "28522",
+    "target": "target"
+   },
+   {
+    "spell": "FROST_BREATH_DUMMY",
+    "spell_id": "30101",
+    "target": "self"
+   },
+   {
+    "spell": "FROST_BREATH",
+    "spell_id": "28524",
+    "target": "self"
+   },
+   {
+    "spell": "LIFE_DRAIN",
+    "spell_id": "28542",
+    "target": "self"
+   },
+   {
+    "spell": "TAIL_SWEEP",
+    "spell_id": "15847",
+    "target": "self"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": "19983",
+    "target": "victim"
+   },
+   {
+    "spell": "BESERK",
+    "spell_id": "26662",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "WING_BUFFET",
+    "entry": 17025
+   },
+   {
+    "npc": "BLIZZARD",
+    "entry": 16474
+   }
+  ],
+  "review_status": "draft"
+ },
+ "naxxramas/thaddius": {
+  "instance": "naxxramas",
+  "boss": "thaddius",
+  "boss_entry": null,
+  "spells": {
+   "WARSTOMP": 28125,
+   "FLASH": 28127,
+   "POWERSURGE": 28134,
+   "STATIC_FIELD": 28135,
+   "MAGNETIC_PULL": 28337,
+   "THADIUS_SPAWN": 28160,
+   "THADIUS_LIGHTNING_VISUAL": 28136,
+   "BALL_LIGHTNING": 28299,
+   "CHAIN_LIGHTNING": 28167,
+   "BESERK": 27680,
+   "POLARITY_SHIFT": 28089,
+   "POSITIVE_CHARGE_APPLY": 28059,
+   "POSITIVE_CHARGE_TICK": 28062,
+   "POSITIVE_CHARGE_AMP": 29659,
+   "NEGATIVE_CHARGE_APPLY": 28084,
+   "NEGATIVE_CHARGE_TICK": 28085,
+   "NEGATIVE_CHARGE_AMP": 29660,
+   "FEUGEN_CHAIN": 28111,
+   "STALAGG_CHAIN": 28096,
+   "FEUGEN_TESLA_PASSIVE": 28109,
+   "STALAGG_TESLA_PASSIVE": 28097,
+   "SHOCK_OVERLOAD": 28159,
+   "SHOCK": 28099
+  },
+  "casts": [
+   {
+    "spell": "WARSTOMP",
+    "spell_id": "28125",
+    "target": "self"
+   },
+   {
+    "spell": "STATIC_FIELD",
+    "spell_id": "28135",
+    "target": "self"
+   },
+   {
+    "spell": "POWERSURGE",
+    "spell_id": "28134",
+    "target": "self"
+   },
+   {
+    "spell": "CHAIN_LIGHTNING",
+    "spell_id": "28167",
+    "target": "random"
+   },
+   {
+    "spell": "POLARITY_SHIFT",
+    "spell_id": "28089",
+    "target": "self"
+   },
+   {
+    "spell": "BESERK",
+    "spell_id": "27680",
+    "target": "self"
+   },
+   {
+    "spell": "BALL_LIGHTNING",
+    "spell_id": "28299",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "BallLightning": [
+    1500,
+    1500
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "TESLA_COIL",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "onyxias_lair/onyxia": {
+  "instance": "onyxias_lair",
+  "boss": "onyxia",
+  "boss_entry": null,
+  "spells": {
+   "WINGBUFFET": 18500,
+   "FLAMEBREATH": 18435,
+   "CLEAVE": 19983,
+   "TAILSWEEP": 15847,
+   "KNOCK_AWAY": 19633,
+   "BELLOWINGROAR": 18431,
+   "FIREBALL": 18392,
+   "DEEPBREATH": 23461,
+   "HEATED_GROUND_EAST": 22191,
+   "HEATED_GROUND_WEST": 22197,
+   "HOVER": 17131,
+   "BREATH_NORTH_TO_SOUTH": 17086,
+   "BREATH_SOUTH_TO_NORTH": 18351,
+   "BREATH_EAST_TO_WEST": 18576,
+   "BREATH_WEST_TO_EAST": 18609,
+   "BREATH_SE_TO_NW": 18564,
+   "BREATH_NW_TO_SE": 18584,
+   "BREATH_SW_TO_NE": 18596,
+   "BREATH_NE_TO_SW": 18617
+  },
+  "casts": [
+   {
+    "spell": "FLAMEBREATH",
+    "spell_id": "18435",
+    "target": "victim"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": "19983",
+    "target": "victim"
+   },
+   {
+    "spell": "WINGBUFFET",
+    "spell_id": "18500",
+    "target": "victim"
+   },
+   {
+    "spell": "KNOCK_AWAY",
+    "spell_id": "19633",
+    "target": "victim"
+   },
+   {
+    "spell": "TAILSWEEP",
+    "spell_id": "15847",
+    "target": "self"
+   },
+   {
+    "spell": "FIREBALL",
+    "spell_id": "18392",
+    "target": "random"
+   },
+   {
+    "spell": "BELLOWINGROAR",
+    "spell_id": "18431",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "FlameBreath": [
+    10000,
+    15000
+   ],
+   "Cleave": [
+    2000,
+    5000
+   ],
+   "WingBuffet": [
+    10000,
+    20000
+   ],
+   "KnockAway": [
+    10000,
+    20000
+   ],
+   "Movement": [
+    20000,
+    25000
+   ],
+   "BellowingRoar": [
+    15000,
+    30000
+   ],
+   "SummonWhelps": [
+    1000,
+    10000
+   ],
+   "Trans": [
+    1000,
+    1000
+   ],
+   "TailSweep": [
+    5000,
+    5000
+   ],
+   "Fireball": [
+    3000,
+    3000
+   ],
+   "DeepBreath": [
+    5000,
+    5000
+   ],
+   "Whelp": [
+    1000,
+    1000
+   ],
+   "AggroRadius": [
+    1000,
+    1000
+   ],
+   "LeashCheck": [
+    3500,
+    3500
+   ],
+   "SummonCheck": [
+    3000,
+    3000
+   ]
+  },
+  "health_phase_thresholds": [
+   65.0,
+   40.0
+  ],
+  "summons": [
+   {
+    "npc": "ONYXIAN_WHELP",
+    "entry": 11262
+   },
+   {
+    "npc": "ONYXIAN_WHELP",
+    "entry": 11262
+   },
+   {
+    "npc": "ONYXIAN_WHELP",
+    "entry": 11262
+   },
+   {
+    "npc": "ONYXIAN_WHELP",
+    "entry": 11262
+   }
+  ],
+  "review_status": "draft"
+ },
+ "ruins_of_ahnqiraj/ayamiss": {
+  "instance": "ruins_of_ahnqiraj",
+  "boss": "ayamiss",
+  "boss_entry": null,
+  "spells": {
+   "STINGERSPRAY": 25749,
+   "POISONSTINGER": 25748,
+   "PARALYZE": 25725,
+   "TRASH": 3391,
+   "FRENZY": 8269,
+   "LASH": 25852,
+   "FEED": 25721
+  },
+  "casts": [
+   {
+    "spell": "FRENZY",
+    "spell_id": "8269",
+    "target": "self"
+   },
+   {
+    "spell": "PARALYZE",
+    "spell_id": "25725",
+    "target": "random"
+   },
+   {
+    "spell": "POISONSTINGER",
+    "spell_id": "25748",
+    "target": "victim"
+   },
+   {
+    "spell": "STINGERSPRAY",
+    "spell_id": "25749",
+    "target": "victim"
+   },
+   {
+    "spell": "STINGERSPRAY",
+    "spell_id": "25749",
+    "target": "victim"
+   },
+   {
+    "spell": "LASH",
+    "spell_id": "25852",
+    "target": "victim"
+   },
+   {
+    "spell": "TRASH",
+    "spell_id": "3391",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "PoisonStinger_": [
+    2000,
+    3000
+   ],
+   "StingerSpray_": [
+    6000,
+    12000
+   ],
+   "Lash_": [
+    8000,
+    15000
+   ],
+   "Trash_": [
+    5000,
+    7000
+   ],
+   "SummonSwarmer_": [
+    60000,
+    60000
+   ],
+   "SummonPlayer_": [
+    15000,
+    15000
+   ],
+   "Relocate_": [
+    5000,
+    5000
+   ],
+   "Sacrifice_": [
+    10000,
+    10000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "HIVEZARA_SWARMER",
+    "entry": 15546
+   },
+   {
+    "npc": "HIVEZARA_LARVA",
+    "entry": 15555
+   }
+  ],
+  "review_status": "draft"
+ },
+ "ruins_of_ahnqiraj/buru": {
+  "instance": "ruins_of_ahnqiraj",
+  "boss": "buru",
+  "boss_entry": null,
+  "spells": {
+   "CREEPING_PLAGUE": 20512,
+   "DISMEMBER": 96,
+   "GAIN_SPEED": 1834,
+   "FULL_SPEED": 1557,
+   "THORNS": 25640,
+   "BURU_TRANSFORM": 24721,
+   "CREATURE_SPECIAL": 7155,
+   "BURU_EGG_TRIGGER": 26646,
+   "EXPLODE": 19593
+  },
+  "casts": [],
+  "timers_ms": {
+   "Transform_": [
+    6000,
+    6000
+   ],
+   "Dismember_": [
+    6000,
+    6000
+   ],
+   "Speed_": [
+    9000,
+    9000
+   ],
+   "CreepingPlague_": [
+    6000,
+    6000
+   ],
+   "NewTarget_": [
+    6000,
+    6000
+   ]
+  },
+  "health_phase_thresholds": [
+   20.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "ruins_of_ahnqiraj/kurinnaxx": {
+  "instance": "ruins_of_ahnqiraj",
+  "boss": "kurinnaxx",
+  "boss_entry": null,
+  "spells": {
+   "MORTALWOUND": 25646,
+   "SUMMON_SANDTRAP": 26524,
+   "ENRAGE": 8269,
+   "WIDE_SLASH": 25814,
+   "TRASH": 3391
+  },
+  "casts": [
+   {
+    "spell": "ENRAGE",
+    "spell_id": "8269",
+    "target": "self"
+   },
+   {
+    "spell": "MORTALWOUND",
+    "spell_id": "25646",
+    "target": "victim"
+   },
+   {
+    "spell": "WIDE_SLASH",
+    "spell_id": "25814",
+    "target": "victim"
+   },
+   {
+    "spell": "TRASH",
+    "spell_id": "3391",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "MortalWound_": [
+    8000,
+    10000
+   ],
+   "Trash_": [
+    12000,
+    17000
+   ],
+   "WideSlash_": [
+    12000,
+    15000
+   ],
+   "SandTrap_": [
+    5100,
+    7000
+   ],
+   "CleanSandTrap_": [
+    5000,
+    5000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "ruins_of_ahnqiraj/moam": {
+  "instance": "ruins_of_ahnqiraj",
+  "boss": "moam",
+  "boss_entry": null,
+  "spells": {
+   "TRAMPLE": 15550,
+   "ARCANEERUPTION": 25672,
+   "SUMMON_MANA_FIEND": 25681,
+   "ENERGIZE": 25685,
+   "DRAINMANA": 25676
+  },
+  "casts": [
+   {
+    "spell": "ENERGIZE",
+    "spell_id": "25685",
+    "target": "self"
+   },
+   {
+    "spell": "TRAMPLE",
+    "spell_id": "15550",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Trample_": [
+    15000,
+    15000
+   ],
+   "SummonManaFiend_": [
+    90000,
+    90000
+   ],
+   "TurnBackFromStone_": [
+    90000,
+    90000
+   ],
+   "DrainMana_": [
+    7000,
+    7000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "MANA_FIEND",
+    "entry": 15527
+   }
+  ],
+  "review_status": "draft"
+ },
+ "ruins_of_ahnqiraj/ossirian": {
+  "instance": "ruins_of_ahnqiraj",
+  "boss": "ossirian",
+  "boss_entry": null,
+  "spells": {
+   "CURSE_OF_TONGUES": 25195,
+   "STRENGTH_OF_OSSIRIAN": 25176,
+   "SUMMON_PLAYER": 20477,
+   "WAR_STOMP": 25188,
+   "ENVELOPING_WINDS": 25189,
+   "SANDSTORM": 25160
+  },
+  "casts": [
+   {
+    "spell": "CURSE_OF_TONGUES",
+    "spell_id": "25195",
+    "target": "victim"
+   },
+   {
+    "spell": "STRENGTH_OF_OSSIRIAN",
+    "spell_id": "25176",
+    "target": "self"
+   },
+   {
+    "spell": "WAR_STOMP",
+    "spell_id": "25188",
+    "target": "self"
+   },
+   {
+    "spell": "ENVELOPING_WINDS",
+    "spell_id": "25189",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "CurseOfTongues_": [
+    20000,
+    30000
+   ],
+   "Speed_": [
+    10000,
+    10000
+   ],
+   "StrengthOfOssirian_": [
+    45000,
+    45000
+   ],
+   "WarStomp_": [
+    30000,
+    30000
+   ],
+   "EnvelopingWinds_": [
+    20000,
+    20000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "TORNADO",
+    "entry": 15428
+   }
+  ],
+  "review_status": "draft"
+ },
+ "scarlet_citadel/abbendis": {
+  "instance": "scarlet_citadel",
+  "boss": "abbendis",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_citadel/ardaeus": {
+  "instance": "scarlet_citadel",
+  "boss": "ardaeus",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {
+   "CallForHelp_": [
+    5000,
+    5000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_citadel/daelus": {
+  "instance": "scarlet_citadel",
+  "boss": "daelus",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   100.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_citadel/mariella": {
+  "instance": "scarlet_citadel",
+  "boss": "mariella",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   100.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/arcanist_doan": {
+  "instance": "scarlet_monastery",
+  "boss": "arcanist_doan",
+  "boss_entry": null,
+  "spells": {
+   "POLYMORPH": 13323,
+   "AOESILENCE": 8988,
+   "ARCANEEXPLOSION": 9433,
+   "FIREAOE": 9435,
+   "ARCANEBUBBLE": 9438
+  },
+  "casts": [
+   {
+    "spell": "FIREAOE",
+    "spell_id": "9435",
+    "target": "self"
+   },
+   {
+    "spell": "ARCANEBUBBLE",
+    "spell_id": "9438",
+    "target": "self"
+   },
+   {
+    "spell": "POLYMORPH",
+    "spell_id": "13323",
+    "target": "target"
+   },
+   {
+    "spell": "AOESILENCE",
+    "spell_id": "8988",
+    "target": "victim"
+   },
+   {
+    "spell": "ARCANEEXPLOSION",
+    "spell_id": "9433",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/azshir_the_sleepless": {
+  "instance": "scarlet_monastery",
+  "boss": "azshir_the_sleepless",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "SOULSIPHON",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CALLOFTHEGRAVE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "TERRIFY",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/bloodmage_thalnos": {
+  "instance": "scarlet_monastery",
+  "boss": "bloodmage_thalnos",
+  "boss_entry": null,
+  "spells": {
+   "FLAMESHOCK": 8053,
+   "SHADOWBOLT": 1106,
+   "FLAMESPIKE": 8814,
+   "FIRENOVA": 16079
+  },
+  "casts": [
+   {
+    "spell": "FLAMESHOCK",
+    "spell_id": "8053",
+    "target": "victim"
+   },
+   {
+    "spell": "FLAMESPIKE",
+    "spell_id": "8814",
+    "target": "victim"
+   },
+   {
+    "spell": "FIRENOVA",
+    "spell_id": "16079",
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOWBOLT",
+    "spell_id": "1106",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/headless_horseman": {
+  "instance": "scarlet_monastery",
+  "boss": "headless_horseman",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/herod": {
+  "instance": "scarlet_monastery",
+  "boss": "herod",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "RUSHINGCHARGE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "RUSHINGCHARGE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "WHIRLWIND",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Root": [
+    11000,
+    11000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "SCARLET_MYRMIDON",
+    "entry": 4295
+   },
+   {
+    "npc": "SCARLET_TRAINEE",
+    "entry": 6575
+   }
+  ],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/high_inquisitor_fairbanks": {
+  "instance": "scarlet_monastery",
+  "boss": "high_inquisitor_fairbanks",
+  "boss_entry": null,
+  "spells": {
+   "CURSEOFBLOOD": 8282,
+   "DISPELMAGIC": 15090,
+   "FEAR": 12096,
+   "HEAL": 12039,
+   "POWERWORDSHIELD": 11647,
+   "SLEEP": 8399
+  },
+  "casts": [
+   {
+    "spell": "HEAL",
+    "spell_id": "12039",
+    "target": "self"
+   },
+   {
+    "spell": "FEAR",
+    "spell_id": "12096",
+    "target": "target"
+   },
+   {
+    "spell": "SLEEP",
+    "spell_id": "8399",
+    "target": "target"
+   },
+   {
+    "spell": "POWERWORDSHIELD",
+    "spell_id": "11647",
+    "target": "self"
+   },
+   {
+    "spell": "DISPELMAGIC",
+    "spell_id": "15090",
+    "target": "target"
+   },
+   {
+    "spell": "CURSEOFBLOOD",
+    "spell_id": "8282",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/houndmaster_loksey": {
+  "instance": "scarlet_monastery",
+  "boss": "houndmaster_loksey",
+  "boss_entry": null,
+  "spells": {
+   "SUMMONSCARLETHOUND": 17164,
+   "BLOODLUST": 6742
+  },
+  "casts": [
+   {
+    "spell": "SUMMONSCARLETHOUND",
+    "spell_id": "17164",
+    "target": "self"
+   },
+   {
+    "spell": "BLOODLUST",
+    "spell_id": "6742",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/interrogator_vishas": {
+  "instance": "scarlet_monastery",
+  "boss": "interrogator_vishas",
+  "boss_entry": null,
+  "spells": {
+   "SHADOWWORDPAIN": 2767
+  },
+  "casts": [
+   {
+    "spell": "SHADOWWORDPAIN",
+    "spell_id": "2767",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scarlet_monastery/scorn": {
+  "instance": "scarlet_monastery",
+  "boss": "scorn",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/darkmaster_gandling": {
+  "instance": "scholomance",
+  "boss": "darkmaster_gandling",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "ARCANEMISSILES",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOWSHIELD",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "CURSE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/doctor_theolen_krastinov": {
+  "instance": "scholomance",
+  "boss": "doctor_theolen_krastinov",
+  "boss_entry": null,
+  "spells": {
+   "REND": 16509,
+   "BACKHAND": 18103,
+   "FRENZY": 8269
+  },
+  "casts": [
+   {
+    "spell": "REND",
+    "spell_id": "16509",
+    "target": "victim"
+   },
+   {
+    "spell": "BACKHAND",
+    "spell_id": "18103",
+    "target": "victim"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": "8269",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Rend_": [
+    10000,
+    10000
+   ],
+   "Backhand_": [
+    10000,
+    10000
+   ],
+   "Frenzy_": [
+    120000,
+    120000
+   ]
+  },
+  "health_phase_thresholds": [
+   26.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/illucia_barov": {
+  "instance": "scholomance",
+  "boss": "illucia_barov",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "CURSEOFAGONY",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOWSHOCK",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "SILENCE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "FEAR",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/instructor_malicia": {
+  "instance": "scholomance",
+  "boss": "instructor_malicia",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "CALLOFGRAVES",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CORRUPTION",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "RENEW",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "FLASHHEAL",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "HEALINGTOUCH",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/jandice_barov": {
+  "instance": "scholomance",
+  "boss": "jandice_barov",
+  "boss_entry": null,
+  "spells": {
+   "CURSEOFBLOOD": 16098,
+   "BANISH": 8994,
+   "ILLUSION": 17773,
+   "DROP_JOURNAL": 26096,
+   "PHASING": 16122
+  },
+  "casts": [
+   {
+    "spell": "DROP_JOURNAL",
+    "spell_id": "26096",
+    "target": "self"
+   },
+   {
+    "spell": "CURSEOFBLOOD",
+    "spell_id": "16098",
+    "target": "victim"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/kormok": {
+  "instance": "scholomance",
+  "boss": "kormok",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "SHADOWBOLTVOLLEY",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "BONESHIELD",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   26.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/lord_alexei_barov": {
+  "instance": "scholomance",
+  "boss": "lord_alexei_barov",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "IMMOLATE",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "VEILOFSHADOW",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/lorekeeper_polkelt": {
+  "instance": "scholomance",
+  "boss": "lorekeeper_polkelt",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "DARKPLAGUE_AURA",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "VOLATILEINFECTION",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CORROSIVEACID",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "NOXIOUSCATALYST",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/ras_frostwhisper": {
+  "instance": "scholomance",
+  "boss": "ras_frostwhisper",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "ICEARMOR",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "FROSTBOLT",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "FREEZE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "FEAR",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CHILLNOVA",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "FROSTVOLLEY",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/the_ravenian": {
+  "instance": "scholomance",
+  "boss": "the_ravenian",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "TRAMPLE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SUNDERINCLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "KNOCKAWAY",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "scholomance/vectus": {
+  "instance": "scholomance",
+  "boss": "vectus",
+  "boss_entry": null,
+  "spells": {
+   "VIEWING_ROOM_STUDENT_TRANSFORM_EFFECT": 18115,
+   "FLAMESTRIKE": 18399,
+   "BLAST_WAVE": 16046
+  },
+  "casts": [
+   {
+    "spell": "FLAMESTRIKE",
+    "spell_id": "18399",
+    "target": "self"
+   },
+   {
+    "spell": "BLAST_WAVE",
+    "spell_id": "16046",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "GambitEvent_": [
+    12000,
+    12000
+   ],
+   "FlameStrike_": [
+    30000,
+    30000
+   ],
+   "BlastWave_": [
+    12000,
+    12000
+   ],
+   "Frenzy_": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwind_vaults/arctiras": {
+  "instance": "stormwind_vaults",
+  "boss": "arctiras",
+  "boss_entry": null,
+  "spells": {
+   "FROSTBOLT": 17503,
+   "CAUSE_INSANITY": 12888,
+   "FROST_NOVA": 30094
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwind_vaults/aszosh_grimflame": {
+  "instance": "stormwind_vaults",
+  "boss": "aszosh_grimflame",
+  "boss_entry": null,
+  "spells": {
+   "RISENLACKEY": 17618,
+   "MINDBLAST": 10947,
+   "DRAINLIFE": 11700,
+   "CORRUPTION": 18656
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwind_vaults/black_bride": {
+  "instance": "stormwind_vaults",
+  "boss": "black_bride",
+  "boss_entry": null,
+  "spells": {
+   "LICHSLAP": 28873,
+   "SCREAMSOFTHEPAST": 7074,
+   "SHADOWBOLTVOLLEY": 17228
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwind_vaults/damian_the_ripper": {
+  "instance": "stormwind_vaults",
+  "boss": "damian_the_ripper",
+  "boss_entry": null,
+  "spells": {
+   "BACKSTAB": 46320,
+   "DARKMENDING": 16588,
+   "GOUGE": 11286,
+   "SINISTERSTRIKE": 11294,
+   "VANISH": 24222
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwind_vaults/nazorna": {
+  "instance": "stormwind_vaults",
+  "boss": "nazorna",
+  "boss_entry": null,
+  "spells": {
+   "ARMAGEDDON": 20478,
+   "BANISH": 27565,
+   "INFERNO": 19695,
+   "SHADOWBOLTVOLLEY": 15245
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwind_vaults/thamgrarr": {
+  "instance": "stormwind_vaults",
+  "boss": "thamgrarr",
+  "boss_entry": null,
+  "spells": {
+   "FIREBALL": 25306,
+   "KNOCKAWAY": 18670,
+   "ICEBLOCK": 11958,
+   "RAINOFFIRE": 19717
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwind_vaults/volkan_cruelblade": {
+  "instance": "stormwind_vaults",
+  "boss": "volkan_cruelblade",
+  "boss_entry": null,
+  "spells": {
+   "BLINKVISUAL": 7141,
+   "BLOODLUST": 23951,
+   "THUNDERCLAP": 23931,
+   "BLADESTORM": 9632
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/chieftain_stormsong": {
+  "instance": "stormwrought_ruins",
+  "boss": "chieftain_stormsong",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "FORKED_LIGHTNING",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "STUN_BOMB",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "LIGHTNING_STRIKE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "ForkedLightning": [
+    11000,
+    15000
+   ],
+   "StunBomb": [
+    25000,
+    30000
+   ],
+   "LightningStrike": [
+    14000,
+    20000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/dagar_the_glutton": {
+  "instance": "stormwrought_ruins",
+  "boss": "dagar_the_glutton",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "CONSUME_FLESH",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "ConsumeFlesh": [
+    12000,
+    16000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/deathlord_tidebane": {
+  "instance": "stormwrought_ruins",
+  "boss": "deathlord_tidebane",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "RAIN_OF_FIRE",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "DARK_PLAGUE",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "WAIL_OF_SOULS",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "RainOfFire": [
+    18000,
+    24000
+   ],
+   "DarkPlague": [
+    10000,
+    14000
+   ],
+   "WailOfSouls": [
+    22000,
+    30000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/duke_balor_iv": {
+  "instance": "stormwrought_ruins",
+  "boss": "duke_balor_iv",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "MIND_FLAY",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "PSYCHIC_SCREAM",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "WAILING_DEAD",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "DARK_STRIKE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "PsychicScream": [
+    15000,
+    20000
+   ],
+   "WailingDead": [
+    10000,
+    15000
+   ],
+   "DarkStrike": [
+    16000,
+    22000
+   ],
+   "MindFlay": [
+    25000,
+    30000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/eldermaw_the_primordial": {
+  "instance": "stormwrought_ruins",
+  "boss": "eldermaw_the_primordial",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "CALL_OF_THE_PRIMORDIAL",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "PRIMORDIAL_REGENERATION",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "TAIL_SLAP",
+    "spell_id": null,
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "TailSlap": [
+    10000,
+    12000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "ELDERMAW_CROCOLISK",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/ighalfor": {
+  "instance": "stormwrought_ruins",
+  "boss": "ighalfor",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "DEATH_COIL",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "FLAMESTRIKE",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "CURSE_OF_AGONY",
+    "spell_id": null,
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "DeathCoil": [
+    22000,
+    22000
+   ],
+   "Flamestrike": [
+    24000,
+    24000
+   ],
+   "CurseOfAgony": [
+    26000,
+    26000
+   ],
+   "Channel": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "NETHER_IMP",
+    "entry": null
+   },
+   {
+    "npc": "MERGOTHID",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/lady_drazare": {
+  "instance": "stormwrought_ruins",
+  "boss": "lady_drazare",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {
+   "DarkSeduction": [
+    39000,
+    58000
+   ],
+   "DrazareEmbraceAura": [
+    12000,
+    24000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/librarian_theodorus": {
+  "instance": "stormwrought_ruins",
+  "boss": "librarian_theodorus",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "SUMMON_THEODORUS_ELEMENTAL",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "CONE_OF_COLD",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "FROSTBOLT",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "THEODORUS_BLIZZARD",
+    "spell_id": null,
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "Frostbolt": [
+    6000,
+    9000
+   ],
+   "Blizzard": [
+    16000,
+    22000
+   ],
+   "ConeOfCold": [
+    15000,
+    22000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/mycellakos": {
+  "instance": "stormwrought_ruins",
+  "boss": "mycellakos",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "DECAYING_MOLD",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "DecayingMold": [
+    25000,
+    30000
+   ],
+   "Fungus": [
+    15000,
+    20000
+   ],
+   "FungusDetonate": [
+    3000,
+    3000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "GROWTH_OF_MYCELLAKOS",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/oronok_torn_heart": {
+  "instance": "stormwrought_ruins",
+  "boss": "oronok_torn_heart",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "KNOCK_AWAY",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "DEATH_AND_DECAY",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOW_BOLT",
+    "spell_id": null,
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "KnockAway": [
+    16000,
+    22000
+   ],
+   "ShadowBolt": [
+    7000,
+    10000
+   ],
+   "DeathAndDecay": [
+    22000,
+    30000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stormwrought_ruins/subjugator_halthas_shadecrest": {
+  "instance": "stormwrought_ruins",
+  "boss": "subjugator_halthas_shadecrest",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "DOMINATE_MIND",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "HALTHAS_FLAMESTRIKE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "HALTHAS_FEAR",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "DominateMind": [
+    26000,
+    34000
+   ],
+   "Fear": [
+    24000,
+    32000
+   ],
+   "Flamestrike": [
+    12000,
+    16000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/atiesh": {
+  "instance": "stratholme",
+  "boss": "atiesh",
+  "boss_entry": null,
+  "spells": {
+   "THRASH": 12787,
+   "SHADOW_BOLT": 19729,
+   "UNHOLY_AURA": 28340,
+   "BREATH_OF_SARGERAS": 28342,
+   "BREATH_OF_SARGERAS_SCRIPT": 28352,
+   "REAPER_OF_SOULS_DND": 28355,
+   "ANTIMAGIC_PULSE": 29463
+  },
+  "casts": [
+   {
+    "spell": "UNHOLY_AURA",
+    "spell_id": "28340",
+    "target": "self"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": "12787",
+    "target": "self"
+   },
+   {
+    "spell": "BREATH_OF_SARGERAS_SCRIPT",
+    "spell_id": "28352",
+    "target": "self"
+   },
+   {
+    "spell": "SHADOW_BOLT",
+    "spell_id": "19729",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/baroness_anastari": {
+  "instance": "stratholme",
+  "boss": "baroness_anastari",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "SILENCE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "POSSESS",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "BANSHEEWAIL",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "BANSHEECURSE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SILENCE",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   25.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/cannon_master_willey": {
+  "instance": "stratholme",
+  "boss": "cannon_master_willey",
+  "boss_entry": null,
+  "spells": {
+   "KNOCK_AWAY": 10101,
+   "PUMMEL": 15615,
+   "SHOOT": 20463,
+   "SUMMON_CRIMSON": 17279,
+   "CANNON_FIRE": 17278
+  },
+  "casts": [
+   {
+    "spell": "PUMMEL",
+    "spell_id": "15615",
+    "target": "victim"
+   },
+   {
+    "spell": "KNOCK_AWAY",
+    "spell_id": "10101",
+    "target": "victim"
+   },
+   {
+    "spell": "SHOOT",
+    "spell_id": "20463",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "KnockAway": [
+    15000,
+    20000
+   ],
+   "Pummel": [
+    5000,
+    10000
+   ],
+   "Shoot": [
+    2500,
+    3500
+   ],
+   "SummonRifleman": [
+    10000,
+    10000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CRIMSON_RIFLEMAN",
+    "entry": 11054
+   },
+   {
+    "npc": "CANNONBALL",
+    "entry": 160018
+   }
+  ],
+  "review_status": "draft"
+ },
+ "stratholme/dathrohan_balnazzar": {
+  "instance": "stratholme",
+  "boss": "dathrohan_balnazzar",
+  "boss_entry": null,
+  "spells": {
+   "CRUSADERSHAMMER": 17286,
+   "CRUSADERSTRIKE": 17281,
+   "HOLYSTRIKE": 17284,
+   "BALNAZZARTRANSFORM": 17288,
+   "SHADOWSHOCK": 17399,
+   "MINDBLAST": 17287,
+   "PSYCHICSCREAM": 13704,
+   "SLEEP": 12098,
+   "MINDCONTROL": 17405
+  },
+  "casts": [
+   {
+    "spell": "MINDBLAST",
+    "spell_id": "17287",
+    "target": "victim"
+   },
+   {
+    "spell": "CRUSADERSHAMMER",
+    "spell_id": "17286",
+    "target": "self"
+   },
+   {
+    "spell": "CRUSADERSTRIKE",
+    "spell_id": "17281",
+    "target": "victim"
+   },
+   {
+    "spell": "HOLYSTRIKE",
+    "spell_id": "17284",
+    "target": "victim"
+   },
+   {
+    "spell": "BALNAZZARTRANSFORM",
+    "spell_id": "17288",
+    "target": "self"
+   },
+   {
+    "spell": "MINDBLAST",
+    "spell_id": "17287",
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOWSHOCK",
+    "spell_id": "17399",
+    "target": "victim"
+   },
+   {
+    "spell": "PSYCHICSCREAM",
+    "spell_id": "13704",
+    "target": "self"
+   },
+   {
+    "spell": "SLEEP",
+    "spell_id": "12098",
+    "target": "random"
+   },
+   {
+    "spell": "MINDCONTROL",
+    "spell_id": "17405",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {
+   "MindBlast_": [
+    15000,
+    20000
+   ],
+   "MindControl_": [
+    25000,
+    30000
+   ],
+   "CrusadersHammer_": [
+    12000,
+    12000
+   ],
+   "CrusaderStrike_": [
+    15000,
+    15000
+   ],
+   "HolyStrike_": [
+    15000,
+    15000
+   ],
+   "ShadowShock_": [
+    11000,
+    11000
+   ],
+   "PsychicScream_": [
+    20000,
+    20000
+   ],
+   "DeepSleep_": [
+    15000,
+    15000
+   ],
+   "Transform_": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [
+   40.0
+  ],
+  "summons": [
+   {
+    "npc": "SKEL_BERSERKER",
+    "entry": 10391
+   },
+   {
+    "npc": "SKEL_GUARDIAN",
+    "entry": 10390
+   }
+  ],
+  "review_status": "draft"
+ },
+ "stratholme/magistrate_barthilas": {
+  "instance": "stratholme",
+  "boss": "magistrate_barthilas",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "DRAININGBLOW",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CROWDPUMMEL",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "MIGHTYBLOW",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/maleki_the_pallid": {
+  "instance": "stratholme",
+  "boss": "maleki_the_pallid",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "FROSTBOLT",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "ICETOMB",
+    "spell_id": null,
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   60.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/nerubenkan": {
+  "instance": "stratholme",
+  "boss": "nerubenkan",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "ENCASINGWEBS",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "PIERCEARMOR",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/order_of_silver_hand": {
+  "instance": "stratholme",
+  "boss": "order_of_silver_hand",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   20.0,
+   5.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/postmaster_malown": {
+  "instance": "stratholme",
+  "boss": "postmaster_malown",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "WAILINGDEAD",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "BACKHAND",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CURSEOFWEAKNESS",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CURSEOFTONGUES",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CALLOFTHEGRAVE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/ramstein_the_gorger": {
+  "instance": "stratholme",
+  "boss": "ramstein_the_gorger",
+  "boss_entry": null,
+  "spells": {
+   "TRAMPLE": 5568,
+   "KNOCKOUT": 17307
+  },
+  "casts": [
+   {
+    "spell": "TRAMPLE",
+    "spell_id": "5568",
+    "target": "self"
+   },
+   {
+    "spell": "KNOCKOUT",
+    "spell_id": "17307",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "stratholme/sc_attunement": {
+  "instance": "stratholme",
+  "boss": "sc_attunement",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "HOLY_STRIKE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "DIVINE_SHIELD",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "ARCANE_EXPLOSION",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "KNOCKBACK",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "HolyLight_": [
+    20000,
+    35000
+   ],
+   "HolyShock_": [
+    20000,
+    20000
+   ],
+   "HolyStrike_": [
+    10000,
+    10000
+   ],
+   "RangeCheck_": [
+    800,
+    800
+   ],
+   "Knockback_": [
+    500,
+    500
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "FALLEN_SPIRIT",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "stratholme/timmy_the_cruel": {
+  "instance": "stratholme",
+  "boss": "timmy_the_cruel",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "RAVENOUSCLAW",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "RavenousClaw": [
+    12000,
+    12000
+   ],
+   "Disarm": [
+    15000,
+    15000
+   ],
+   "ShieldBash": [
+    8000,
+    8000
+   ],
+   "ShieldCharge": [
+    12000,
+    12000
+   ]
+  },
+  "health_phase_thresholds": [
+   10.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/bug_trio": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "bug_trio",
+  "boss_entry": null,
+  "spells": {
+   "THRASH": 3391,
+   "CLEAVE": 19983,
+   "TOXIC_VOLLEY": 25812,
+   "SUMMON_CLOUD": 25786,
+   "RAVAGE": 24213,
+   "HEAL": 25807,
+   "FEAR": 19408,
+   "CHARGE": 26561,
+   "KNOCKBACK": 18813,
+   "KNOCKDOWN": 19128,
+   "VENGEANCE": 25790
+  },
+  "casts": [
+   {
+    "spell": "SUMMON_CLOUD",
+    "spell_id": "25786",
+    "target": "self"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": "19983",
+    "target": "victim"
+   },
+   {
+    "spell": "TOXIC_VOLLEY",
+    "spell_id": "25812",
+    "target": "self"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": "3391",
+    "target": "self"
+   },
+   {
+    "spell": "FEAR",
+    "spell_id": "19408",
+    "target": "self"
+   },
+   {
+    "spell": "HEAL",
+    "spell_id": "25807",
+    "target": "self"
+   },
+   {
+    "spell": "HEAL",
+    "spell_id": "25807",
+    "target": "random"
+   },
+   {
+    "spell": "RAVAGE",
+    "spell_id": "24213",
+    "target": "victim"
+   },
+   {
+    "spell": "VENGEANCE",
+    "spell_id": "25790",
+    "target": "self"
+   },
+   {
+    "spell": "CHARGE",
+    "spell_id": "26561",
+    "target": "random"
+   },
+   {
+    "spell": "KNOCKBACK",
+    "spell_id": "18813",
+    "target": "victim"
+   },
+   {
+    "spell": "KNOCKDOWN",
+    "spell_id": "19128",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Cleave": [
+    5000,
+    12000
+   ],
+   "Thrash": [
+    2000,
+    8000
+   ],
+   "ToxicVolley": [
+    8000,
+    14000
+   ],
+   "Heal": [
+    10000,
+    20000
+   ],
+   "Fear": [
+    10000,
+    20000
+   ],
+   "Ravage": [
+    12000,
+    20000
+   ],
+   "Charge": [
+    15000,
+    20000
+   ],
+   "KnockBack": [
+    10000,
+    14000
+   ],
+   "Knockdown": [
+    15000,
+    20000
+   ],
+   "EvadeCheck": [
+    2500,
+    2500
+   ],
+   "Devour": [
+    4000,
+    4000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "YAUJ_BROOD",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/cthun": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "cthun",
+  "boss_entry": null,
+  "spells": {
+   "FREEZE_ANIMATION": 16245,
+   "ROTATE_TRIGGER": 26137,
+   "ROTATE_NEGATIVE_360": 26136,
+   "ROTATE_POSITIVE_360": 26009,
+   "DARK_GLARE": 26029,
+   "GREEN_EYE_BEAM": 26134,
+   "THRASH": 3391,
+   "GROUND_TREMOR": 6524,
+   "TENTACLE_BIRTH": 26262,
+   "SUBMERGE_VISUAL": 26234,
+   "SUBMERGE_EFFECT": 21859,
+   "PUNT_UPWARD": 16716,
+   "MASSIVE_GROUND_RUPTURE": 26100,
+   "GROUND_RUPTURE_PHYSICAL": 26139,
+   "HAMSTRING": 26141,
+   "MIND_FLAY": 26143,
+   "GROUND_RUPTURE_NATURE": 26478,
+   "CARAPACE_OF_CTHUN": 26156,
+   "DIGESTIVE_ACID_TELEPORT": 26220,
+   "TRANSFORM": 26232,
+   "CTHUN_VULNERABLE": 26235,
+   "MOUTH_TENTACLE": 26332,
+   "ROTATE_TRIGGER_CASTTIME": 3000
+  },
+  "casts": [
+   {
+    "spell": "TENTACLE_BIRTH",
+    "spell_id": "26262",
+    "target": "self"
+   },
+   {
+    "spell": "MIND_FLAY",
+    "spell_id": "26143",
+    "target": "target"
+   },
+   {
+    "spell": "ROTATE_TRIGGER",
+    "spell_id": "26137",
+    "target": "self"
+   },
+   {
+    "spell": "GREEN_EYE_BEAM",
+    "spell_id": "26134",
+    "target": "target"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/fankriss": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "fankriss",
+  "boss_entry": null,
+  "spells": {
+   "MORTAL_WOUND": 25646,
+   "ENTANGLE_1": 720,
+   "ENTANGLE_2": 731,
+   "ENTANGLE_3": 1121,
+   "SUMMON_WORM_1": 518,
+   "SUMMON_WORM_2": 25831,
+   "SUMMON_WORM_3": 25832,
+   "SPAWN_ENRAGE": 26662
+  },
+  "casts": [
+   {
+    "spell": "MORTAL_WOUND",
+    "spell_id": "25646",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "MortalWound": [
+    4000,
+    8000
+   ],
+   "EvadeCheck": [
+    2500,
+    2500
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "VEKNISS_HATCHLING",
+    "entry": null
+   },
+   {
+    "npc": "SPAWN_FANKRISS",
+    "entry": 15630
+   }
+  ],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/huhuran": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "huhuran",
+  "boss_entry": null,
+  "spells": {
+   "ACIDSPIT": 26050,
+   "FRENZY": 26051,
+   "NOXIOUSPOISON": 26053,
+   "BERSERK": 26068,
+   "WYVERNSTING": 26180
+  },
+  "casts": [
+   {
+    "spell": "FRENZY",
+    "spell_id": "26051",
+    "target": "self"
+   },
+   {
+    "spell": "WYVERNSTING",
+    "spell_id": "26180",
+    "target": "victim"
+   },
+   {
+    "spell": "ACIDSPIT",
+    "spell_id": "26050",
+    "target": "victim"
+   },
+   {
+    "spell": "NOXIOUSPOISON",
+    "spell_id": "26053",
+    "target": "random"
+   },
+   {
+    "spell": "BERSERK",
+    "spell_id": "26068",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Frenzy": [
+    10000,
+    20000
+   ],
+   "Wyvern": [
+    15000,
+    32000
+   ],
+   "NoxiousPoison": [
+    12000,
+    24000
+   ],
+   "Spit": [
+    5000,
+    10000
+   ]
+  },
+  "health_phase_thresholds": [
+   30.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/ouro": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "ouro",
+  "boss_entry": null,
+  "spells": {
+   "SWEEP": 26103,
+   "SANDBLAST": 26102,
+   "BOULDER": 26616,
+   "BERSERK": 26615,
+   "BIRTH": 26262,
+   "GROUND_RUPTURE": 26100,
+   "SUMMON_BASE": 26133,
+   "DESPAWN_BASE": 26594,
+   "SUBMERGE_VISUAL": 26063,
+   "SUMMON_OURO_MOUNDS": 26058,
+   "SUMMON_TRIGGER": 26284,
+   "SUMMON_OURO": 26061,
+   "SUMMON_SCARABS": 26060,
+   "DIRTMOUND_PASSIVE": 26092,
+   "SUMMON_OURO_MOUND": 26617
+  },
+  "casts": [
+   {
+    "spell": "SUBMERGE_VISUAL",
+    "spell_id": "26063",
+    "target": "self"
+   },
+   {
+    "spell": "SUMMON_OURO_MOUNDS",
+    "spell_id": "26058",
+    "target": "self"
+   },
+   {
+    "spell": "SUMMON_TRIGGER",
+    "spell_id": "26284",
+    "target": "self"
+   },
+   {
+    "spell": "SWEEP",
+    "spell_id": "26103",
+    "target": "self"
+   },
+   {
+    "spell": "SANDBLAST",
+    "spell_id": "26102",
+    "target": "random"
+   },
+   {
+    "spell": "BERSERK",
+    "spell_id": "26615",
+    "target": "self"
+   },
+   {
+    "spell": "SUMMON_OURO_MOUND",
+    "spell_id": "26617",
+    "target": "self"
+   },
+   {
+    "spell": "BOULDER",
+    "spell_id": "26616",
+    "target": "random"
+   },
+   {
+    "spell": "BIRTH",
+    "spell_id": "26262",
+    "target": "self"
+   },
+   {
+    "spell": "SUMMON_SCARABS",
+    "spell_id": "26060",
+    "target": "self"
+   },
+   {
+    "spell": "DIRTMOUND_PASSIVE",
+    "spell_id": "26092",
+    "target": "self"
+   },
+   {
+    "spell": "SUMMON_OURO",
+    "spell_id": "26061",
+    "target": "self"
+   },
+   {
+    "spell": "DIRTMOUND_PASSIVE",
+    "spell_id": "26092",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Sweep": [
+    30000,
+    40000
+   ],
+   "ChangeTarget": [
+    0,
+    10000
+   ],
+   "NoMelee": [
+    3000,
+    3000
+   ],
+   "SummonMound": [
+    10000,
+    10000
+   ],
+   "Submerge": [
+    30000,
+    30000
+   ],
+   "Despawn": [
+    45000,
+    45000
+   ]
+  },
+  "health_phase_thresholds": [
+   20.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/sartura": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "sartura",
+  "boss_entry": null,
+  "spells": {
+   "WHIRLWIND": 26083,
+   "CLEAVE": 25174,
+   "ENRAGE": 8269,
+   "ENRAGEHARD": 27680,
+   "KNOCKBACK": 19813,
+   "GUARD_WHIRLWIND": 26038,
+   "IMPALE": 26025,
+   "FRENZY": 8599
+  },
+  "casts": [
+   {
+    "spell": "WHIRLWIND",
+    "spell_id": "26083",
+    "target": "self"
+   },
+   {
+    "spell": "CLEAVE",
+    "spell_id": "25174",
+    "target": "victim"
+   },
+   {
+    "spell": "ENRAGE",
+    "spell_id": "8269",
+    "target": "self"
+   },
+   {
+    "spell": "ENRAGEHARD",
+    "spell_id": "27680",
+    "target": "self"
+   },
+   {
+    "spell": "GUARD_WHIRLWIND",
+    "spell_id": "26038",
+    "target": "self"
+   },
+   {
+    "spell": "KNOCKBACK",
+    "spell_id": "19813",
+    "target": "victim"
+   },
+   {
+    "spell": "IMPALE",
+    "spell_id": "26025",
+    "target": "self"
+   },
+   {
+    "spell": "IMPALE",
+    "spell_id": "26025",
+    "target": "self"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": "8599",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "WhirlWind": [
+    2000,
+    6000
+   ],
+   "AggroReset": [
+    3000,
+    7000
+   ],
+   "Cleave": [
+    3000,
+    4000
+   ],
+   "Knockback": [
+    8000,
+    14000
+   ],
+   "WhirlWindEnd": [
+    8000,
+    8000
+   ],
+   "EvadeCheck": [
+    2500,
+    2500
+   ],
+   "EnrageHard": [
+    0,
+    0
+   ],
+   "Impale": [
+    0,
+    0
+   ],
+   "Emote": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [
+   30.0,
+   25.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/skeram": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "skeram",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "ARCANE_EXPLOSION",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "EARTH_SHOCK",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "TRUE_FULFILLMENT",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "SUMMON_IMAGES",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/twinemperors": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "twinemperors",
+  "boss_entry": null,
+  "spells": {
+   "BERSERK": 26662,
+   "TWIN_TELEPORT_SCRIPT": 799,
+   "TWIN_TELEPORT_MSG": 800,
+   "TWIN_TELEPORT_VISUAL": 26638,
+   "HEAL_BROTHER": 7393,
+   "UPPERCUT": 26007,
+   "UNBALANCING_STRIKE": 26613,
+   "MUTATE_BUG": 802,
+   "DOUBLE_ATTACK": 18943,
+   "SHADOWBOLT": 26006,
+   "BLIZZARD": 26607,
+   "ARCANEBURST": 568,
+   "EXPLODEBUG": 804,
+   "PIERCE_ARMOR": 6016,
+   "ACID_SPIT": 26050,
+   "MAX_DIST": 20
+  },
+  "casts": [
+   {
+    "spell": "PIERCE_ARMOR",
+    "spell_id": "6016",
+    "target": "victim"
+   },
+   {
+    "spell": "ACID_SPIT",
+    "spell_id": "26050",
+    "target": "victim"
+   },
+   {
+    "spell": "HEAL_BROTHER",
+    "spell_id": "7393",
+    "target": "pOtherBoss"
+   },
+   {
+    "spell": "BLIZZARD",
+    "spell_id": "26607",
+    "target": "p"
+   },
+   {
+    "spell": "ARCANEBURST",
+    "spell_id": "568",
+    "target": "mvic"
+   },
+   {
+    "spell": "SHADOWBOLT",
+    "spell_id": "26006",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "temple_of_ahnqiraj/viscidus": {
+  "instance": "temple_of_ahnqiraj",
+  "boss": "viscidus",
+  "boss_entry": null,
+  "spells": {
+   "POISON_SHOCK": 25993,
+   "POISONBOLT_VOLLEY": 25991,
+   "TOXIN": 26575,
+   "TOXIN_CLOUD": 25989,
+   "VISCIDUS_SLOWED": 26034,
+   "VISCIDUS_SLOWED_MORE": 26036,
+   "VISCIDUS_FREEZE": 25937,
+   "REJOIN_VISCIDUS": 25896,
+   "VISCIDUS_EXPLODE": 25938,
+   "VISCIDUS_SUICIDE": 26003,
+   "DESPAWN_GLOBS": 26608,
+   "MEMBRANE_VISCIDUS": 25994,
+   "VISCIDUS_WEAKNESS": 25926,
+   "VISCIDUS_SHRINKS": 25893,
+   "VISCIDUS_SHRINKS_HP": 27934,
+   "VISCIDUS_GROWS": 25897,
+   "SUMMON_GLOBS": 25885,
+   "VISCIDUS_TELEPORT": 25904,
+   "SUMMONT_TRIGGER": 26564,
+   "GLOB_SPEED": 26633,
+   "WAND_SHOOT": 5019
+  },
+  "casts": [
+   {
+    "spell": "MEMBRANE_VISCIDUS",
+    "spell_id": "25994",
+    "target": "self"
+   },
+   {
+    "spell": "VISCIDUS_WEAKNESS",
+    "spell_id": "25926",
+    "target": "self"
+   },
+   {
+    "spell": "DESPAWN_GLOBS",
+    "spell_id": "26608",
+    "target": "self"
+   },
+   {
+    "spell": "VISCIDUS_SHRINKS_HP",
+    "spell_id": "27934",
+    "target": "self"
+   },
+   {
+    "spell": "VISCIDUS_SUICIDE",
+    "spell_id": "26003",
+    "target": "self"
+   },
+   {
+    "spell": "VISCIDUS_FREEZE",
+    "spell_id": "25937",
+    "target": "self"
+   },
+   {
+    "spell": "VISCIDUS_SLOWED_MORE",
+    "spell_id": "26036",
+    "target": "self"
+   },
+   {
+    "spell": "VISCIDUS_SLOWED",
+    "spell_id": "26034",
+    "target": "self"
+   },
+   {
+    "spell": "VISCIDUS_GROWS",
+    "spell_id": "25897",
+    "target": "self"
+   },
+   {
+    "spell": "POISON_SHOCK",
+    "spell_id": "25993",
+    "target": "self"
+   },
+   {
+    "spell": "POISONBOLT_VOLLEY",
+    "spell_id": "25991",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "Toxin": [
+    30000,
+    40000
+   ],
+   "PoisonShock": [
+    7000,
+    12000
+   ],
+   "PoisonBoltVolley": [
+    10000,
+    15000
+   ],
+   "Grow": [
+    150,
+    150
+   ],
+   "Phase": [
+    0,
+    0
+   ],
+   "RestoreTarget": [
+    800,
+    800
+   ],
+   "ExplodeDelay": [
+    0,
+    0
+   ]
+  },
+  "health_phase_thresholds": [
+   5.0,
+   1.0
+  ],
+  "summons": [
+   {
+    "npc": "VISCIDUS_TRIGGER",
+    "entry": 15922
+   }
+  ],
+  "review_status": "draft"
+ },
+ "uldaman/archaedas": {
+  "instance": "uldaman",
+  "boss": "archaedas",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   50.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "uldaman/ironaya": {
+  "instance": "uldaman",
+  "boss": "ironaya",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "ARCINGSMASH",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "WSTOMP",
+    "spell_id": null,
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   50.0,
+   25.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "upper_karazhan_halls/anomalus": {
+  "instance": "upper_karazhan_halls",
+  "boss": "anomalus",
+  "boss_entry": null,
+  "spells": {
+   "ARCANE_OVERLOAD": 51100,
+   "ARCANE_DAMPENING": 51101,
+   "UNSTABLE_MAGIC": 51102,
+   "ARCANE_PRISON": 51107,
+   "UNSTABLE_ZONE": 51103,
+   "UNSTABLE_DAMAGE": 51104
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "upper_karazhan_halls/echo_of_medivh": {
+  "instance": "upper_karazhan_halls",
+  "boss": "echo_of_medivh",
+  "boss_entry": null,
+  "spells": {
+   "ENRAGE": 8269,
+   "GUARDIANS_IRE": 51109,
+   "MEDIVHS_FURY": 51110,
+   "GAZE_OF_THE_GUARDIAN": 51111,
+   "PYROBLAST": 51112,
+   "FLAMESTRIKE": 51113,
+   "FROST_NOVA": 51114,
+   "ARCANE_BLAST": 51116,
+   "FROSTBOLT": 51118,
+   "ARCANE_MISSILES": 51120,
+   "SHADEBOLT": 51121,
+   "SHADOWBOLT": 51122,
+   "SHADOWFORM": 51125
+  },
+  "casts": [
+   {
+    "spell": "GAZE_OF_THE_GUARDIAN",
+    "spell_id": "51111",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   80.0,
+   50.0,
+   20.0
+  ],
+  "summons": [
+   {
+    "npc": "SHADE_OF_MEDIVH",
+    "entry": 59994
+   },
+   {
+    "npc": "UNSTOPPABLE_INFERNAL",
+    "entry": 59995
+   },
+   {
+    "npc": "UNSTOPPABLE_INFERNAL",
+    "entry": 59995
+   },
+   {
+    "npc": "UNSTOPPABLE_INFERNAL",
+    "entry": 59995
+   }
+  ],
+  "review_status": "draft"
+ },
+ "upper_karazhan_halls/incantagos": {
+  "instance": "upper_karazhan_halls",
+  "boss": "incantagos",
+  "boss_entry": null,
+  "spells": {
+   "DRACONIC_LEY_CHARGE": 51176,
+   "SUMMON_LEY_SEEKER": 51178,
+   "SUMMON_WHELPS": 51179,
+   "BLIZZARD": 51180,
+   "GAZE_OF_INCANTAGOS": 51181,
+   "GUIDED_LEY_BEAM": 51182,
+   "ARCANE_MISSILES": 51184,
+   "LEY_LINE_DISTURBANCE": 51185,
+   "CURSE_OF_MANASCALE": 51186,
+   "ARCANE_CHANNELING": 51187
+  },
+  "casts": [
+   {
+    "spell": "SUMMON_LEY_SEEKER",
+    "spell_id": "51178",
+    "target": "self"
+   },
+   {
+    "spell": "SUMMON_WHELPS",
+    "spell_id": "51179",
+    "target": "self"
+   },
+   {
+    "spell": "LEY_LINE_DISTURBANCE",
+    "spell_id": "51185",
+    "target": "self"
+   },
+   {
+    "spell": "BLIZZARD",
+    "spell_id": "51180",
+    "target": "random"
+   },
+   {
+    "spell": "CURSE_OF_MANASCALE",
+    "spell_id": "51186",
+    "target": "self"
+   },
+   {
+    "spell": "GAZE_OF_INCANTAGOS",
+    "spell_id": "51181",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   40.0
+  ],
+  "summons": [
+   {
+    "npc": "LEY_SEEKER",
+    "entry": 59989
+   },
+   {
+    "npc": "LEY_SEEKER",
+    "entry": 59989
+   },
+   {
+    "npc": "LEY_SEEKER",
+    "entry": 59989
+   },
+   {
+    "npc": "LEY_SEEKER",
+    "entry": 59989
+   }
+  ],
+  "review_status": "draft"
+ },
+ "upper_karazhan_halls/keeper_gnarlmoon": {
+  "instance": "upper_karazhan_halls",
+  "boss": "keeper_gnarlmoon",
+  "boss_entry": null,
+  "spells": {
+   "BLUE_MOON_AURA": 51080,
+   "RED_MOON_AURA": 51081,
+   "WORGEN_DIMENSION": 51096
+  },
+  "casts": [],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   66.6,
+   33.3
+  ],
+  "summons": [
+   {
+    "npc": "BLUE_OWL",
+    "entry": 59998
+   },
+   {
+    "npc": "BLUE_OWL",
+    "entry": 59998
+   },
+   {
+    "npc": "RED_OWL",
+    "entry": 59997
+   },
+   {
+    "npc": "RED_OWL",
+    "entry": 59997
+   }
+  ],
+  "review_status": "draft"
+ },
+ "upper_karazhan_halls/kings_council": {
+  "instance": "upper_karazhan_halls",
+  "boss": "kings_council",
+  "boss_entry": null,
+  "spells": {
+   "SHADOWBOLT_1": 51212,
+   "SHADOWBOLT_2": 51213,
+   "HEAL": 51214,
+   "SHADOWBOLT_VOLLEY": 51215,
+   "REDEMPTION": 51216,
+   "SILENCE": 51217,
+   "EPISCOPACY": 51218,
+   "KINGS_FURY": 51229,
+   "SHIELD_BASH": 51219,
+   "ADVANCE": 51220,
+   "FORTIFY": 51221,
+   "SIEGE_EQUIPMENT": 51223,
+   "GLORY": 51224,
+   "GLORIOUS_CLEAVE": 51225,
+   "TRAMPLE": 51226,
+   "SUMMON_GHASTLY_HORSEMEN": 51227,
+   "VOID_ZONE": 28863,
+   "INVULNERABILITY": 51228,
+   "SUMMON_PAWN": 51230,
+   "KINGS_CURSE": 51231
+  },
+  "casts": [
+   {
+    "spell": "HEAL",
+    "spell_id": "51214",
+    "target": "pPawn"
+   },
+   {
+    "spell": "SHADOWBOLT_VOLLEY",
+    "spell_id": "51215",
+    "target": "victim"
+   },
+   {
+    "spell": "REDEMPTION",
+    "spell_id": "51216",
+    "target": "pPawn"
+   },
+   {
+    "spell": "SILENCE",
+    "spell_id": "51217",
+    "target": "random"
+   },
+   {
+    "spell": "SHIELD_BASH",
+    "spell_id": "51219",
+    "target": "victim"
+   },
+   {
+    "spell": "ADVANCE",
+    "spell_id": "51220",
+    "target": "random"
+   },
+   {
+    "spell": "FORTIFY",
+    "spell_id": "51221",
+    "target": "self"
+   },
+   {
+    "spell": "SIEGE_EQUIPMENT",
+    "spell_id": "51223",
+    "target": "self"
+   },
+   {
+    "spell": "TRAMPLE",
+    "spell_id": "51226",
+    "target": "victim"
+   },
+   {
+    "spell": "SUMMON_GHASTLY_HORSEMEN",
+    "spell_id": "51227",
+    "target": "self"
+   },
+   {
+    "spell": "GLORIOUS_CLEAVE",
+    "spell_id": "51225",
+    "target": "victim"
+   },
+   {
+    "spell": "VOID_ZONE",
+    "spell_id": "28863",
+    "target": "random"
+   },
+   {
+    "spell": "SUMMON_PAWN",
+    "spell_id": "51230",
+    "target": "self"
+   },
+   {
+    "spell": "KINGS_CURSE",
+    "spell_id": "51231",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   75.0
+  ],
+  "summons": [
+   {
+    "npc": "GHASTLY_HORESEMAN",
+    "entry": 59969
+   }
+  ],
+  "review_status": "draft"
+ },
+ "upper_karazhan_halls/kruul": {
+  "instance": "upper_karazhan_halls",
+  "boss": "kruul",
+  "boss_entry": null,
+  "spells": {
+   "REMORSELESS_STRIKES": 51164,
+   "MARK_OF_THE_HIGHLORD": 51166,
+   "CALL_FROM_THE_TWISTING_NETHER": 51170,
+   "WINGS_OF_OBLIVION": 51172,
+   "VOID_BOLT_VOLLEY": 51174
+  },
+  "casts": [
+   {
+    "spell": "VOID_BOLT_VOLLEY",
+    "spell_id": "51174",
+    "target": "victim"
+   },
+   {
+    "spell": "CALL_FROM_THE_TWISTING_NETHER",
+    "spell_id": "51170",
+    "target": "random"
+   },
+   {
+    "spell": "WINGS_OF_OBLIVION",
+    "spell_id": "51172",
+    "target": "self"
+   },
+   {
+    "spell": "CALL_FROM_THE_TWISTING_NETHER",
+    "spell_id": "51170",
+    "target": "victim"
+   },
+   {
+    "spell": "REMORSELESS_STRIKES",
+    "spell_id": "51164",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   25.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "upper_karazhan_halls/sanv_tasdal": {
+  "instance": "upper_karazhan_halls",
+  "boss": "sanv_tasdal",
+  "boss_entry": null,
+  "spells": {
+   "RIFT_ENTANGLEMENT": 51194,
+   "NETHER_BANISHMENT": 51195,
+   "CURSE_OF_THE_RIFT": 51196,
+   "NETHERBOLT": 51198,
+   "OVERFLOWING_HATRED": 51204,
+   "RIFT_FEEDBACK": 51205,
+   "ENRAGE": 51206,
+   "LEADER_OF_THE_TRIBE": 51207,
+   "OPENING_THE_RIFT": 51209
+  },
+  "casts": [
+   {
+    "spell": "RIFT_ENTANGLEMENT",
+    "spell_id": "51194",
+    "target": "random"
+   },
+   {
+    "spell": "NETHER_BANISHMENT",
+    "spell_id": "51195",
+    "target": "random"
+   },
+   {
+    "spell": "CURSE_OF_THE_RIFT",
+    "spell_id": "51196",
+    "target": "self"
+   },
+   {
+    "spell": "NETHERBOLT",
+    "spell_id": "51198",
+    "target": "random"
+   },
+   {
+    "spell": "OVERFLOWING_HATRED",
+    "spell_id": "51204",
+    "target": "self"
+   },
+   {
+    "spell": "RIFT_FEEDBACK",
+    "spell_id": "51205",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   80.0,
+   50.0,
+   20.0
+  ],
+  "summons": [
+   {
+    "npc": "RIFT_PORTAL",
+    "entry": 59973
+   },
+   {
+    "npc": "RIFT_PORTAL",
+    "entry": 59973
+   },
+   {
+    "npc": "RIFT_PORTAL",
+    "entry": 59973
+   }
+  ],
+  "review_status": "draft"
+ },
+ "windhorn_canyon/bonespeaker_narlgom": {
+  "instance": "windhorn_canyon",
+  "boss": "bonespeaker_narlgom",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "SUMMON_ROTAG",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "BONE_ARMOR",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "RAIN_OF_FIRE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "TARGETED_ARCANE_CHANNELING",
+    "spell_id": null,
+    "target": "rotag"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/arlokk": {
+  "instance": "zulgurub",
+  "boss": "arlokk",
+  "boss_entry": 14515,
+  "spells": {
+   "SHADOWWORDPAIN": 24212,
+   "GOUGE": 12540,
+   "MARK": 24210,
+   "CLEAVE": 26350,
+   "PANTHER_TRANSFORM": 24190,
+   "BACKSTAB": 15582,
+   "TOURBILLON": 15589,
+   "ATTAQUE_MENTALE": 15587,
+   "ROSSER": 3391,
+   "RAVAGE": 24213
+  },
+  "casts": [
+   {
+    "spell": "SHADOWWORDPAIN",
+    "spell_id": "24212",
+    "target": "victim"
+   },
+   {
+    "spell": "BACKSTAB",
+    "spell_id": "15582",
+    "target": "victim"
+   },
+   {
+    "spell": "MARK",
+    "spell_id": "24210",
+    "target": "pMark"
+   },
+   {
+    "spell": "ROSSER",
+    "spell_id": "3391",
+    "target": "victim"
+   },
+   {
+    "spell": "RAVAGE",
+    "spell_id": "24213",
+    "target": "victim"
+   },
+   {
+    "spell": "GOUGE",
+    "spell_id": "12540",
+    "target": "victim"
+   },
+   {
+    "spell": "TOURBILLON",
+    "spell_id": "15589",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Thrash_": [
+    5000,
+    9000
+   ],
+   "Rosser_": [
+    5000,
+    9000
+   ],
+   "Backstab_": [
+    6000,
+    12000
+   ],
+   "Gouge_": [
+    17000,
+    27000
+   ],
+   "Visible_": [
+    35000,
+    50000
+   ],
+   "ShadowWordPain_": [
+    15000,
+    15000
+   ],
+   "Mark_": [
+    15000,
+    15000
+   ],
+   "Vanish_": [
+    35000,
+    35000
+   ],
+   "Tourbillon_": [
+    16000,
+    16000
+   ],
+   "Ravage_": [
+    16000,
+    16000
+   ],
+   "Summon_": [
+    5000,
+    5000
+   ],
+   "SwitchToTroll_": [
+    45000,
+    45000
+   ],
+   "UpdateTarget_": [
+    2000,
+    2000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "ZULIAN_PROWLER",
+    "entry": 15101
+   }
+  ],
+  "review_status": "draft"
+ },
+ "zulgurub/gahzranka": {
+  "instance": "zulgurub",
+  "boss": "gahzranka",
+  "boss_entry": null,
+  "spells": {
+   "FROSTBREATH": 16099,
+   "MASSIVEGEYSER": 22421,
+   "SLAM": 24326
+  },
+  "casts": [
+   {
+    "spell": "FROSTBREATH",
+    "spell_id": "16099",
+    "target": "victim"
+   },
+   {
+    "spell": "MASSIVEGEYSER",
+    "spell_id": "22421",
+    "target": "target"
+   },
+   {
+    "spell": "SLAM",
+    "spell_id": "24326",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/grilek": {
+  "instance": "zulgurub",
+  "boss": "grilek",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "AVARTAR",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "GROUNDTREMOR",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/hakkar": {
+  "instance": "zulgurub",
+  "boss": "hakkar",
+  "boss_entry": 14834,
+  "spells": {
+   "BLOODSIPHON_STUN": 24324,
+   "BLOODSIPHON_DAMAGE": 24323,
+   "BLOODSIPHON_HEAL": 24322,
+   "CORRUPTEDBLOOD": 24328,
+   "CAUSEINSANITY": 24327,
+   "WILLOFHAKKAR": 24178,
+   "ENRAGE": 24318,
+   "BERSERK": 27680,
+   "ASPECT_OF_JEKLIK": 24687,
+   "ASPECT_OF_VENOXIS": 24688,
+   "ASPECT_OF_MARLI": 24686,
+   "ASPECT_OF_THEKAL": 24689,
+   "ASPECT_OF_ARLOKK": 24690,
+   "POISONOUS_BLOOD": 24321
+  },
+  "casts": [
+   {
+    "spell": "BLOODSIPHON_STUN",
+    "spell_id": "24324",
+    "target": "self"
+   },
+   {
+    "spell": "CORRUPTEDBLOOD",
+    "spell_id": "24328",
+    "target": "target"
+   },
+   {
+    "spell": "CAUSEINSANITY",
+    "spell_id": "24327",
+    "target": "victim"
+   },
+   {
+    "spell": "BERSERK",
+    "spell_id": "27680",
+    "target": "self"
+   },
+   {
+    "spell": "ASPECT_OF_JEKLIK",
+    "spell_id": "24687",
+    "target": "victim"
+   },
+   {
+    "spell": "ASPECT_OF_VENOXIS",
+    "spell_id": "24688",
+    "target": "victim"
+   },
+   {
+    "spell": "ASPECT_OF_MARLI",
+    "spell_id": "24686",
+    "target": "victim"
+   },
+   {
+    "spell": "ASPECT_OF_THEKAL",
+    "spell_id": "24689",
+    "target": "self"
+   },
+   {
+    "spell": "ASPECT_OF_ARLOKK",
+    "spell_id": "24690",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   5.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/hazzarah": {
+  "instance": "zulgurub",
+  "boss": "hazzarah",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "MANABURN",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SLEEP",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/jeklik": {
+  "instance": "zulgurub",
+  "boss": "jeklik",
+  "boss_entry": null,
+  "spells": {
+   "GREENCHANNELING": 13540,
+   "BAT_FORM": 23966,
+   "BOMB": 19629,
+   "THROW_LIQUID_FIRE": 23970,
+   "TRANSFORMVISUAL": 24085,
+   "BLOODLEECH": 22644,
+   "SWOOP": 23919,
+   "CHARGE": 24408,
+   "SONICBURST": 23918,
+   "PIERCEARMOR": 12097,
+   "SHADOW_WORD_PAIN": 23952,
+   "MIND_FLAY": 23953,
+   "GREAT_HEAL": 23954,
+   "CURSE_OF_BLOOD": 16098,
+   "SCREECH": 6605,
+   "EXPLOSION": 24024,
+   "DEMORALIZING_SHOUT": 23511,
+   "BATTLE_COMBAT": 5115,
+   "INFECTED_BITE": 16128,
+   "THRASH": 3391
+  },
+  "casts": [
+   {
+    "spell": "SONICBURST",
+    "spell_id": "23918",
+    "target": "victim"
+   },
+   {
+    "spell": "SWOOP",
+    "spell_id": "23919",
+    "target": "victim"
+   },
+   {
+    "spell": "PIERCEARMOR",
+    "spell_id": "12097",
+    "target": "victim"
+   },
+   {
+    "spell": "SHADOW_WORD_PAIN",
+    "spell_id": "23952",
+    "target": "target"
+   },
+   {
+    "spell": "GREAT_HEAL",
+    "spell_id": "23954",
+    "target": "self"
+   },
+   {
+    "spell": "MIND_FLAY",
+    "spell_id": "23953",
+    "target": "target"
+   },
+   {
+    "spell": "CURSE_OF_BLOOD",
+    "spell_id": "16098",
+    "target": "target"
+   },
+   {
+    "spell": "SCREECH",
+    "spell_id": "6605",
+    "target": "victim"
+   },
+   {
+    "spell": "BATTLE_COMBAT",
+    "spell_id": "5115",
+    "target": "self"
+   },
+   {
+    "spell": "INFECTED_BITE",
+    "spell_id": "16128",
+    "target": "victim"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": "3391",
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   50.0,
+   40.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/jindo": {
+  "instance": "zulgurub",
+  "boss": "jindo",
+  "boss_entry": null,
+  "spells": {
+   "BRAIN_WASH_TOTEM": 24262,
+   "POWERFULL_HEALING_WARD": 24309,
+   "HEX": 17172,
+   "DELUSIONS_OF_JINDO": 24306,
+   "SHADE_OF_JINDO": 24308,
+   "BANISH": 24466,
+   "BRAINWASH": 24261,
+   "HEAL": 24311,
+   "SHADOWSHOCK": 24458,
+   "INVISIBLE": 24307
+  },
+  "casts": [
+   {
+    "spell": "BRAIN_WASH_TOTEM",
+    "spell_id": "24262",
+    "target": "self"
+   },
+   {
+    "spell": "POWERFULL_HEALING_WARD",
+    "spell_id": "24309",
+    "target": "self"
+   },
+   {
+    "spell": "HEX",
+    "spell_id": "17172",
+    "target": "victim"
+   },
+   {
+    "spell": "DELUSIONS_OF_JINDO",
+    "spell_id": "24306",
+    "target": "target"
+   },
+   {
+    "spell": "SHADE_OF_JINDO",
+    "spell_id": "24308",
+    "target": "random"
+   },
+   {
+    "spell": "BANISH",
+    "spell_id": "24466",
+    "target": "target"
+   },
+   {
+    "spell": "SHADOWSHOCK",
+    "spell_id": "24458",
+    "target": "victim"
+   },
+   {
+    "spell": "BRAINWASH",
+    "spell_id": "24261",
+    "target": "random"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "POWERFULL_HEALING_WARD",
+    "entry": 14987
+   }
+  ],
+  "review_status": "draft"
+ },
+ "zulgurub/mandokir": {
+  "instance": "zulgurub",
+  "boss": "mandokir",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "MOUNT",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "LEVEL_UP",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "ENRAGE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "WATCH",
+    "spell_id": null,
+    "target": "pPlayer"
+   },
+   {
+    "spell": "DECAPITATE",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "CHARGE",
+    "spell_id": null,
+    "target": "pPlayer"
+   },
+   {
+    "spell": "FEAR",
+    "spell_id": null,
+    "target": "player"
+   },
+   {
+    "spell": "WHIRLWIND",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "MORTAL_STRIKE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SUNDERARMOR",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "THRASH",
+    "spell_id": null,
+    "target": "me"
+   },
+   {
+    "spell": "EXECUTE",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Charge_": [
+    5000,
+    10000
+   ],
+   "Thrash_": [
+    5000,
+    9000
+   ],
+   "SunderArmor_": [
+    10000,
+    15000
+   ],
+   "Watch_": [
+    20000,
+    20000
+   ],
+   "Whirlwind_": [
+    18000,
+    18000
+   ],
+   "Fear_": [
+    24000,
+    24000
+   ],
+   "MortalStrike_": [
+    15000,
+    15000
+   ],
+   "ChargeCasted_": [
+    2000,
+    2000
+   ],
+   "Execute_": [
+    10000,
+    10000
+   ],
+   "Rez": [
+    2500,
+    2500
+   ]
+  },
+  "health_phase_thresholds": [
+   50.0
+  ],
+  "summons": [
+   {
+    "npc": "CHAINED_SPIRIT",
+    "entry": null
+   },
+   {
+    "npc": "OHGAN",
+    "entry": null
+   }
+  ],
+  "review_status": "draft"
+ },
+ "zulgurub/marli": {
+  "instance": "zulgurub",
+  "boss": "marli",
+  "boss_entry": null,
+  "spells": {
+   "CHARGE": 22911,
+   "ENVELOPINGWEBS": 24110,
+   "POISONVOLLEY": 24099,
+   "SPIDER_FORM": 24084,
+   "DRAIN_LIFE": 24300,
+   "CORROSIVE_POISON": 24111,
+   "TRANSFORM_BACK": 24085,
+   "TRASH": 3391,
+   "HATCH": 24083,
+   "AGGRANDIR": 24109,
+   "LEVELUP": 24312
+  },
+  "casts": [
+   {
+    "spell": "HATCH",
+    "spell_id": "24083",
+    "target": "self"
+   },
+   {
+    "spell": "POISONVOLLEY",
+    "spell_id": "24099",
+    "target": "victim"
+   },
+   {
+    "spell": "DRAIN_LIFE",
+    "spell_id": "24300",
+    "target": "victim"
+   },
+   {
+    "spell": "AGGRANDIR",
+    "spell_id": "24109",
+    "target": "self"
+   },
+   {
+    "spell": "ENVELOPINGWEBS",
+    "spell_id": "24110",
+    "target": "victim"
+   },
+   {
+    "spell": "CHARGE",
+    "spell_id": "22911",
+    "target": "random"
+   },
+   {
+    "spell": "CORROSIVE_POISON",
+    "spell_id": "24111",
+    "target": "victim"
+   },
+   {
+    "spell": "SPIDER_FORM",
+    "spell_id": "24084",
+    "target": "self"
+   },
+   {
+    "spell": "TRANSFORM_BACK",
+    "spell_id": "24085",
+    "target": "self"
+   },
+   {
+    "spell": "TRASH",
+    "spell_id": "3391",
+    "target": "victim"
+   },
+   {
+    "spell": "LEVELUP",
+    "spell_id": "24312",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "PoisonVolley_": [
+    10000,
+    20000
+   ],
+   "DrainLife_": [
+    20000,
+    50000
+   ],
+   "SpawnSpider_": [
+    20000,
+    30000
+   ],
+   "Aggrandir_": [
+    10000,
+    20000
+   ],
+   "Webs_": [
+    10000,
+    20000
+   ],
+   "CorrosivePoison_": [
+    25000,
+    35000
+   ],
+   "Trash_": [
+    10000,
+    20000
+   ],
+   "Aspect_": [
+    12000,
+    12000
+   ],
+   "TransformBack_": [
+    35000,
+    35000
+   ],
+   "Charge_": [
+    1000,
+    1000
+   ],
+   "LevelUp_": [
+    3000,
+    3000
+   ]
+  },
+  "health_phase_thresholds": [],
+  "summons": [
+   {
+    "npc": "SPAWN_OF_MARLI",
+    "entry": 15041
+   },
+   {
+    "npc": "SPAWN_OF_MARLI",
+    "entry": 15041
+   }
+  ],
+  "review_status": "draft"
+ },
+ "zulgurub/renataki": {
+  "instance": "zulgurub",
+  "boss": "renataki",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "ENRAGE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "SURINER_ZONE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "THOUSANDBLADES",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [
+   30.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/thekal": {
+  "instance": "zulgurub",
+  "boss": "thekal",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "TIGER_FORM",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "MORTALCLEAVE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "CHARGE",
+    "spell_id": null,
+    "target": "target"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "ENRAGE",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "SHIELD",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "BLOODLUST",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "GREATERHEAL",
+    "spell_id": null,
+    "target": "self"
+   },
+   {
+    "spell": "GREATERHEAL",
+    "spell_id": null,
+    "target": "random"
+   },
+   {
+    "spell": "DISARM",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SWEEPINGSTRIKES",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "SINISTERSTRIKE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "GOUGE",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "KICK",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "BLIND",
+    "spell_id": null,
+    "target": "victim"
+   }
+  ],
+  "timers_ms": {
+   "Ressurect": [
+    8000,
+    8000
+   ]
+  },
+  "health_phase_thresholds": [
+   50.0,
+   11.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/venoxis": {
+  "instance": "zulgurub",
+  "boss": "venoxis",
+  "boss_entry": null,
+  "spells": {
+   "HOLY_NOVA": 23858,
+   "DISPELL": 23859,
+   "HOLY_FIRE": 23860,
+   "RENEW": 23895,
+   "HOLY_WRATH": 23979,
+   "SNAKE_FORM": 23849,
+   "TRASH": 3391,
+   "POISON_CLOUD": 23861,
+   "VENOMSPIT": 23862,
+   "FRENZY": 8269,
+   "PARASITIC": 23865
+  },
+  "casts": [
+   {
+    "spell": "HOLY_NOVA",
+    "spell_id": "23858",
+    "target": "self"
+   },
+   {
+    "spell": "DISPELL",
+    "spell_id": "23859",
+    "target": "self"
+   },
+   {
+    "spell": "HOLY_FIRE",
+    "spell_id": "23860",
+    "target": "victim"
+   },
+   {
+    "spell": "RENEW",
+    "spell_id": "23895",
+    "target": "self"
+   },
+   {
+    "spell": "HOLY_WRATH",
+    "spell_id": "23979",
+    "target": "victim"
+   },
+   {
+    "spell": "POISON_CLOUD",
+    "spell_id": "23861",
+    "target": "victim"
+   },
+   {
+    "spell": "TRASH",
+    "spell_id": "3391",
+    "target": "victim"
+   },
+   {
+    "spell": "VENOMSPIT",
+    "spell_id": "23862",
+    "target": "random"
+   },
+   {
+    "spell": "PARASITIC",
+    "spell_id": "23865",
+    "target": "random"
+   },
+   {
+    "spell": "FRENZY",
+    "spell_id": "8269",
+    "target": "self"
+   }
+  ],
+  "timers_ms": {
+   "HolyNova_": [
+    14000,
+    16000
+   ],
+   "Dispell_": [
+    16000,
+    18000
+   ],
+   "HolyFire_": [
+    8000,
+    12000
+   ],
+   "Renew_": [
+    20000,
+    22000
+   ],
+   "HolyWrath_": [
+    15000,
+    25000
+   ],
+   "PoisonCloud_": [
+    7000,
+    10000
+   ],
+   "Trash_": [
+    10000,
+    20000
+   ],
+   "VenomSpit_": [
+    15000,
+    20000
+   ],
+   "Parasitic_": [
+    1000,
+    1000
+   ]
+  },
+  "health_phase_thresholds": [
+   50.0,
+   20.0
+  ],
+  "summons": [],
+  "review_status": "draft"
+ },
+ "zulgurub/wushoolay": {
+  "instance": "zulgurub",
+  "boss": "wushoolay",
+  "boss_entry": null,
+  "spells": {},
+  "casts": [
+   {
+    "spell": "LIGHTNINGCLOUD",
+    "spell_id": null,
+    "target": "victim"
+   },
+   {
+    "spell": "LIGHTNINGWAVE",
+    "spell_id": null,
+    "target": "target"
+   }
+  ],
+  "timers_ms": {},
+  "health_phase_thresholds": [],
+  "summons": [],
+  "review_status": "draft"
+ }
+}

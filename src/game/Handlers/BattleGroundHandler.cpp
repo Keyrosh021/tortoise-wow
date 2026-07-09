@@ -36,6 +36,9 @@
 #include "World.h"
 #include "Anticheat.h"
 
+// Playerbot bridge: instant-fill a BG queue with bots so a solo player pops immediately.
+void Playerbot_InstantFillBg(Player* realPlayer, uint32 bgTypeId, uint32 bracketId);
+
 void WorldSession::HandleBattlemasterHelloOpcode(WorldPacket & recv_data)
 {
     ObjectGuid guid;
@@ -214,6 +217,11 @@ void WorldSession::HandleBattlemasterJoinOpcode(WorldPacket & recv_data)
         sBattleGroundMgr.BuildBattleGroundStatusPacket(&data, bg, queueSlot, STATUS_WAIT_QUEUE, avgTime, 0);
         SendPacket(&data);
         DEBUG_LOG("Battleground: player joined queue for bg queue type %u bg type %u: GUID %u, NAME %s", bgQueueTypeId, bgTypeId, _player->GetGUIDLow(), _player->GetName());
+
+        // PLAYERBOT INSTANT FILL (TurtleLFG-style): a solo real player would otherwise wait forever
+        // for a natural pop. Immediately enqueue + port enough bots on both factions so the queue
+        // pops now and the player gets an instant match.
+        Playerbot_InstantFillBg(_player, bgTypeId, bgBracketId);
     }
     else
     {
@@ -395,12 +403,12 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPacket &recv_data)
 
     if (bgTypeId == BATTLEGROUND_TYPE_NONE)
     {
-        DEBUG_LOG("BattlegroundHandler: invalid bg map (%u) received.", mapId);
+        sLog.outString("BGPORT-H %s: invalid bg map %u", _player->GetName(), mapId);
         return;
     }
     if (!_player->InBattleGroundQueue())
     {
-        DEBUG_LOG("BattlegroundHandler: Invalid CMSG_BATTLEFIELD_PORT received from player (%u), he is not in bg_queue.", _player->GetGUIDLow());
+        sLog.outString("BGPORT-H %s: not in bg queue (action=%u)", _player->GetName(), action);
         return;
     }
 
@@ -411,13 +419,13 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPacket &recv_data)
     GroupQueueInfo ginfo;
     if (!bgQueue.GetPlayerGroupInfoData(_player->GetObjectGuid(), &ginfo))
     {
-        DEBUG_LOG("BattlegroundHandler: itrplayerstatus not found.");
+        sLog.outString("BGPORT-H %s: no queue info (action=%u)", _player->GetName(), action);
         return;
     }
     // if action == 1, then instanceId is required
     if (!ginfo.IsInvitedToBGInstanceGUID && action == 1)
     {
-        DEBUG_LOG("BattlegroundHandler: instance not found.");
+        sLog.outString("BGPORT-H %s: not invited (action=%u)", _player->GetName(), action);
         return;
     }
 
@@ -428,7 +436,7 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPacket &recv_data)
         bg = sBattleGroundMgr.GetBattleGroundTemplate(bgTypeId);
     if (!bg)
     {
-        DEBUG_LOG("BattlegroundHandler: bg_template not found for type id %u.", bgTypeId);
+        sLog.outString("BGPORT-H %s: bg instance %u not found for type %u (action=%u)", _player->GetName(), ginfo.IsInvitedToBGInstanceGUID, bgTypeId, action);
         return;
     }
 
@@ -449,6 +457,7 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPacket &recv_data)
         // Turtle: Don't allow entering the battleground while in combat.
         if (_player->IsInCombat() && _player->IsPvP())
         {
+            sLog.outString("BGPORT-H %s: blocked, in combat+pvp", _player->GetName());
             _player->SendEquipError(EQUIP_ERR_NOT_IN_COMBAT, nullptr);
             return;
         }
@@ -511,6 +520,7 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPacket &recv_data)
                 }
             }
 
+            sLog.outString("BGPORT-H %s: PORTING to bg instance %u map %u", _player->GetName(), bg->GetInstanceID(), bg->GetMapId());
             sBattleGroundMgr.BuildBattleGroundStatusPacket(&data, bg, queueSlot, STATUS_IN_PROGRESS, 0, bg->GetStartTime());
             _player->GetSession()->SendPacket(&data);
             // remove battleground queue status from BGmgr

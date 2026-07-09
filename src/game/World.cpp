@@ -63,6 +63,7 @@
 #include "Util.h"
 #include "CharacterDatabaseCleaner.h"
 #include "LFGMgr.h"
+#include "LFG/TurtleLFGMgr.h"
 #include "AutoBroadCastMgr.h"
 #include "Transports/TransportMgr.h"
 // PlayerBotMgr.h removed — Penqle stub binned for cmangos port
@@ -2082,6 +2083,9 @@ void LoadPlayerEggLoot();
     sObjectMgr.LoadAreaTriggerTeleports();                  // must be after item template load
     sLog.outString("Loading quest area trigger...");
     sObjectMgr.LoadQuestAreaTriggers();                     // must be after LoadQuests
+
+    sLog.outString("Loading Turtle LFG dungeons...");
+    sTurtleLFGMgr.LoadDungeons();                           // must be after LoadAreaTriggerTeleports
     sLog.outString("Loading tavern area triggers...");
     sObjectMgr.LoadTavernAreaTriggers();
     sLog.outString("Loading battlegroun entry triggers...");
@@ -2568,6 +2572,7 @@ void World::Update(uint32 diff)
 
     uint32 lfgUpdateTime = WorldTimer::getMSTime();
     sLFGMgr.Update(diff);
+    sTurtleLFGMgr.Update(diff);
     lfgUpdateTime = WorldTimer::getMSTimeDiffToNow(lfgUpdateTime);
 
     uint32 guardUpdateTime = WorldTimer::getMSTime();

@@ -128,6 +128,83 @@ namespace ai
         std::list<ObjectGuid> GetPossibleHazards() override;
     };
 
+    // DB-DRIVEN HAZARDS: reads ai_playerbot_encounter_mechanic rows (hazard_creature /
+    // hazard_object, entry in spell_id column) for any engaged known boss and feeds the shared
+    // hazard cache -- per-boss avoidance without hardcoded strategy classes.
+    class DbEncounterHazardTrigger : public Trigger
+    {
+    public:
+        DbEncounterHazardTrigger(PlayerbotAI* ai, std::string name = "db encounter hazard")
+        : Trigger(ai, name, 1) {}
+
+        bool IsActive() override;
+    };
+
+    // Bot carries a run-out debuff (e.g. Geddon Living Bomb 20475) per encounter table -> spread.
+    class DbRunOutDebuffTrigger : public Trigger
+    {
+    public:
+        DbRunOutDebuffTrigger(PlayerbotAI* ai, std::string name = "db run out debuff")
+        : Trigger(ai, name, 1) {}
+
+        bool IsActive() override;
+    };
+
+    // Non-tank standing in the frontal cone of an engaged known boss whose encounter rows mark
+    // frontal danger (breath/cleave) -> get behind it.
+    class DbAvoidFrontalTrigger : public Trigger
+    {
+    public:
+        DbAvoidFrontalTrigger(PlayerbotAI* ai, std::string name = "db avoid frontal")
+        : Trigger(ai, name, 1) {}
+
+        bool IsActive() override;
+    };
+
+    // TANK side of face-away: this bot tanks a known frontal-danger boss while group members
+    // stand in its frontal arc -> reposition so the boss turns away from them.
+    class DbTankFaceAwayTrigger : public Trigger
+    {
+    public:
+        DbTankFaceAwayTrigger(PlayerbotAI* ai, std::string name = "db tank face away")
+        : Trigger(ai, name, 2) {}
+
+        bool IsActive() override;
+    };
+
+    // Off-tank taunt swap: the boss's current tank carries the stacking debuff at/over the
+    // row's threshold (radius column) -> this off-tank taunts (BWL drakes, etc.).
+    class DbTankSwapTrigger : public Trigger
+    {
+    public:
+        DbTankSwapTrigger(PlayerbotAI* ai, std::string name = "db tank swap")
+        : Trigger(ai, name, 2) {}
+
+        bool IsActive() override;
+    };
+
+    // Staged tanks (Ragnaros): off-tanks hold OUTSIDE the knockback zone while one tank is
+    // active, so a knockback never leaves the boss with zero tanks in range.
+    class DbStagedTanksTrigger : public Trigger
+    {
+    public:
+        DbStagedTanksTrigger(PlayerbotAI* ai, std::string name = "db staged tanks")
+        : Trigger(ai, name, 2) {}
+
+        bool IsActive() override;
+    };
+
+    // 4H choreography v2 slice: carrying one boss's Mark while near a DIFFERENT tank_swap boss
+    // stacks both marks -> back away from the second boss (keeps corners separated).
+    class DbMarkSeparationTrigger : public Trigger
+    {
+    public:
+        DbMarkSeparationTrigger(PlayerbotAI* ai, std::string name = "db mark separation")
+        : Trigger(ai, name, 2) {}
+
+        bool IsActive() override;
+    };
+
     class CloseToCreatureTrigger : public Trigger
     {
     public:

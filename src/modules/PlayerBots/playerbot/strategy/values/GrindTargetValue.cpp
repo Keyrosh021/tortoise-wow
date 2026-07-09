@@ -39,24 +39,52 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     if (master && (master == bot || master->GetMapId() != bot->GetMapId() || master->IsBeingTeleported() || !master->GetPlayerbotAI()))
         master = nullptr;
 
-    std::list<ObjectGuid> attackers = context->GetValue<std::list<ObjectGuid>>("possible attack targets")->Get();
-    for (std::list<ObjectGuid>::iterator i = attackers.begin(); i != attackers.end(); i++)
+    // "next grind target": chain-pull planning scan run MID-COMBAT for the mob AFTER this one.
+    // It must not return current attackers (that's the fight we're already in).
+    const bool planningNext = (getName() == "next grind target");
+
+    std::list<ObjectGuid> attackers;
+    if (!planningNext)
     {
-        Unit* unit = ai->GetUnit(*i);
-        if (!unit || !sServerFacade.IsAlive(unit))
-            continue;
-
-        if (!bot->InBattleGround() && !CanFreeMoveValue::CanFreeTarget(ai, GuidPosition(unit)))
+        attackers = context->GetValue<std::list<ObjectGuid>>("possible attack targets")->Get();
+        for (std::list<ObjectGuid>::iterator i = attackers.begin(); i != attackers.end(); i++)
         {
-            if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
-                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + "(hostile) ignored (out of free range).");
-            continue;
-        }
+            Unit* unit = ai->GetUnit(*i);
+            if (!unit || !sServerFacade.IsAlive(unit))
+                continue;
 
-        if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
-            ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) +"(hostile) selected.");
+            if (!bot->InBattleGround() && !CanFreeMoveValue::CanFreeTarget(ai, GuidPosition(unit)))
+            {
+                if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
+                    ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + "(hostile) ignored (out of free range).");
+                continue;
+            }
+
+            if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
+                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) +"(hostile) selected.");
        
-        return unit;
+            return unit;
+        }
+    }
+
+    // PRE-SELECTED CHAIN TARGET: decided while the previous victim was dying. Re-validate NOW
+    // (alive / not blacklisted / level / valid / untapped / free-move), consume once either way --
+    // a stale plan falls through to the normal scan, never oscillates.
+    if (!planningNext)
+    {
+        ObjectGuid preGuid = AI_VALUE(ObjectGuid, "pre-selected next target");
+        if (preGuid)
+        {
+            SET_AI_VALUE(ObjectGuid, "pre-selected next target", ObjectGuid());
+            Unit* pre = ai->GetUnit(preGuid);
+            if (pre && sServerFacade.IsAlive(pre) &&
+                !IsTargetGuidSkippedForBot(bot, preGuid) &&
+                (int)pre->GetLevel() - (int)bot->GetLevel() <= (bot->GetGroup() ? 4 : 2) &&
+                AttackersValue::IsValid(pre, bot, nullptr, false, false) &&
+                PossibleAttackTargetsValue::IsPossibleTarget(pre, bot, sPlayerbotAIConfig.sightDistance, false) &&
+                (bot->InBattleGround() || CanFreeMoveValue::CanFreeTarget(ai, GuidPosition(pre))))
+                return pre;
+        }
     }
 
     std::list<ObjectGuid> targets = *context->GetValue<std::list<ObjectGuid> >("possible targets");
@@ -212,6 +240,14 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     {
         Unit* unit = ai->GetUnit(*tIter);
         if (!unit)
+            continue;
+
+        if (planningNext && (unit == bot->GetVictim() || unit->GetVictim() == bot))
+            continue; // never "plan" the mob we're killing or an add already on us
+
+        // Re-acquire blacklist: a target recently deferred by the stall/abandon breakers must not
+        // be instantly re-picked (rewired 2026-07-03; the reader was lost in the git-reset).
+        if (IsTargetGuidSkippedForBot(bot, *tIter))
             continue;
 
 #ifdef MANGOSBOT_TWO 
@@ -396,7 +432,23 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
         if (entry && !needForQuest)
         {
-            if (autonomousRandomBot && mustCommitToQuestTravel)
+            // OPPORTUNISTIC PATH KILL (restored — the git-reset recovery silently dropped this
+            // mechanism, so travelers rejected every non-quest mob again): an XP-giving mob within
+            // 65y is a sanctioned kill even while committed to travel. Camp-mode v0.5 width.
+            // green-or-better only (mob within 5 levels): XP>0 alone let a L13 chain L7-8 trash
+            // for trickle XP (user: 'why is Arad 13 fighting level 5s') — worthless fights.
+            const bool opportunisticPathKill =
+                autonomousRandomBot && creature &&
+                MaNGOS::XP::Gain(bot, creature) > 0 &&
+                (int32)creature->GetLevel() + 5 >= (int32)bot->GetLevel() &&
+                sServerFacade.GetDistance2d(bot, unit) <= 65.0f;
+
+            if (opportunisticPathKill)
+            {
+                // fall through to the remaining validity checks below (no-xp/critter etc. can't
+                // trigger: XP gain already verified)
+            }
+            else if (autonomousRandomBot && mustCommitToQuestTravel)
             {
                 ++rejectStats.notQuest;
                 if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))

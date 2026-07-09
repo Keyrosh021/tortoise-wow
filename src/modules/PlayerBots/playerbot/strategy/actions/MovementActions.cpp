@@ -1978,7 +1978,28 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     if (movePath.empty())
     {
         lastMove.setPath(movePath);
-        return true; // Path collapsed — will rebuild next tick.
+        // "Path collapsed -- will rebuild next tick" was a lie that never healed: for DISTANT
+        // objectives the node-route collapsed identically every tick, and this returned true
+        // while the bot stood still -- THE definitive statue bug (BG attackers frozen mid-map
+        // with intact strategies, no cast, no CC; open-world equivalents too). Fallback:
+        // straight-line a ~40y leg toward the destination; from the new position the router
+        // recomputes and un-degenerates. If even that fails, return false so the engine tries
+        // something else instead of believing movement is happening.
+        static thread_local bool s_inCollapseFallback = false;
+        if (!s_inCollapseFallback && startPos.getMapId() == endPos.getMapId())
+        {
+            const float dist = startPos.distance(endPos);
+            const float frac = dist > 40.0f ? 40.0f / dist : 1.0f;
+            const float lx = startPos.getX() + (endPos.getX() - startPos.getX()) * frac;
+            const float ly = startPos.getY() + (endPos.getY() - startPos.getY()) * frac;
+            const float lz = startPos.getZ() + (endPos.getZ() - startPos.getZ()) * frac;
+            s_inCollapseFallback = true;
+            const bool legOk = MoveTo(startPos.getMapId(), lx, ly, lz, idle, react, true /*straight-line*/);
+            s_inCollapseFallback = false;
+            if (legOk)
+                return true;
+        }
+        return false;
     }
 
 
@@ -2092,68 +2113,9 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
 #endif
 
 
-    // DEBUG: Check for Ironforge AH roof climbing bug
-    // IF Auction House is at approx -4900, -950, 500 (Military Ward)
-    const float IF_AH_X = -4900.0f;
-    const float IF_AH_Y = -950.0f;
-    const float IF_AH_Z = 500.0f;
-    const float IF_AH_MAP = 0.0f;  // Eastern Kingdoms
-    const float CHECK_RADIUS = 150.0f;
-    
-    if (bot->GetMapId() == (uint32)IF_AH_MAP && 
-        startPos.sqDistance2d(WorldPosition(0, IF_AH_X, IF_AH_Y, 0)) < CHECK_RADIUS * CHECK_RADIUS && 
-        !movePath.empty())
-    {
-        // Calculate total XY distance and total Z change in path
-        float totalXY = 0.0f;
-        float totalZ = 0.0f;
-        float maxZDelta = 0.0f;
-        WorldPosition prevPos = startPos;
-        
-        for (const auto& point : movePath.getPointPath())
-        {
-            float dXY = sqrtf(prevPos.sqDistance2d(WorldPosition(0, point.coord_x, point.coord_y, 0)));
-            float dZ = fabs(point.coord_z - prevPos.coord_z);
-            totalXY += dXY;
-            totalZ += dZ;
-            if (dZ > maxZDelta) maxZDelta = dZ;
-            prevPos = point;
-        }
-        
-        // Check if Z change is abnormally large compared to XY (climbing through roof)
-        // Normal walking should have Z/X ratio < 0.5, roof climbing can be > 2.0
-        bool isAbnormalClimb = (totalZ > 5.0f && totalXY > 0.1f && totalZ / totalXY > 1.5f) || maxZDelta > 50.0f;
-        
-        if (isAbnormalClimb)
-        {
-            bool isFromLastPath = (!lastMove.lastPath.empty() && lastMove.lastPath.getPointPath().size() == movePath.getPointPath().size());
-            
-            sLog.outError("[BOT PATH BUG] %s near IF AH - abnormal upward path detected!", bot->GetName());
-            sLog.outError("[BOT PATH BUG] Bot pos: %.1f,%.1f,%.1f (map %d). Target: %.1f,%.1f,%.1f", 
-                bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId(),
-                movePath.getBack().coord_x, movePath.getBack().coord_y, movePath.getBack().coord_z);
-            sLog.outError("[BOT PATH BUG] Path stats: %u points, XY=%.1f, Z_total=%.1f, maxZ_delta=%.1f, ratio=%.2f",
-                (uint32)movePath.getPointPath().size(), totalXY, totalZ, maxZDelta, totalXY > 0 ? totalZ/totalXY : 0);
-            sLog.outError("[BOT PATH BUG] Route type: %s (lastPath empty: %s, detailedMove: %s)",
-                isFromLastPath ? "REUSED from lastPath" : "FRESH route",
-                lastMove.lastPath.empty() ? "yes" : "no",
-                detailedMove ? "yes" : "no");
-            
-            // Log first few path points
-            char pathBuf[512];
-            snprintf(pathBuf, sizeof(pathBuf), "[BOT PATH BUG] Path points: ");
-            int logCount = std::min((int)movePath.getPointPath().size(), 5);
-            for (int i = 0; i < logCount; i++)
-            {
-                const auto& p = movePath.getPointPath()[i];
-                char pointBuf[64];
-                snprintf(pointBuf, sizeof(pointBuf), "[#%d: %.1f,%.1f,%.1f] ", i, p.coord_x, p.coord_y, p.coord_z);
-                strncat(pathBuf, pointBuf, sizeof(pathBuf) - strlen(pathBuf) - 1);
-            }
-            sLog.outError("%s", pathBuf);
-        }
-    }
-    // END DEBUG
+    // (removed IF-AH roof-climb DEBUG block: it was pure diagnostic logging AND held a
+    //  dangling reference into a by-value getPointPath() temporary -> heap-use-after-free read,
+    //  which ASAN/gdb pinned as the open-world 'move random' crash. No behavior lost.)
 
     // Return whether a REAL movement was actually dispatched. If DispatchMovement bailed (path empty
     // /rejected/suppressed) the bot is standing still, and returning true here made callers believe a
@@ -2171,6 +2133,21 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
 
 bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, bool react, bool noPath, bool ignoreEnemyTargets, bool forceWalk)
 {
+    // PRE-START BG CONTAINMENT AT THE SOURCE: before the gates open, refuse ANY movement whose
+    // destination is outside the starting area. Bots physically cannot walk through the closed
+    // door because the walk is never issued (mmaps has no dynamic-door collision to stop them).
+    if (BattleGround* cbg = bot->GetBattleGround())
+    {
+        if (cbg->GetStatus() == STATUS_WAIT_JOIN && !ai->HasRealPlayerMaster())
+        {
+            float csx, csy, csz, cso;
+            cbg->GetTeamStartLoc(bot->GetTeam(), csx, csy, csz, cso);
+            const float cdx = x - csx, cdy = y - csy;
+            if (cdx * cdx + cdy * cdy > 35.0f * 35.0f)
+                return false;   // destination beyond the start bubble -> not before the bell
+        }
+    }
+
     // Hold position while casting ANY cast-time / channeled spell, not just self-heals.
     // Moving cancels the cast AND makes the bot unreachable to the creature it is fighting,
     // so the creature evades and heals back to full -- the "bot fireballs a boar, boar drops
@@ -2335,7 +2312,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, 
                 }
 
                 if (!sServerFacade.UnitIsDead(bot) &&
-                    frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeJumpChance)
+                    !bot->IsNonMeleeSpellCasted(true, false, true) &&
+                    frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeJumpChance * ai->GetJumpiness())
                 {
                     sPlayerbotAIConfig.logEvent(ai, "HumanLikeJumpAttempt", std::to_string(mapId), "jump::random");
                     ai->DoSpecificAction("jump::random", Event(), true);
@@ -3665,6 +3643,14 @@ bool MovementAction::Follow(Unit* target, float distance, float angle)
             return false;
     }
 
+    // LOOSE FOLLOW: real players don't heel like pets. Give every bot a stable personal offset
+    // (guid-seeded so it doesn't jitter tick to tick): +0-4.5y extra distance and a fanned angle.
+    // The group reads as companions drifting along, not a synchronized formation.
+    {
+        const uint32 seed = bot->GetGUIDLow();
+        distance += (seed % 10) * 0.5f;                                  // +0.0 .. +4.5y
+        angle += (((seed / 10) % 9) - 4) * (M_PI_F / 12.0f);             // +/- 60 deg fan
+    }
     mm.MoveFollow(target, distance, angle, true, sPlayerbotAIConfig.boostFollow);
     return true;
 }
@@ -3898,6 +3884,23 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
     // Prevent moving if requested to move into a hazard
     if (IsValidPosition(endPosition, botPosition))
     {
+        // CONTINUOUS CHASE (the "sit on your target every tick" fix). The core's
+        // ChaseMovementGenerator re-paths to the target on EVERY server tick, so a melee bot
+        // stays glued to a moving target -- exactly how a creature chases a fleeing player.
+        // The one-shot MovePoint+WaitForReach below walked to where the target WAS, then WAITED
+        // until arrival before re-chasing, so the bot perpetually lagged a step behind. Prefer
+        // MoveChase for a live hostile unit; MovePoint stays as the fallback for GO/positions.
+        if (Unit* chaseUnit = dynamic_cast<Unit*>(obj))
+        {
+            if (chaseUnit->IsAlive() && !sServerFacade.IsFriendlyTo(bot, chaseUnit))
+            {
+                bot->SetTarget(obj);
+                const bool meleeFb = !IsCasterStyleRangedWithMana(ai, bot);
+                bot->Attack(chaseUnit, !ai->IsRanged(bot) || (meleeFb && sServerFacade.GetDistance2d(bot, obj) < 5.0f));
+                bot->GetMotionMaster()->MoveChase(chaseUnit, distance, angle);
+                return true;
+            }
+        }
         std::vector<WorldPosition> path = botPosition.getPathTo(endPosition,bot);
         if (GeneratePathAvoidingHazards(path))
         {
@@ -4255,7 +4258,7 @@ bool MovementAction::Flee(Unit *target)
                 const float a = away + ((k % 2) ? -1.0f : 1.0f) * (float)(k / 2) * (M_PI_F / 6.0f);
                 const float tx = bx + cosf(a) * distance, ty = by + sinf(a) * distance;
                 const float tz = bot->GetMap()->GetHeight(tx, ty, bz + 5.0f, true);
-                if (tz > INVALID_HEIGHT && fabs(tz - bz) < 12.0f)
+                if (tz > INVALID_HEIGHT && fabs(tz - bz) < 3.0f)
                 {
                     if (MoveTo(bot->GetMapId(), tx, ty, tz, false, false, true))   // noPath straight-line
                     {
@@ -5336,7 +5339,7 @@ bool JumpAction::Execute(ai::Event &event)
                 if (ai->HasStrategy("debug", BotState::BOT_STATE_NON_COMBAT))
                 {
                     std::string text = "Moving to jumping position!";
-                    bot->Say(text, (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                    bot->Say(text, PlayerbotChatLanguage(bot));
                 }
 
                 // see spell action will handle the movement
@@ -5370,7 +5373,7 @@ bool JumpAction::Execute(ai::Event &event)
                 if (ai->HasStrategy("debug", BotState::BOT_STATE_NON_COMBAT))
                 {
                     std::string text = "Jumping to you!";
-                    bot->Say(text, (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                    bot->Say(text, PlayerbotChatLanguage(bot));
                 }
 
                 if (showLanding)
@@ -5931,12 +5934,14 @@ bool JumpAction::DoJump(const WorldPosition &dest, const WorldPosition& highestP
     {
         bot->m_movementInfo.AddMovementFlag(jumpBackward ? MOVEFLAG_BACKWARD : MOVEFLAG_FORWARD);
         WorldPacket move(jumpBackward ? MSG_MOVE_START_BACKWARD : MSG_MOVE_START_FORWARD);
-// write packet info
-#ifdef MANGOSBOT_TWO
+        // packed GUID FIRST -- every vanilla movement broadcast leads with it (MovementHandler.cpp:464)
+        // or the client can't identify the mover and drops the packet (why bot jumps never rendered).
         move << bot->GetObjectGuid().WriteAsPacked();
-#endif
         move << bot->m_movementInfo;
-        ai->QueuePacket(move);
+        // BROADCAST DIRECTLY to nearby players, NOT ai->QueuePacket (a bot's WorldSession has no
+        // socket, so its recv queue is never drained -> the packet is silently dropped and no one
+        // sees the jump). SendMessageToSetExcept is the same proven path the fast-jump branch uses.
+        bot->SendMessageToSetExcept(move, bot);
     }
 
     float vsin = jumpInPlace ? 0 : sin(angle);
@@ -5975,12 +5980,10 @@ bool JumpAction::DoJump(const WorldPosition &dest, const WorldPosition& highestP
     else
     {
         WorldPacket jump(MSG_MOVE_JUMP);
-        // write packet info
-#ifdef MANGOSBOT_TWO
-        jump << bot->GetObjectGuid().WriteAsPacked();
-#endif
+        jump << bot->GetObjectGuid().WriteAsPacked();   // packed GUID first (see above)
         jump << bot->m_movementInfo;
-        ai->QueuePacket(jump);
+        // DIRECT broadcast (see above) so nearby players actually see the jump animation + parabola.
+        bot->SendMessageToSetExcept(jump, bot);
     }
 
     // send move packet after jump
@@ -5989,22 +5992,21 @@ bool JumpAction::DoJump(const WorldPosition &dest, const WorldPosition& highestP
         bot->m_movementInfo.AddMovementFlag(jumpBackward ? MOVEFLAG_BACKWARD : MOVEFLAG_FORWARD);
         bot->m_movementInfo.jump.xyspeed = hSpeed;
         WorldPacket move(jumpBackward ? MSG_MOVE_START_BACKWARD : MSG_MOVE_START_FORWARD);
-        // write packet info
-#ifdef MANGOSBOT_TWO
         move << bot->GetObjectGuid().WriteAsPacked();
-#endif
         move << bot->m_movementInfo;
-        ai->QueuePacket(move);
+        bot->SendMessageToSetExcept(move, bot);
     }
 
-    // change position to highest position
-    // todo add in between points to avoid mobs instant aggro before landing
-    bot->Relocate(highestPoint.getX(), highestPoint.getY(), highestPoint.getZ());
+    // DO NOT teleport the server position to the arc apex -- that is what made observers see the
+    // bot "pop up and freeze mid-air" (RpgStrategy.cpp comment). Leave the server position at the
+    // jump origin; the client extrapolates the parabola from the jump packet's velocity, and the
+    // jumpTime-driven landing logic (PlayerbotAI::UpdateAIInternal) relocates the bot to the
+    // landing point when the arc completes -- matching what the clients drew.
 
     if (ai->HasStrategy("debug", BotState::BOT_STATE_NON_COMBAT))
     {
         std::string text = "Jump: cos: " + std::to_string(vcos) + " sin: " + std::to_string(vsin) + " distance: " + std::to_string(distanceToLand) + " speed: " + std::to_string(hSpeed);
-        bot->Say(text, (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+        bot->Say(text, PlayerbotChatLanguage(bot));
     }
 
     return true;

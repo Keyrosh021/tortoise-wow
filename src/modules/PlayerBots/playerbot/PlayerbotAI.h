@@ -450,6 +450,15 @@ public:
     // slow COLD interval. Idempotent; reversed instantly on promotion (player approaches).
     void SetColdDormant(bool dormant);
     bool IsColdDormant() const { return coldDormant; }
+    // INSTANCED FAST BRAIN: a bot inside a dungeon/raid/BG runs a full, always-active, faster
+    // brain (never parked, tighter react cadence) -- max 40-80 bots per instance so full speed is
+    // cheap, and the instanced player gets fast, responsive, in-range combat. Map::IsDungeon()
+    // covers raids (MAP_INSTANCE || MAP_RAID); battlegrounds are separate.
+    bool IsInstancedContent() const
+    {
+        return bot && bot->IsInWorld() && bot->GetMap()
+            && (bot->GetMap()->IsDungeon() || bot->GetMap()->IsBattleGround());
+    }
     bool RemoveAura(const std::string& name);
     void RemoveShapeshift();
     void WaitForSpellCast(Spell *spell);
@@ -598,6 +607,8 @@ public:
 
     // LOD COLD dormancy state (invisible + combat-dropped). See SetColdDormant.
     bool coldDormant = false;
+    uint32 nextIdleJumpMs = 0;      // next human-like idle-jump roll (standing-around hops)
+    uint32 lastActiveCohortMs = 0;  // park hysteresis: last time this bot was in the active set
 
     // One-shot "teleport bot to master on first available tick" flag. Set
     // by OnBotSummoned; cleared by TickHeartbeat after the teleport runs.
@@ -735,6 +746,12 @@ public:
     void ResetJumpDestination() { jumpDestination = WorldPosition(); }
 
     bool IsJumping() { return jumpTime; }
+    // stable per-bot jump personality (0.3x - 2.5x on HumanLikeJumpChance): some bots are
+    // visibly jumpier than others, like real players
+    float GetJumpiness() const;
+    // DEDICATED INSTANCED BRAIN: clamps every internal delay to InstanceReactDelay inside
+    // dungeons/raids/BGs (see .cpp) -- the structural difference from the open-world brain
+    void SetAIInternalUpdateDelay(const uint32 delay) override;
     void SetFallAfterJump() { fallAfterJump = true; }
     void SetJumpTime(uint32 time) { jumpTime = time; }
     bool CanMove();
@@ -824,6 +841,10 @@ protected:
     std::queue<ChatCommandHolder> chatCommands;
     std::queue<ChatQueuedReply> chatReplies;
     std::mutex chatRepliesMutex;
+    // NL command bridge: async LLM translations land here (worker thread) and are executed on
+    // the world thread at the top of HandleCommands. Never re-queued -> no translation loops.
+    std::mutex translatedCommandsMutex;
+    std::queue<std::pair<std::string, uint32>> translatedCommands;   // command, master guidLow
     PacketHandlingHelper botOutgoingPacketHandlers;
     PacketHandlingHelper masterIncomingPacketHandlers;
     PacketHandlingHelper masterOutgoingPacketHandlers;
@@ -837,6 +858,11 @@ protected:
     bool inCombat = false;
     bool isMoving = false;
     bool isWaiting = false;
+    // 10K SCALABILITY (Phase A): supervisor helpers run at 1 Hz per bot out of combat instead
+    // of every map tick, and consecutive-brain-execution deltas feed a fleet histogram
+    // (logs/brain_interval.csv) -- the direct "decision every 20s" detector.
+    uint32 supervisorHelperNextMs = 0;
+    uint32 lastBrainExecMs = 0;
     ObjectGuid staleTargetGuid;
     time_t staleTargetSince = 0;
     time_t staleTargetLastProgress = 0;

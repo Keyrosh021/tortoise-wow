@@ -212,7 +212,7 @@ bool GuildManageNearbyAction::Execute(Event& event)
                     bot->GetGroup()->BroadcastPacket(data,true);
                 }
                 else
-                    bot->Say(line, (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                    bot->Say(line, PlayerbotChatLanguage(bot));
         }
         
         if (ai->DoSpecificAction("guild invite", Event("guild management", guid), true))

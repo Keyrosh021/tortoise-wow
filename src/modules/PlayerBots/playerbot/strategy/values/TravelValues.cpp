@@ -283,9 +283,32 @@ uint32 EntryTravelPurposeMapValue::SkillIdToGatherEntry(int32 entry)
 
 bool NeedTravelPurposeValue::Calculate()
 {
-    // Temporary safety valve from the original recovery: quest/named travel still works,
-    // but purpose-triggered travel is disabled until the underlying trigger crash path is stable.
-    return false;
+    // RE-ENABLED (GRIND ONLY). This valve was hardcoded `return false` at the port "until the
+    // underlying trigger crash path is stable" -- that crash was the item-use Spell sized-delete (#1)
+    // and the AuraProcHandler OOB (#2), both now fixed (server stable 10h+). With the valve off,
+    // every non-quest travel purpose was dead, so the ~64% of bots without a routable quest had
+    // NOWHERE to go and stood idle.
+    //
+    // We enable ONLY Grind (route to a level-appropriate, gold-dropping mob camp and kill through it).
+    // Explore was tried too but REMOVED: Explore destinations are map-exploration points (empty
+    // scenic spots, NOT mob camps), and Explore's relevance (6.29) out-ranks plain Grind (6.27), so
+    // questless bots wandered to EMPTY terrain -- measured 67% of mid-level bots with no mob within
+    // 40y, 100% of which had no alive mob at all (a positioning problem, not a filter one). Grind
+    // routes them to actual mobs so the combat-engagement fix (attack-anything 7.05) can fire.
+    // Utility purposes (vendor/repair/AH/mail/gather/boss/rpg) stay OFF pending per-purpose
+    // validation. Fan-out is bounded: only the awake LOD cohort runs this, and only when the bot has
+    // no active destination (never fights an in-progress trip).
+    if (!Qualified::isValidNumberString(getQualifier()))
+        return false;
+
+    const uint32 purpose = (uint32)std::stoul(getQualifier());
+    if (purpose != (uint32)TravelDestinationPurpose::Grind)
+        return false;
+
+    if (AI_VALUE(bool, "travel target active"))
+        return false;
+
+    return true;
 }
 
 bool ShouldTravelNamedValue::Calculate()

@@ -241,11 +241,23 @@ namespace ai
         UnitCalculatedValue(PlayerbotAI* ai, std::string name = "value", int checkInterval = 1) :
             CalculatedValue<Unit*>(ai, name, checkInterval) { this->lastCheckTime = time(0) - checkInterval / 2; }
 
+        // DANGLING-POINTER FIX (core-dump proven): a raw Unit* cached across ticks dangles when the
+        // unit is deleted inside the cache window (2s for "grind target") -- the vtable call in
+        // AttackAnythingAction::isUseful() then jumps to freed heap (SIGSEGV, 4/hr once attack-anything
+        // ran hot). NEVER return the raw cached pointer: remember the GUID at compute time and
+        // RE-RESOLVE it on every cached read; a despawned/deleted unit resolves to nullptr instead
+        // of a landmine. Fresh Calculate() results are safe for the current tick by construction.
+        virtual Unit* Get() override;      // implemented in Value.cpp (needs complete PlayerbotAI)
+        virtual void Set(Unit* val) override;
+
         virtual std::string Format() override
         {
             Unit* unit = this->Calculate();
             return unit ? unit->GetName() : "<none>";
         }
+
+    protected:
+        ObjectGuid cachedGuid;
     };
 
     class CDPairCalculatedValue : public CalculatedValue<CreatureDataPair const*>

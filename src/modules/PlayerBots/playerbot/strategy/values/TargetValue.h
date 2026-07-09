@@ -101,6 +101,14 @@ namespace ai
         TalkTargetValue(PlayerbotAI* ai, std::string name = "talk target") : ManualSetValue<ObjectGuid>(ai, ObjectGuid(), name) {}
     };
 
+    // Chain-pull plan: the NEXT grind target, decided while the current victim is dying.
+    // Pure internal state (no selection packets) so pre-selection can never cause early aggro.
+    class PreSelectedNextTargetValue : public ManualSetValue<ObjectGuid>
+    {
+    public:
+        PreSelectedNextTargetValue(PlayerbotAI* ai, std::string name = "pre-selected next target") : ManualSetValue<ObjectGuid>(ai, ObjectGuid(), name) {}
+    };
+
     class AttackTargetValue : public ManualSetValue<ObjectGuid>
     {
     public:

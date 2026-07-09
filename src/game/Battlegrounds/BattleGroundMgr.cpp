@@ -1234,6 +1234,13 @@ BattleGround * BattleGroundMgr::GetBattleGroundThroughClientInstance(uint32 inst
 
 BattleGround * BattleGroundMgr::GetBattleGround(uint32 InstanceID, BattleGroundTypeId bgTypeId)
 {
+    // bounds-check the array index: a player's stored m_bgData.bgTypeID can be stale or
+    // garbage (measured: two 2026-07-04 SIGSEGVs at +0x96 here via Player::GetBattleGround
+    // from the playerbot BG queue scan) -- an out-of-range typeId must mean "not found",
+    // never an out-of-bounds read of m_BattleGrounds[].
+    if (bgTypeId != BATTLEGROUND_TYPE_NONE && bgTypeId >= MAX_BATTLEGROUND_TYPE_ID)
+        return nullptr;
+
     //search if needed
     BattleGroundSet::iterator itr;
     if (bgTypeId == BATTLEGROUND_TYPE_NONE)
@@ -1252,6 +1259,8 @@ BattleGround * BattleGroundMgr::GetBattleGround(uint32 InstanceID, BattleGroundT
 
 BattleGround * BattleGroundMgr::GetBattleGroundTemplate(BattleGroundTypeId bgTypeId)
 {
+    if (bgTypeId >= MAX_BATTLEGROUND_TYPE_ID)   // same OOB guard as GetBattleGround
+        return nullptr;
     //map is sorted and we can be sure that lowest instance id has only BG template
     return m_BattleGrounds[bgTypeId].empty() ? nullptr : m_BattleGrounds[bgTypeId].begin()->second;
 }

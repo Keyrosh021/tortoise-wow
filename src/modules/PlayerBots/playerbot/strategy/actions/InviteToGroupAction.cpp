@@ -675,7 +675,7 @@ namespace ai
 
                     const char* textKey = (group && group->IsRaidGroup()) ? "join_raid"
                                         : (questDirected ? "join_group_quest" : "join_group");
-                    bot->Say(BOT_TEXT2(textKey, placeholders), (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                    bot->Say(BOT_TEXT2(textKey, placeholders), PlayerbotChatLanguage(bot));
                 }
             }
 

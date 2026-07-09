@@ -43,10 +43,11 @@ bool LootStartRollAction::Execute(Event& event)
     if (!loot)
         return false;
 
-    for(uint8 i=0;i< MAX_NR_LOOT_ITEMS;i++)
-        if(loot->GetRollForSlot(i))
-            lootRolls.insert({ creatureGuid, i });
-        
+    // SMSG_LOOT_START_ROLL is sent once PER rolled slot and already carries (creatureGuid, itemSlot).
+    // Record it directly -- Loot::GetRollForSlot is a nullptr stub on this core, so the old
+    // enumeration found nothing and bots never rolled on group loot.
+    lootRolls.insert({ creatureGuid, itemSlot });
+
     ActiveRolls::CleanUp(bot,lootRolls);
 
     SET_AI_VALUE(LootRollMap, "active rolls", lootRolls);
@@ -244,16 +245,19 @@ bool RollAction::RollOnItemInSlot(RollVote vote, ObjectGuid lootGuid, uint32 slo
         return false;
 
     LootItem* item = loot->GetLootItemInSlot(slot);
+    if (!item)
+        return false;
     ItemPrototype const* proto = sItemStorage.LookupEntry<ItemPrototype>(item->itemId);
     if (!proto)
         return false;
 
-    // Penqle has no GroupLootRoll system; GetRollForSlot returns nullptr.
-    void* lootRoll = loot->GetRollForSlot(slot);
-    if (!lootRoll)
+    // Submit the roll server-side via the EXACT path a real client's CMSG_LOOT_ROLL takes
+    // (Group::CountRollVote) -- no packet/QueuePacket (the bot session is socketless and drops
+    // those). This tallies the vote and auto-resolves when all party members have voted.
+    Group* group = bot->GetGroup();
+    if (!group)
         return false;
-
-    bool didRoll = false; // Wiring group-roll properly is future work.
+    bool didRoll = group->CountRollVote(bot, lootGuid, slot, vote);
 
     if (didRoll)
     {

@@ -19,7 +19,7 @@ void BattlegroundStrategy::InitNonCombatTriggers(std::list<TriggerNode*> &trigge
 {
     triggers.push_back(new TriggerNode(
         "bg waiting",
-        NextAction::array(0, new NextAction("bg move to start", 1.0f), NULL)));
+        NextAction::array(0, new NextAction("bg move to start", 65.0f), NULL)));
 
     triggers.push_back(new TriggerNode(
         "player has flag",
@@ -27,7 +27,14 @@ void BattlegroundStrategy::InitNonCombatTriggers(std::list<TriggerNode*> &trigge
 
     triggers.push_back(new TriggerNode(
         "bg active",
-        NextAction::array(0, new NextAction("check mount state", 2.0f), new NextAction("bg move to objective", 1.0f), NULL)));
+        // MOCK-GAME FINDING: at 1.0/2.0 these sat BELOW opportunistic buff (30) and banner (10)
+        // actions -- any trivial action that returned true consumed the tick and objective
+        // movement STARVED (matches decayed to 12+ statues, 0-0 forever). Movement is the
+        // team's core loop: only "bg check flag" (70) and combat may outrank it.
+        // mount-state OSCILLATED (mount/unmount each winning a tick at 66) and starved movement
+        // below it -- mounting is not worth a slot above the objective loop; bots mount via the
+        // lower-relevance opportunistic path instead ("check mount state" at 30 below).
+        NextAction::array(0, new NextAction("bg move to objective", 65.0f), new NextAction("check mount state", 30.0f), NULL)));
 
     triggers.push_back(new TriggerNode(
         "very often",

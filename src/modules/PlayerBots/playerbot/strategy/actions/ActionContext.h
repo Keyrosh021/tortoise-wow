@@ -375,6 +375,10 @@ namespace ai
             creators["move away from magmadar"] = [](PlayerbotAI* ai) { return new MagmadarMoveAwayAction(ai); };
 
             creators["move away from hazard"] = [](PlayerbotAI* ai) { return new MoveAwayFromHazard(ai); };
+            creators["run out of group"] = [](PlayerbotAI* ai) { return new RunOutOfGroupAction(ai); };
+            creators["tank face away"] = [](PlayerbotAI* ai) { return new TankFaceAwayAction(ai); };
+            creators["taunt swap"] = [](PlayerbotAI* ai) { return new TauntSwapAction(ai); };
+            creators["staged tank hold"] = [](PlayerbotAI* ai) { return new StagedTankHoldAction(ai); };
             creators["move to mc rune"] = [](PlayerbotAI* ai) { return new MoveToMCRuneAction(ai); };
             creators["douse mc rune aqual"] = [](PlayerbotAI* ai) { return new DouseMCRuneActionAqual(ai); };
             creators["douse mc rune eternal"] = [](PlayerbotAI* ai) { return new DouseMCRuneActionEternal(ai); };

@@ -344,7 +344,11 @@ bool PlayerLoginInfo::LogoutBot()
 
     sRandomPlayerbotMgr.SetValue(guid, "add", 0, "", 0);
 
-    sRandomPlayerbotMgr.LogoutPlayerBot(guid);
+    // Login-mgr worker threads must not tear the Player down directly: LogoutPlayerBot from a
+    // non-world thread races the world thread's playerBots iteration (SIGSEGV in AllowActivity via
+    // LogPlayerLocation — same family as the map-thread logout race). Queue it; the world thread
+    // drains in UpdateAIInternal, and the state machine below simply retries until offline.
+    sRandomPlayerbotMgr.QueueBotLogout(guid);
 
     if (sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false))
         return false;

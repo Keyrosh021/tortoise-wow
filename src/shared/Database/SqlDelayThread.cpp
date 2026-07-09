@@ -23,8 +23,8 @@
 #include "Database/SqlOperations.h"
 #include "DatabaseEnv.h"
 
-SqlDelayThread::SqlDelayThread(const char* InName, Database* db, SqlConnection* conn)
-    : m_dbEngine(db), m_dbConnection(conn), m_running(true), Name(InName)
+SqlDelayThread::SqlDelayThread(std::string InName, Database* db, SqlConnection* conn)
+    : m_dbEngine(db), m_dbConnection(conn), m_running(true), Name(std::move(InName))
 {
 }
 
@@ -52,7 +52,7 @@ void SqlDelayThread::run()
     #endif
 
     char ThreadName[128];
-    sprintf(ThreadName, "SqlDelay %s", Name);
+    snprintf(ThreadName, sizeof(ThreadName), "SqlDelay %s", Name.c_str());
 
     thread_name(ThreadName);
     const uint32 loopSleepms = 10;

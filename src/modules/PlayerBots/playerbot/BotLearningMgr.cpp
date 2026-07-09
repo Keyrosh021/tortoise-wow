@@ -326,6 +326,8 @@ void BotLearningMgr::EnsureTelemetryTables()
         "`min_power_pct` FLOAT NOT NULL DEFAULT 100,"
         "`ended_alive` TINYINT UNSIGNED NOT NULL DEFAULT 1,"
         "`death_observed` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "`last_damage_spell_id` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`last_damager_entry` INT UNSIGNED NOT NULL DEFAULT 0,"
         "`level_delta` INT NOT NULL DEFAULT 0,"
         "`xp_delta` INT NOT NULL DEFAULT 0,"
         "`money_delta` INT NOT NULL DEFAULT 0,"
@@ -337,6 +339,11 @@ void BotLearningMgr::EnsureTelemetryTables()
         "KEY `idx_combat_sample_context` (`combat_context`, `class`, `spec_tab`, `level`, `map_id`, `zone_id`),"
         "KEY `idx_combat_sample_target` (`target_entry`, `class`, `spec_tab`, `level`)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8");
+
+    // Phase 4 columns for pre-existing tables (errors ignored when already present)
+    WorldDatabase.DirectExecute("ALTER TABLE ai_playerbot_combat_sample ADD COLUMN `last_damage_spell_id` INT UNSIGNED NOT NULL DEFAULT 0");
+    WorldDatabase.DirectExecute("ALTER TABLE ai_playerbot_combat_sample ADD COLUMN `last_damager_entry` INT UNSIGNED NOT NULL DEFAULT 0");
+
 
     // Per-decision (state, action) rows. Join to ai_playerbot_combat_sample on
     // fight_id to attach that fight's reward -> (state, action, reward) tuples for
@@ -521,6 +528,8 @@ void BotLearningMgr::RecordBotTelemetry(PlayerbotAI* ai, uint32 /*elapsed*/)
             sample.minPowerPct = state.combatMinPowerPct;
             sample.endedAlive = bot->IsAlive();
             sample.deathObserved = state.combatDeathObserved;
+            if (state.combatDeathObserved)
+                botlearn::GetRecentDamage(bot->GetGUIDLow(), 10000, sample.lastDamageSpellId, sample.lastDamagerEntry);
             sample.levelDelta = int32(level) - int32(state.combatStartLevel);
             sample.xpDelta = SignedDelta(xp, state.combatStartXp);
             sample.moneyDelta = SignedDelta(money, state.combatStartMoney);
@@ -956,7 +965,7 @@ uint32 BotLearningMgr::FlushCombatSamples(std::vector<CombatSample> const& sampl
     sql << "INSERT INTO `ai_playerbot_combat_sample` "
         << "(`ended_at`,`bot_guid`,`race`,`class`,`spec_tab`,`level`,`map_id`,`instance_id`,`zone_id`,`area_id`,`bucket_x`,`bucket_y`,"
         << "`combat_context`,`group_size`,`is_dungeon`,`is_raid`,`is_battleground`,`duration_ms`,`target_entry`,`target_level`,"
-        << "`target_is_player`,`target_switches`,`min_health_pct`,`min_power_pct`,`ended_alive`,`death_observed`,`level_delta`,`xp_delta`,`money_delta`,`reward`,`cohort`,`fight_id`) VALUES ";
+        << "`target_is_player`,`target_switches`,`min_health_pct`,`min_power_pct`,`ended_alive`,`death_observed`,`last_damage_spell_id`,`last_damager_entry`,`level_delta`,`xp_delta`,`money_delta`,`reward`,`cohort`,`fight_id`) VALUES ";
 
     for (size_t i = 0; i < samples.size(); ++i)
     {
@@ -970,7 +979,7 @@ uint32 BotLearningMgr::FlushCombatSamples(std::vector<CombatSample> const& sampl
             << (s.isDungeon ? 1 : 0) << ',' << (s.isRaid ? 1 : 0) << ',' << (s.isBattleground ? 1 : 0) << ','
             << s.durationMs << ',' << s.targetEntry << ',' << uint32(s.targetLevel) << ',' << (s.targetIsPlayer ? 1 : 0) << ','
             << s.targetSwitches << ',' << s.minHealthPct << ',' << s.minPowerPct << ',' << (s.endedAlive ? 1 : 0) << ','
-            << (s.deathObserved ? 1 : 0) << ',' << s.levelDelta << ',' << s.xpDelta << ',' << s.moneyDelta << ',' << s.reward << ',' << uint32(s.cohort) << ',' << s.fightId << ')';
+            << (s.deathObserved ? 1 : 0) << ',' << s.lastDamageSpellId << ',' << s.lastDamagerEntry << ',' << s.levelDelta << ',' << s.xpDelta << ',' << s.moneyDelta << ',' << s.reward << ',' << uint32(s.cohort) << ',' << s.fightId << ')';
     }
 
     WorldDatabase.Execute(sql.str().c_str());
@@ -1161,3 +1170,38 @@ float BotLearningMgr::GetTravelPenalty(Player* /*bot*/, TravelDestination* desti
 
     return penalty;
 }
+
+
+// ---------------- Phase 4: death attribution ----------------
+namespace ai {
+namespace botlearn
+{
+    struct LastHit { uint32 spellId = 0; uint32 attackerEntry = 0; uint32 ms = 0; };
+    static std::mutex s_lastHitMx;
+    static std::unordered_map<uint32, LastHit> s_lastHits;
+
+    void RecordDamageTaken(uint32 victimGuidLow, uint32 spellId, uint32 attackerEntry)
+    {
+        std::lock_guard<std::mutex> lk(s_lastHitMx);
+        LastHit& h = s_lastHits[victimGuidLow];
+        h.spellId = spellId;
+        h.attackerEntry = attackerEntry;
+        h.ms = WorldTimer::getMSTime();
+        if (s_lastHits.size() > 4096)
+            s_lastHits.clear();                          // bound memory; repopulates instantly
+    }
+
+    bool GetRecentDamage(uint32 victimGuidLow, uint32 windowMs, uint32& spellId, uint32& attackerEntry)
+    {
+        std::lock_guard<std::mutex> lk(s_lastHitMx);
+        auto it = s_lastHits.find(victimGuidLow);
+        if (it == s_lastHits.end())
+            return false;
+        if (WorldTimer::getMSTime() - it->second.ms > windowMs)
+            return false;
+        spellId = it->second.spellId;
+        attackerEntry = it->second.attackerEntry;
+        return true;
+    }
+}
+} // namespace ai

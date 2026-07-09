@@ -161,6 +161,9 @@ namespace ai
             creators["pet target"] = [](PlayerbotAI* ai) { return new PetTargetValue(ai); };
             creators["old target"] = [](PlayerbotAI* ai) { return new CurrentTargetValue(ai); };
             creators["grind target"] = [](PlayerbotAI* ai) { return new GrindTargetValue(ai); };
+            creators["next grind target"] = [](PlayerbotAI* ai) { return new GrindTargetValue(ai, "next grind target"); };
+            creators["pre-selected next target"] = [](PlayerbotAI* ai) { return new PreSelectedNextTargetValue(ai); };
+            creators["run out distance"] = [](PlayerbotAI* ai) { return new ManualSetValue<float>(ai, 15.0f, "run out distance"); };
             creators["rti target"] = [](PlayerbotAI* ai) { return new RtiTargetValue(ai); };
             creators["rti cc target"] = [](PlayerbotAI* ai) { return new RtiCcTargetValue(ai); };
             creators["duel target"] = [](PlayerbotAI* ai) { return new DuelTargetValue(ai); };

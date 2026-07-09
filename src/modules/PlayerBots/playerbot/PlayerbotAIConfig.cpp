@@ -25,6 +25,9 @@
 #include "PlayerbotLoginMgr.h"
 #include "playerbot/QuestGuideMgr.h"
 #include "playerbot/BotLearningMgr.h"
+#include "playerbot/TrainerGuideMgr.h"
+#include "playerbot/GuideFollowMgr.h"
+#include "playerbot/EncounterKnowledgeMgr.h"
 
 namespace
 {
@@ -544,8 +547,32 @@ bool PlayerbotAIConfig::Initialize()
     disableActivityPriorities = config.GetBoolDefault("AiPlayerbot.DisableActivityPriorities", false);
     lodColdUpdateMs = (uint32)config.GetIntDefault("AiPlayerbot.LODColdUpdateMs", 15000);
     lodColdRange = config.GetFloatDefault("AiPlayerbot.LODColdRange", 250.0f);
+    looseFollow = config.GetBoolDefault("AiPlayerbot.LooseFollow", true);
+    instanceReactDelay = (uint32)config.GetIntDefault("AiPlayerbot.InstanceReactDelay", 50);
+    cityResidents = (uint32)config.GetIntDefault("AiPlayerbot.CityResidents", 1500);
+    cityResidentMinLevel = (uint32)config.GetIntDefault("AiPlayerbot.CityResidentMinLevel", 55);
+    dungeonLoiterers = config.GetBoolDefault("AiPlayerbot.DungeonLoiterers", true);
+    levelSpreadEnabled = config.GetBoolDefault("AiPlayerbot.LevelSpread", true);
+    levelSpreadPerTick = (uint32)config.GetIntDefault("AiPlayerbot.LevelSpreadPerTick", 3);
+    virtualObserver = config.GetBoolDefault("AiPlayerbot.VirtualObserver", true);
+    virtualObserverRotateMinutes = (uint32)config.GetIntDefault("AiPlayerbot.VirtualObserverRotateMinutes", 30);
+    activeBrainBudget = (uint32)config.GetIntDefault("AiPlayerbot.ActiveBrainBudget", 200);
+    level60Target = (uint32)config.GetIntDefault("AiPlayerbot.Level60Target", 2000);
+    activeRenderRange = config.GetFloatDefault("AiPlayerbot.ActiveRenderRange", 170.0f);
+    mockBgGames = (uint32)config.GetIntDefault("AiPlayerbot.MockBgGames", 0);
+    parkVisible = config.GetBoolDefault("AiPlayerbot.ParkVisible", true);
+    activeCohortSize = (uint32)config.GetIntDefault("AiPlayerbot.ActiveCohortSize", 0);
+    cohortRotateMinutes = (uint32)config.GetIntDefault("AiPlayerbot.CohortRotateMinutes", 180);
+    fastPathEnabled = config.GetBoolDefault("AiPlayerbot.FastPath", true);
+    syntheticProgressEnabled = config.GetBoolDefault("AiPlayerbot.SyntheticProgress", true);
+    syntheticRateFactor = config.GetFloatDefault("AiPlayerbot.SyntheticRateFactor", 0.7f);
+    syntheticXpFallbackPerHour = (uint32)config.GetIntDefault("AiPlayerbot.SyntheticXpFallbackPerHour", 700);
+    syntheticGoldFallbackPerHour = (uint32)config.GetIntDefault("AiPlayerbot.SyntheticGoldFallbackPerHour", 3000);
     supervisorMode = config.GetBoolDefault("AiPlayerbot.SupervisorMode", false);
     supervisorMode = config.GetBoolDefault("AiPlayerbot.SupervisorMode", false);
+    autonomousFsm = config.GetBoolDefault("AiPlayerbot.AutonomousFSM", true);
+    combatDirector = config.GetBoolDefault("AiPlayerbot.CombatDirector", true);
+    autonomousParties = config.GetBoolDefault("AiPlayerbot.AutonomousParties", true);
     forceActiveWhenNearPlayer = config.GetBoolDefault("AiPlayerbot.ForceActiveWhenNearPlayer", false);
     limitCombatActivity = config.GetBoolDefault("AiPlayerbot.LimitCombatActivity", false);
     guildOrderAlwaysActive = config.GetBoolDefault("AiPlayerbot.GuildOrderAlwaysActive", true);
@@ -770,6 +797,17 @@ bool PlayerbotAIConfig::Initialize()
     llmGlobalContext = config.GetBoolDefault("AiPlayerbot.LLMGlobalContext", false);
     llmBotToBotChatChance = config.GetIntDefault("AiPlayerbot.LLMBotToBotChatChance", 0);
     llmRpgAIChatChance = config.GetIntDefault("AiPlayerbot.LLMRpgAIChatChance", 100);
+    llmCommandBridgeEnabled = config.GetBoolDefault("AiPlayerbot.LLMCommandBridgeEnabled", true);
+    llmCommandPrompt = config.GetStringDefault("AiPlayerbot.LLMCommandPrompt",
+        "You convert a WoW player's instruction to their bot companion into canonical bot commands. "
+        "Known commands: follow, stay, guard, grind, flee, attack my target, loot, sell gray, sell all, "
+        "repair, talk, drop quest, reset, summon, release, revive, wait for attack time 3, "
+        "co +dps assist, co +tank, nc +grind, give leader. "
+        "Reply with ONLY one line: 'CMD: <command>' (use ' | ' between multiple commands, max 3) "
+        "for instructions, or 'SAY: ok' if it is merely conversation. Examples: "
+        "'wait here' -> CMD: stay ; 'come with me' -> CMD: follow ; "
+        "'sell your junk' -> CMD: sell gray ; 'go kill stuff' -> CMD: grind ; "
+        "'take the lead' -> CMD: give leader");
 
     std::list<std::string> blockedChannels;
     LoadListString<std::list<std::string>>(config.GetStringDefault("AiPlayerbot.LLMBlockedReplyChannels", ""), blockedChannels);
@@ -858,6 +896,16 @@ bool PlayerbotAIConfig::Initialize()
     sPlayerbotHelpMgr.LoadBotHelpTexts();
 
     LoadTalentSpecs();
+
+    sLog.outString("Loading Trainer Guide Data...");
+    sTrainerGuideMgr.Reload();
+    sTrainerGuideMgr.Load();
+
+    sLog.outString("Loading Leveling Guide Routes...");
+    sGuideFollowMgr.Load();
+
+    sLog.outString("Loading Encounter Knowledge...");
+    sEncounterKnowledgeMgr.Load();
 
     if (sPlayerbotAIConfig.autoDoQuests)
     {

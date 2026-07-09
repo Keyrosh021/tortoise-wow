@@ -1,4 +1,7 @@
 #include "playerbot/playerbot.h"
+#include "RandomItemMgr.h"
+#include "LFG/TurtleLFGMgr.h"
+#include "playerbot/AiFactory.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "PlayerbotDbStore.h"
 #include "playerbot/PlayerbotFactory.h"
@@ -302,6 +305,8 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["rl"] = &PlayerbotHolder::HandleRaidLeader;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
+    m_holderHandlers["raidfill"] = &PlayerbotHolder::HandleRaidFill;
+    m_holderHandlers["promote60"] = &PlayerbotHolder::HandlePromote60;
 #ifdef GenerateBotTests
     m_holderHandlers["runtest"] = &PlayerbotHolder::HandleRunTest;
 #endif
@@ -389,6 +394,36 @@ void PlayerbotHolder::QueueBotLogout(uint32 guid)
 {
     std::lock_guard<std::mutex> guard(m_pendingLogoutsLock);
     m_pendingBotLogouts.push_back(guid);
+}
+
+void PlayerbotHolder::QueueBotTeleport(uint32 guid, uint32 map, float x, float y, float z, bool toHomebind, bool resurrect)
+{
+    std::lock_guard<std::mutex> guard(m_pendingTeleportsLock);
+    m_pendingBotTeleports.push_back({ guid, map, x, y, z, toHomebind, resurrect });
+}
+
+void PlayerbotHolder::DrainQueuedBotTeleports()
+{
+    std::vector<QueuedTeleport> pending;
+    {
+        std::lock_guard<std::mutex> guard(m_pendingTeleportsLock);
+        pending.swap(m_pendingBotTeleports);
+    }
+    for (QueuedTeleport const& qt : pending)
+    {
+        Player* bot = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, qt.guid));
+        if (!bot || !bot->IsInWorld() || bot->IsTaxiFlying())
+            continue;
+        if (qt.resurrect && !bot->IsAlive())
+        {
+            bot->ResurrectPlayer(0.7f);
+            bot->SpawnCorpseBones();
+        }
+        if (qt.toHomebind)
+            bot->TeleportToHomebind(0, false);
+        else
+            bot->TeleportTo(qt.map, qt.x, qt.y, qt.z, 0.0f);
+    }
 }
 
 void PlayerbotHolder::DrainQueuedBotLogouts()
@@ -2051,6 +2086,671 @@ std::string PlayerbotHolder::HandleBotClear(Player* bot, Player* master, const s
 
     ai->ClearRecordedMessages();
     return "Messages cleared";
+}
+
+// PHASE 3 RAID COMPOSITION: ".bot raidfill 10|20|40" fills the master's group to raid size with
+// proper role counts (10: 2t/2h, 20: 3t/5h, 40: 5t/10h, rest dps), promoting idle bots to the
+// master's level bracket when the fleet lacks them. Reuses the LFT fill/promotion machinery.
+// RAID TEST POOL: ".bot promote60 <count>" promotes idle random bots to level 60 with epic-tier
+// gear (factory epic quality at 60 rolls T1/T2-class items) so raids can be tested on demand.
+// ===== DETERMINISTIC RAID GEARING ==========================================================
+// promote60's random-roll factory gearing kept producing naked / green bots (item rolls find
+// zero epic candidates for many slot filters -> slot left EMPTY, silently). Raid bots are now
+// geared DETERMINISTICALLY: the class's real Tier 2 8-piece set + curated MC/BWL epic weapons,
+// neck, rings and cloak, equipped by exact item id with every failure logged loudly.
+namespace
+{
+    struct RaidKit { std::vector<uint32> items; };
+
+    // 8-piece T2 sets (original entries), + weapons/accessories per class. Verified against
+    // tw_world.item_template (set_id 210-218).
+    RaidKit GetRaidKit(uint8 cls)
+    {
+        RaidKit k;
+        switch (cls)
+        {
+            case CLASS_WARRIOR: // Wrath (218)
+                k.items = { 16963,16961,16966,16960,16962,16965,16959,16964,
+                            19364,            // Ashkandi (2H)
+                            18404,17063,18821,17102 };
+                break;
+            case CLASS_PALADIN: // Judgement (217)
+                k.items = { 16955,16953,16958,16952,16954,16957,16951,16956,
+                            17105,17106,      // Aurastone Hammer + Malistar's Defender
+                            18814,19147,17063,17102 };
+                break;
+            case CLASS_HUNTER:  // Dragonstalker (215)
+                k.items = { 16939,16937,16942,16936,16938,16941,16935,16940,
+                            17069,            // Striker's Mark (bow)
+                            19364,            // Ashkandi (2H sword melee stat stick)
+                            18404,17063,18821,17102 };
+                break;
+            case CLASS_ROGUE:   // Bloodfang (213)
+                k.items = { 16908,16832,16905,16910,16909,16906,16911,16907,
+                            18816,18805,      // Perdition's Blade + Core Hound Tooth
+                            18404,17063,18821,17102 };
+                break;
+            case CLASS_PRIEST:  // Transcendence (211)
+                k.items = { 16921,16924,16925,16922,16919,16926,16920,16923,
+                            18842,            // Staff of Dominance
+                            18814,19147,17063,17102 };
+                break;
+            case CLASS_SHAMAN:  // Ten Storms (216)
+                k.items = { 16947,16945,16950,16944,16946,16949,16943,16948,
+                            17105,17106,
+                            18814,19147,17063,17102 };
+                break;
+            case CLASS_MAGE:    // Netherwind (210)
+                k.items = { 16914,16917,16818,16915,16912,16918,16913,16916,
+                            18842,
+                            18814,19147,17063,17102 };
+                break;
+            case CLASS_WARLOCK: // Nemesis (212)
+                k.items = { 16929,16932,16933,16930,16927,16934,16928,16931,
+                            18842,
+                            18814,19147,17063,17102 };
+                break;
+            case CLASS_DRUID:   // Stormrage (214)
+                k.items = { 16900,16902,16897,16903,16901,16898,16904,16899,
+                            18842,
+                            18814,19147,17063,17102 };
+                break;
+        }
+        return k;
+    }
+
+    // Equipment slot(s) an inventory type lands in, so the old item can be destroyed first.
+    void SlotsForInvType(uint32 invType, std::vector<uint8>& slots)
+    {
+        switch (invType)
+        {
+            case INVTYPE_HEAD:       slots = { EQUIPMENT_SLOT_HEAD }; break;
+            case INVTYPE_NECK:       slots = { EQUIPMENT_SLOT_NECK }; break;
+            case INVTYPE_SHOULDERS:  slots = { EQUIPMENT_SLOT_SHOULDERS }; break;
+            case INVTYPE_CHEST:
+            case INVTYPE_ROBE:       slots = { EQUIPMENT_SLOT_CHEST }; break;
+            case INVTYPE_WAIST:      slots = { EQUIPMENT_SLOT_WAIST }; break;
+            case INVTYPE_LEGS:       slots = { EQUIPMENT_SLOT_LEGS }; break;
+            case INVTYPE_FEET:       slots = { EQUIPMENT_SLOT_FEET }; break;
+            case INVTYPE_WRISTS:     slots = { EQUIPMENT_SLOT_WRISTS }; break;
+            case INVTYPE_HANDS:      slots = { EQUIPMENT_SLOT_HANDS }; break;
+            case INVTYPE_CLOAK:      slots = { EQUIPMENT_SLOT_BACK }; break;
+            case INVTYPE_2HWEAPON:   slots = { EQUIPMENT_SLOT_MAINHAND, EQUIPMENT_SLOT_OFFHAND }; break;
+            case INVTYPE_WEAPONMAINHAND:
+            case INVTYPE_WEAPON:     slots = { EQUIPMENT_SLOT_MAINHAND }; break;
+            case INVTYPE_SHIELD:
+            case INVTYPE_WEAPONOFFHAND:
+            case INVTYPE_HOLDABLE:   slots = { EQUIPMENT_SLOT_OFFHAND }; break;
+            case INVTYPE_RANGED:
+            case INVTYPE_RANGEDRIGHT:
+            case INVTYPE_THROWN:
+            case INVTYPE_RELIC:      slots = { EQUIPMENT_SLOT_RANGED }; break;  // relic = libram/idol/totem
+            case INVTYPE_FINGER:     slots = { EQUIPMENT_SLOT_FINGER1, EQUIPMENT_SLOT_FINGER2 }; break;
+            case INVTYPE_TRINKET:    slots = { EQUIPMENT_SLOT_TRINKET1, EQUIPMENT_SLOT_TRINKET2 }; break;
+            default: slots.clear(); break;
+        }
+    }
+
+    bool ForceEquip(Player* bot, uint32 entry, bool secondRing, std::ostringstream& fails)
+    {
+        ItemPrototype const* proto = sObjectMgr.GetItemPrototype(entry);
+        if (!proto)
+        {
+            fails << entry << ":no-proto ";
+            return false;
+        }
+
+        std::vector<uint8> slots;
+        SlotsForInvType(proto->InventoryType, slots);
+        if (slots.empty())
+        {
+            fails << entry << ":bad-invtype ";
+            return false;
+        }
+
+        // rings/trinkets: second copy goes to the second slot
+        if (slots.size() == 2 && proto->InventoryType != INVTYPE_2HWEAPON)
+            slots = { secondRing ? slots[1] : slots[0] };
+
+        // Weapons: dual-wield offhand must not evict the mainhand we just gave. A 2H clears both.
+        for (uint8 s : slots)
+            if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, s))
+                bot->DestroyItem(INVENTORY_SLOT_BAG_0, s, true);
+
+        uint16 dest;
+        InventoryResult res = bot->CanEquipNewItem(NULL_SLOT, dest, entry, false);
+        if (res != EQUIP_ERR_OK)
+        {
+            fails << entry << ":err" << (uint32)res << " ";
+            return false;
+        }
+        Item* it = bot->EquipNewItem(dest, entry, true);
+        if (!it)
+        {
+            fails << entry << ":equip-null ";
+            return false;
+        }
+        return true;
+    }
+
+}
+
+// Returns items successfully equipped; every failure lands in failText. Shared by promote60
+// and the LFG/raidfill on-demand L60 promotions (HostHooks) so ALL raid bots gear identically.
+uint32 PlayerbotGearRaidTier(Player* bot, std::string& failText)
+{
+    RaidKit kit = GetRaidKit(bot->getClass());
+    std::ostringstream fails;
+    uint32 ok = 0;
+    bool ringSeen = false;
+    for (uint32 entry : kit.items)
+    {
+        ItemPrototype const* proto = sObjectMgr.GetItemPrototype(entry);
+        if (!proto)
+            continue;
+        // Only hardcode the class T2 ARMOR SET + WEAPONS. Skip the old one-size-fits-all jewelry
+        // (Band of Accuria etc.) -- an agility ring on a priest was the "weird gear" bug. Rings,
+        // neck, trinkets, cloak and the relic slot are filled stat-appropriately below.
+        const uint32 iv = proto->InventoryType;
+        const bool jewelry = iv == INVTYPE_FINGER || iv == INVTYPE_NECK || iv == INVTYPE_TRINKET
+            || iv == INVTYPE_CLOAK || iv == INVTYPE_RELIC || iv == INVTYPE_RANGED
+            || iv == INVTYPE_RANGEDRIGHT || iv == INVTYPE_THROWN;
+        if (jewelry)
+            continue;
+        const bool isRing = iv == INVTYPE_FINGER;
+        if (ForceEquip(bot, entry, isRing && ringSeen, fails))
+            ++ok;
+        if (isRing)
+            ringSeen = true;
+    }
+    // stat-appropriate fill for the accessory slots (rings/neck/trinkets/cloak/relic/ranged) +
+    // any set piece that failed -- casters get int/spirit jewelry, melee get agi/str, all get
+    // trinkets and a relic/ranged in slot 18.
+    ok += PlayerbotFillLevelGear(bot);
+    failText = fails.str();
+    return ok;
+}
+
+// kit size for reporting (promote60 output)
+static uint32 PlayerbotRaidKitSize(uint8 cls) { return (uint32)GetRaidKit(cls).items.size(); }
+
+// candidate item pool per (inventory_type, level-band) from item_template, cached in-process so
+// the fleet-wide sweep hits the DB at most once per (invtype, band). CanEquipNewItem does the
+// per-bot class/armor-proficiency filtering, so the pool is class-agnostic. Bypasses the
+// ai_playerbot_equip_cache (empty on this DB — that was why the earlier fill returned 0).
+// The set of item entries that are REALLY OBTAINABLE (drop/vendor/gather/DE), built once. GM /
+// costume / test items (e.g. the Nightelf holiday masks) are in NO source table -> excluded.
+// item -> required_skill_rank (0 if none) so we can gate craft-skill gear to a high-enough level.
+static const std::unordered_map<uint32, uint32>& ObtainableItems()
+{
+    static std::once_flag once;
+    static std::unordered_map<uint32, uint32> obt;
+    std::call_once(once, []()
+    {
+        static const char* srcTables[] = {
+            "creature_loot_template", "gameobject_loot_template", "reference_loot_template",
+            "fishing_loot_template", "skinning_loot_template", "disenchant_loot_template",
+            "item_loot_template", "pickpocketing_loot_template", "mail_loot_template" };
+        std::unordered_set<uint32> src;
+        for (const char* t : srcTables)
+            if (QueryResult* r = WorldDatabase.PQuery("SELECT DISTINCT item FROM %s", t))
+            { do { src.insert(r->Fetch()[0].GetUInt32()); } while (r->NextRow()); delete r; }
+        if (QueryResult* r = WorldDatabase.PQuery("SELECT DISTINCT item FROM npc_vendor"))
+        { do { src.insert(r->Fetch()[0].GetUInt32()); } while (r->NextRow()); delete r; }
+        // seed every loot/vendor item at skill-rank 0
+        for (uint32 e : src)
+            obt[e] = 0;
+        // CRAFTABLES: items created by a trade-skill spell (effect 24 = CREATE_ITEM). Two simple
+        // queries (no JOIN/GROUP BY, which threw at the server DB layer and aborted the process):
+        // (1) collect crafted item entries, (2) look up recipe skill ranks separately.
+        static const char* effCols[3] = { "effectItemType1", "effectItemType2", "effectItemType3" };
+        static const char* effFlags[3] = { "effect1", "effect2", "effect3" };
+        std::unordered_set<uint32> crafted;
+        for (int i = 0; i < 3; ++i)
+            if (QueryResult* r = WorldDatabase.PQuery(
+                    "SELECT %s FROM spell_template WHERE %s=24 AND %s>0", effCols[i], effFlags[i], effCols[i]))
+            { do { crafted.insert(r->Fetch()[0].GetUInt32()); } while (r->NextRow()); delete r; }
+        for (uint32 e : crafted)
+            if (!obt.count(e))
+                obt[e] = 0;   // craft-only gear; skill rank filled from item_template below
+        // equip/craft skill requirement on the item itself gates it (e.g. 290 skill needed)
+        if (QueryResult* r = WorldDatabase.PQuery(
+            "SELECT entry, required_skill_rank FROM item_template WHERE required_skill_rank > 0"))
+        { do { Field* f = r->Fetch(); uint32 e = f[0].GetUInt32(); uint32 rank = f[1].GetUInt32();
+               auto it = obt.find(e); if (it != obt.end() && rank > it->second) it->second = rank;
+             } while (r->NextRow()); delete r; }
+        sLog.outString("ObtainableItems: %zu real items whitelisted (loot+vendor+craft) for bot gearing", obt.size());
+    });
+    return obt;
+}
+
+// SQL fragment that keeps only REAL gear for a slot (excludes costume/event/toy items):
+//  armor pieces  -> must have durability (costume hats/masks have max_durability 0)
+//  weapons       -> must deal damage AND have durability (flowers/toys don't)
+//  shield        -> armor + durability
+//  jewelry/cloak/holdable -> must carry armor or a stat
+static const char* RealGearClause(uint32 invType)
+{
+    switch (invType)
+    {
+        case INVTYPE_HEAD: case INVTYPE_SHOULDERS: case INVTYPE_CHEST: case INVTYPE_ROBE:
+        case INVTYPE_WAIST: case INVTYPE_LEGS: case INVTYPE_FEET: case INVTYPE_WRISTS:
+        case INVTYPE_HANDS:
+            return " AND max_durability > 0 AND armor > 0";
+        case INVTYPE_WEAPON: case INVTYPE_2HWEAPON: case INVTYPE_WEAPONMAINHAND:
+        case INVTYPE_WEAPONOFFHAND: case INVTYPE_RANGED: case INVTYPE_RANGEDRIGHT:
+        case INVTYPE_THROWN:
+            return " AND dmg_min1 > 0 AND max_durability > 0";
+        case INVTYPE_SHIELD:
+            return " AND armor > 0 AND max_durability > 0";
+        case INVTYPE_HOLDABLE:
+            return " AND stat_value1 > 0";
+        case INVTYPE_TRINKET:
+            // classic trinkets are mostly on-use/proc/equip-effect items with ZERO plain stats
+            // (Carrot on a Stick, Linken's Boomerang...). Requiring stats emptied the pool to
+            // 14/74 and left most 50+ bots trinketless. The ilvl band + obtainable filter is
+            // the real gate; any green/blue trinket of the right level is legit gear.
+            return "";
+        default:  // neck, finger, cloak
+            return " AND (armor > 0 OR stat_value1 > 0)";
+    }
+}
+
+// class -> SQL fragment rejecting off-spec stat items (casters must not wear agi/str jewelry like
+// Band of Accuria; melee must not wear int/spirit). Hybrids (pala/shaman/druid) unrestricted.
+static const char* ClassStatClause(uint8 cls)
+{
+    switch (cls)
+    {
+        case CLASS_MAGE: case CLASS_WARLOCK: case CLASS_PRIEST:   // pure casters: no agi(3)/str(4)
+            return " AND stat_type1 NOT IN (3,4) AND stat_type2 NOT IN (3,4) AND stat_type3 NOT IN (3,4)";
+        case CLASS_ROGUE: case CLASS_HUNTER: case CLASS_WARRIOR:  // melee: no int(5)/spirit(6)
+            return " AND stat_type1 NOT IN (5,6) AND stat_type2 NOT IN (5,6) AND stat_type3 NOT IN (5,6)";
+        default:
+            return "";   // paladin/shaman/druid can be caster or melee
+    }
+}
+
+static const std::vector<uint32>& GearCandidates(uint32 invType, uint32 band, uint32 botLevel, uint8 botClass, uint32 specId)
+{
+    static std::mutex mx;
+    static std::map<uint64, std::vector<uint32>> cache;
+    // key by invtype+spec+band+level-capped-skill so the craft-skill gate is respected per bracket
+    const uint64 key = ((uint64)invType << 44) | ((uint64)botClass << 40) | ((uint64)specId << 32) | ((uint64)band << 8) | (botLevel / 5);
+    std::lock_guard<std::mutex> lk(mx);
+    auto it = cache.find(key);
+    if (it != cache.end())
+        return it->second;
+
+    std::vector<uint32>& v = cache[key];
+    // endgame (60) bots may wear epics for accessories; leveling bots stay uncommon/rare
+    const char* qualityIn = botLevel >= 60 ? "(2,3,4)" : "(2,3)";
+    // POWER-APPROPRIATE by ITEM_LEVEL, not required_level. The naked-bot / GM-mask / rep-neck bug
+    // was that masks (ilvl 45), rep necks (ilvl 68) and 290-Engineering items (ilvl 58) all have
+    // required_level 0, so a required_level filter let them onto level-5 bots. item_level is the
+    // true power indicator: a level-N bot wears ilvl ~N gear. Band [N-8, N+6] covers quest greens
+    // (ilvl≈N) through dungeon blues (ilvl≈N+5). required_level<=N still gates equip-ability, and
+    // the high item_level of craft/rep gear keeps it off low bots automatically.
+    const uint32 ilo = botLevel > 8 ? botLevel - 8 : 1;
+    const uint32 ihi = botLevel + (botLevel >= 60 ? 16 : 6);
+    const uint32 skillCap = botLevel * 5;   // vanilla: max trade skill = level * 5
+    const auto& obt = ObtainableItems();
+    QueryResult* res = WorldDatabase.PQuery(
+        "SELECT entry FROM item_template WHERE inventory_type=%u AND quality IN %s "
+        "AND item_level BETWEEN %u AND %u AND required_level <= %u AND bonding IN (0,1,2,3)%s%s "
+        "ORDER BY item_level DESC, quality DESC LIMIT 400",
+        invType, qualityIn, ilo, ihi, botLevel, RealGearClause(invType), ClassStatClause(botClass));
+    // SPEC-WEIGHT SCORING (theorycraft-informed): rank each obtainable candidate with
+    // RandomItemMgr::CalculateStatWeight, which prices plain stats AND equip-spell auras
+    // (spell power, +healing, spell hit/crit, melee hit/crit, AP, defense) against the
+    // per-spec ai_playerbot_weightscales (e.g. mage: spellhit 100 > spellcrit 81 > sp 7 > int;
+    // rogue: crit 46 > hit 36 > weapon dps > agi). This is what stops "useless stats" gear:
+    // a spirit/int ring scores 0 for a rogue spec and never enters its candidate list.
+    std::vector<std::pair<uint32, uint32>> scored;   // {weight, entry}
+    std::vector<uint32> unscored;                    // weight-0 fallback pool (keeps low bands geared)
+    if (res)
+    {
+        do
+        {
+            uint32 e = res->Fetch()[0].GetUInt32();
+            auto oi = obt.find(e);
+            if (oi == obt.end())
+                continue;                       // not obtainable (GM/costume/test) -> skip
+            if (oi->second && oi->second > skillCap)
+                continue;                       // craft-skill gear the bot can't have yet
+            ItemPrototype const* proto = sObjectMgr.GetItemPrototype(e);
+            if (!proto)
+                continue;
+            uint32 weight = 0;
+            if (specId)
+            {
+                ItemSpecType itSpec = ITEM_SPEC_NONE;
+                weight = sRandomItemMgr.CalculateStatWeight(botClass, specId, proto, itSpec);
+            }
+            if (weight)
+                scored.push_back({ weight, e });
+            else if (unscored.size() < 60)
+                unscored.push_back(e);
+        } while (res->NextRow());
+        delete res;
+    }
+    if (!scored.empty())
+    {
+        std::stable_sort(scored.begin(), scored.end(),
+            [](const std::pair<uint32, uint32>& a, const std::pair<uint32, uint32>& b) { return a.first > b.first; });
+        for (auto const& pr : scored)
+        {
+            v.push_back(pr.second);
+            if (v.size() >= 60)
+                break;
+        }
+    }
+    else
+        v = unscored;   // no spec / nothing scores at this band -> any real gear beats a naked slot
+    return v;
+}
+
+// DETERMINISTIC LEVEL-APPROPRIATE GEAR FILL. The factory's random roll leaves slots empty at
+// many levels (huge unavailable-item filter + roll misses), which is the "naked bot" bug. This
+// fills EVERY empty armor/weapon slot from item_template directly, letting CanEquipNewItem
+// enforce class/armor proficiency. Returns the number of slots filled.
+// True if this equipped item is REAL obtainable gear (in a loot/vendor/craft source). Used to
+// strip GM/costume/test items (Nightelf masks etc.) that older rolls equipped.
+// Strip every equipped item that isn't level-appropriate REAL gear: unobtainable (GM/test),
+// costume/event/toy (santa hats, masks, flower off-hands), or item_level too high for the level.
+// Returns count stripped. Call after any factory.Randomize (which re-adds costume junk).
+uint32 PlayerbotStripBadGear(Player* bot)
+{
+    if (!bot) return 0;
+    uint32 stripped = 0;
+    for (uint8 sl = EQUIPMENT_SLOT_START; sl < EQUIPMENT_SLOT_END; ++sl)
+    {
+        if (sl == EQUIPMENT_SLOT_TABARD || sl == EQUIPMENT_SLOT_BODY) continue;
+        Item* eq = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, sl);
+        if (!eq) continue;
+        ItemPrototype const* ep = eq->GetProto();
+        const bool tooPowerful = ep->ItemLevel > bot->GetLevel() + 8;
+        const uint32 iv = ep->InventoryType;
+        const bool armorSlot = iv==INVTYPE_HEAD||iv==INVTYPE_SHOULDERS||iv==INVTYPE_CHEST||iv==INVTYPE_ROBE||
+            iv==INVTYPE_WAIST||iv==INVTYPE_LEGS||iv==INVTYPE_FEET||iv==INVTYPE_WRISTS||iv==INVTYPE_HANDS;
+        const bool weaponSlot = iv==INVTYPE_WEAPON||iv==INVTYPE_2HWEAPON||iv==INVTYPE_WEAPONMAINHAND||
+            iv==INVTYPE_WEAPONOFFHAND||iv==INVTYPE_RANGED||iv==INVTYPE_RANGEDRIGHT||iv==INVTYPE_THROWN;
+        bool costume = false;
+        if (armorSlot) costume = (ep->MaxDurability == 0 || ep->Armor == 0);
+        else if (weaponSlot) costume = (ep->Damage[0].DamageMin == 0 || ep->MaxDurability == 0);
+        else { bool hasStat = ep->Armor > 0; for (int st=0; st<MAX_ITEM_PROTO_STATS && !hasStat; ++st) if (ep->ItemStat[st].ItemStatValue) hasStat=true; costume = !hasStat; }
+        // wrong-stat gear: zero spec-weight (a spirit/int ring on a rogue, agi jewelry on a
+        // priest) -> strip so the weighted fill replaces it. GUARD: only strip when the scored
+        // candidate pool for this slot is non-empty -- the fill only equips weight>0 items, so
+        // strip(weight==0) + fill(weight>0) is convergent (no strip/refill loop), and the guard
+        // prevents stripping into a permanently naked slot at bands where nothing scores.
+        bool wrongStat = false;
+        {
+            const uint32 specId = sRandomItemMgr.GetPlayerSpecId(bot);
+            if (specId)
+            {
+                ItemSpecType itSpec = ITEM_SPEC_NONE;
+                const uint32 w = sRandomItemMgr.CalculateStatWeight(bot->getClass(), specId, ep, itSpec);
+                if (!w)
+                {
+                    const std::vector<uint32>& repl = GearCandidates(iv, bot->GetLevel() / 5, bot->GetLevel(), bot->getClass(), specId);
+                    wrongStat = !repl.empty();
+                }
+            }
+        }
+        if (!PlayerbotIsObtainableGear(ep->ItemId) || tooPowerful || costume || wrongStat)
+        {
+            bot->DestroyItem(INVENTORY_SLOT_BAG_0, sl, true);
+            ++stripped;
+        }
+    }
+    return stripped;
+}
+
+bool PlayerbotIsObtainableGear(uint32 entry)
+{
+    return ObtainableItems().count(entry) != 0;
+}
+
+uint32 PlayerbotFillLevelGear(Player* bot)
+{
+    if (!bot)
+        return 0;
+    const uint32 band = bot->GetLevel() / 5;
+    const uint32 specId = sRandomItemMgr.GetPlayerSpecId(bot);   // talent-derived spec drives stat weights
+
+    struct SlotSpec { uint8 slot; std::vector<uint32> invTypes; };
+    static const std::vector<SlotSpec> specs = {
+        { EQUIPMENT_SLOT_HEAD,      { INVTYPE_HEAD } },
+        { EQUIPMENT_SLOT_NECK,      { INVTYPE_NECK } },
+        { EQUIPMENT_SLOT_SHOULDERS, { INVTYPE_SHOULDERS } },
+        { EQUIPMENT_SLOT_CHEST,     { INVTYPE_CHEST, INVTYPE_ROBE } },
+        { EQUIPMENT_SLOT_WAIST,     { INVTYPE_WAIST } },
+        { EQUIPMENT_SLOT_LEGS,      { INVTYPE_LEGS } },
+        { EQUIPMENT_SLOT_FEET,      { INVTYPE_FEET } },
+        { EQUIPMENT_SLOT_WRISTS,    { INVTYPE_WRISTS } },
+        { EQUIPMENT_SLOT_HANDS,     { INVTYPE_HANDS } },
+        { EQUIPMENT_SLOT_FINGER1,   { INVTYPE_FINGER } },
+        { EQUIPMENT_SLOT_FINGER2,   { INVTYPE_FINGER } },
+        { EQUIPMENT_SLOT_BACK,      { INVTYPE_CLOAK } },
+        { EQUIPMENT_SLOT_MAINHAND,  { INVTYPE_WEAPON, INVTYPE_2HWEAPON, INVTYPE_WEAPONMAINHAND } },
+        { EQUIPMENT_SLOT_OFFHAND,   { INVTYPE_SHIELD, INVTYPE_WEAPONOFFHAND, INVTYPE_HOLDABLE, INVTYPE_WEAPON } },
+        { EQUIPMENT_SLOT_RANGED,    { INVTYPE_RANGED, INVTYPE_THROWN, INVTYPE_RANGEDRIGHT, INVTYPE_RELIC } },
+        { EQUIPMENT_SLOT_TRINKET1,  { INVTYPE_TRINKET } },
+        { EQUIPMENT_SLOT_TRINKET2,  { INVTYPE_TRINKET } },
+    };
+
+    uint32 filled = 0;
+    for (auto const& sp : specs)
+    {
+        if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, sp.slot))
+            continue;
+
+        bool done = false;
+        for (int bstep = 0; bstep <= 1 && !done; ++bstep)   // exact band, then one lower
+        {
+            const uint32 b = band >= (uint32)bstep ? band - bstep : 0;
+            for (uint32 invType : sp.invTypes)
+            {
+                const std::vector<uint32>& cand = GearCandidates(invType, b, bot->GetLevel(), bot->getClass(), specId);
+                if (cand.empty())
+                    continue;
+                uint32 h = (bot->GetGUIDLow() * 2654435761u) ^ (sp.slot * 40503u);
+                for (size_t tries = 0; tries < cand.size(); ++tries)
+                {
+                    uint32 entry = cand[(h + tries) % cand.size()];
+                    uint16 dest;
+                    if (bot->CanEquipNewItem(NULL_SLOT, dest, entry, false) == EQUIP_ERR_OK
+                        && bot->EquipNewItem(dest, entry, true))
+                    {
+                        ++filled;
+                        done = true;
+                        break;
+                    }
+                }
+                if (done)
+                    break;
+            }
+        }
+    }
+    if (filled)
+    {
+        bot->DurabilityRepairAll(false, 1.0f);
+        bot->SetHealth(bot->GetMaxHealth());
+    }
+    return filled;
+}
+
+std::list<std::string> PlayerbotHolder::HandlePromote60(Player* master, const std::string param, AccountTypes security)
+{
+    std::list<std::string> messages;
+    if (!master)
+        return messages;
+
+    uint32 count = atoi(param.c_str());
+    if (!count || count > 100)
+    {
+        messages.push_back("usage: promote60 <1-100>");
+        return messages;
+    }
+
+    std::vector<Player*> candidates;
+    sRandomPlayerbotMgr.ForEachPlayerbot([&](Player* bot)
+    {
+        if (candidates.size() >= count)
+            return;
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+            return;
+        if (!sRandomPlayerbotMgr.IsRandomBot(bot) || bot->GetGroup() || bot->IsInCombat() ||
+            bot->InBattleGround() || bot->IsHardcore())
+            return;                                       // existing 60s allowed: they get RE-GEARED
+        if (!bot->GetPlayerbotAI() || bot->GetPlayerbotAI()->HasRealPlayerMaster())
+            return;
+        candidates.push_back(bot);
+    });
+
+    // existing 60s first (they were geared by the broken pre-forceFull path -> re-roll them)
+    std::stable_sort(candidates.begin(), candidates.end(),
+        [](Player* a, Player* b) { return a->GetLevel() > b->GetLevel(); });
+
+    uint32 done = 0, regeared = 0, fullyGeared = 0;
+    uint32 worstEquipped = 999;
+    std::string worstBot;
+    for (Player* bot : candidates)
+    {
+        if (bot->GetLevel() < 60)
+        {
+            bot->GiveLevel(60);            // DisableRandomLevels blocks Randomize's SetLevel
+            bot->InitTalentForLevel();
+        }
+        else
+            ++regeared;
+
+        // factory for talents/spells/skills/consumables; gear comes from the deterministic
+        // tier kit AFTER it (the factory's random gear rolls are what kept producing naked bots)
+        PlayerbotFactory factory(bot, 60, ITEM_QUALITY_EPIC);
+        factory.Randomize(false, false, true);
+
+        std::string fails;
+        const uint32 equipped = PlayerbotGearRaidTier(bot, fails);
+        const uint32 kitSize = PlayerbotRaidKitSize(bot->getClass());
+        if (equipped >= kitSize - 1)   // second ring may collide with itself on re-runs
+            ++fullyGeared;
+        if (equipped < worstEquipped) { worstEquipped = equipped; worstBot = bot->GetName(); }
+        sLog.outString("promote60: %s cls=%u equipped=%u/%u %s%s",
+            bot->GetName(), bot->getClass(), equipped, kitSize,
+            fails.empty() ? "" : "FAILS: ", fails.c_str());
+
+        bot->DurabilityRepairAll(false, 1.0f);
+        bot->SetHealth(bot->GetMaxHealth());
+        ++done;
+    }
+    sLog.outString("promote60: processed %u (%u re-geared existing 60s, %u fully geared)",
+        done, regeared, fullyGeared);
+
+    std::ostringstream out;
+    out << "promoted " << done << " bots: T2 set + epic weapons (" << fullyGeared << " full kits";
+    if (done > fullyGeared && !worstBot.empty())
+        out << ", worst " << worstBot << " " << worstEquipped << " pieces - see server log";
+    out << ")";
+    if (done < count)
+        out << " (only " << done << " idle candidates available)";
+    messages.push_back(out.str());
+    return messages;
+}
+
+std::list<std::string> PlayerbotHolder::HandleRaidFill(Player* master, const std::string param, AccountTypes security)
+{
+    std::list<std::string> messages;
+    if (!master)
+        return messages;
+
+    uint32 size = atoi(param.c_str());
+    if (size != 10 && size != 20 && size != 40)
+    {
+        messages.push_back("usage: raidfill 10 | 20 | 40");
+        return messages;
+    }
+
+    Group* group = master->GetGroup();
+    if (!group)
+    {
+        group = new Group();
+        if (!group->Create(master->GetObjectGuid(), master->GetName()))
+        {
+            delete group;
+            messages.push_back("could not create group");
+            return messages;
+        }
+        sObjectMgr.AddGroup(group);
+        group->SetLootMethod(GROUP_LOOT);
+    }
+    if (!group->IsLeader(master->GetObjectGuid()))
+    {
+        messages.push_back("you must be the group leader");
+        return messages;
+    }
+
+    uint32 tanks = size == 10 ? 2 : (size == 20 ? 3 : 5);
+    uint32 heals = size == 10 ? 2 : (size == 20 ? 5 : 10);
+
+    // subtract roles already present
+    uint32 haveTank = 0, haveHeal = 0, members = 0;
+    std::vector<ObjectGuid> exclude;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->getSource();
+        if (!member) continue;
+        ++members;
+        exclude.push_back(member->GetObjectGuid());
+        BotRoles r = AiFactory::GetPlayerRoles(member);
+        if (r & BOT_ROLE_TANK) ++haveTank;
+        else if (r & BOT_ROLE_HEALER) ++haveHeal;
+    }
+    if (members >= size)
+    {
+        messages.push_back("group already full");
+        return messages;
+    }
+
+    uint32 slots = size - members;
+    uint32 needTank = haveTank >= tanks ? 0 : tanks - haveTank;
+    uint32 needHeal = haveHeal >= heals ? 0 : heals - haveHeal;
+    if (needTank + needHeal > slots) { needHeal = slots > needTank ? slots - needTank : 0; }
+    uint32 needDps = slots - std::min(slots, needTank + needHeal);
+
+    uint32 level = master->GetLevel();
+    std::vector<ObjectGuid> fills = Playerbot_SelectLfgFill(
+        level >= 6 ? level - 5 : 1, std::min<uint32>(60, level + 3), needTank, needHeal, needDps, exclude);
+    if (fills.size() < needTank + needHeal + needDps)
+    {
+        messages.push_back("not enough suitable bots (try again in a few seconds — promoting fills)");
+        return messages;
+    }
+
+    if (!group->IsRaidGroup())
+        group->ConvertToRaid();
+
+    uint32 added = 0;
+    for (ObjectGuid guid : fills)
+    {
+        Player* bot = sObjectAccessor.FindPlayer(guid);
+        if (!bot) continue;
+        if (group->AddMember(guid, bot->GetName()))
+        {
+            Playerbot_PrepareLfgBot(guid, master->GetObjectGuid());
+            // summon to the leader — fills spawn worldwide and would otherwise try to WALK here
+            if (!bot->IsInCombat() && !bot->IsTaxiFlying())
+                bot->TeleportTo(master->GetMapId(), master->GetPositionX(), master->GetPositionY(), master->GetPositionZ(), 0.0f);
+            ++added;
+        }
+    }
+    group->BroadcastGroupUpdate();
+
+    std::ostringstream out;
+    out << "raid filled: +" << added << " bots (" << needTank << " tanks, " << needHeal << " healers, " << needDps << " dps)";
+    messages.push_back(out.str());
+    return messages;
 }
 
 std::list<std::string> PlayerbotHolder::HandleParty(Player* master, const std::string param, AccountTypes security)

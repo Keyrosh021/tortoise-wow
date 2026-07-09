@@ -6,6 +6,9 @@ namespace ai
     bool IsLootGuidSuppressed(ObjectGuid guid);
     void SuppressLootGuid(ObjectGuid guid, time_t until);
     bool IsLootGuidSkippedForBot(Player* bot, ObjectGuid guid);
+    // Per-bot short-lived ATTACK-target blacklist (anti re-acquire thrash after stall/abandon).
+    void DeferTargetGuidForBot(Player* bot, ObjectGuid guid, time_t delaySeconds);
+    bool IsTargetGuidSkippedForBot(Player* bot, ObjectGuid guid);
     void DeferLootGuidForBot(Player* bot, ObjectGuid guid, time_t delaySeconds);
     void DeferForeignLootGuidForBot(Player* bot, ObjectGuid guid);
     // Clears BOTH skip layers (per-bot defer + global suppression) for a guid. Needed because

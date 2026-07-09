@@ -37,7 +37,15 @@ namespace ai
         uint32 failureCount = 0;
     };
 
-    class BotLearningMgr
+    // Phase 4 encounter telemetry: last damage taken per bot (spell + source), fed from the core
+// damage hook so deaths can be attributed to the killing mechanic.
+namespace botlearn
+{
+    void RecordDamageTaken(uint32 victimGuidLow, uint32 spellId, uint32 attackerEntry);
+    bool GetRecentDamage(uint32 victimGuidLow, uint32 windowMs, uint32& spellId, uint32& attackerEntry);
+}
+
+class BotLearningMgr
     {
     public:
         BotLearningMgr() = default;
@@ -142,6 +150,8 @@ namespace ai
             float minPowerPct = 0.0f;
             bool endedAlive = false;
             bool deathObserved = false;
+            uint32 lastDamageSpellId = 0;    // Phase 4: killing-blow attribution
+            uint32 lastDamagerEntry = 0;
             int32 levelDelta = 0;
             int32 xpDelta = 0;
             int32 moneyDelta = 0;

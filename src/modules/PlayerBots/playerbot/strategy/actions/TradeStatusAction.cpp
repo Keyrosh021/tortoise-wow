@@ -182,7 +182,7 @@ bool TradeStatusAction::CheckTrade()
             }
             else
             {
-                bot->Say("Thank you " + name + ".", (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                bot->Say("Thank you " + name + ".", PlayerbotChatLanguage(bot));
             }
         }
         return isGettingItem;

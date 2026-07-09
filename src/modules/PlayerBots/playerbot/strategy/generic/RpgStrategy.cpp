@@ -213,14 +213,14 @@ void RpgCraftStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
 
 void RpgJumpStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
 {
-    // DISABLED: idle "random jump" flavor renders as a TELEPORT-FLOAT, not a real jump. JumpAction::
-    // DoJump sends the jump packet but then bot->Relocate(highestPoint) snaps the SERVER position to
-    // the arc's apex, so observers see the bot pop up and freeze mid-air (no parabolic animation) --
-    // unmistakably a bot, which defeats the human-like goal. A real fix needs a parabolic MoveSpline;
-    // until then, no random idle jumps. (Functional navigation jumps -- jump::chase/follow -- stay.)
-    // triggers.push_back(new TriggerNode(
-    //     "random jump",
-    //     NextAction::array(0, new NextAction("jump::random", ACTION_PASSTROUGH), NULL)));
+    // RE-ENABLED 2026-07-05: DoJump now BROADCASTS the jump packet directly (bot->SendMessageToSet
+    // Except) instead of queuing it to the socketless bot session (dropped), and no longer teleports
+    // the server position to the apex -- so nearby players see a real parabolic jump animation, not
+    // the old pop-up-and-freeze float. JumpAction::isUseful gates this on HasPlayerNearby(), so the
+    // idle flavor only fires when a real player can actually see it.
+    triggers.push_back(new TriggerNode(
+        "random jump",
+        NextAction::array(0, new NextAction("jump::random", ACTION_PASSTROUGH), NULL)));
 }
 
 void RpgJumpStrategy::InitCombatTriggers(std::list<TriggerNode *> &triggers)

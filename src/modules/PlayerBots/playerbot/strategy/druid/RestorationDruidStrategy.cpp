@@ -27,6 +27,12 @@ private:
 
 void RestorationDruidStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
 {
+    // Back off to heal range when a mob is meleeing the healer (relevance above follow, below
+    // critical heals) -- keeps healers out of cleave/AoE instead of glued to the tank at 1.5y.
+    triggers.push_back(new TriggerNode(
+        "healer in melee danger",
+        NextAction::array(0, new NextAction("flee", 55.0f), NULL)));
+
     DruidStrategy::InitCombatTriggers(triggers);
 
     triggers.push_back(new TriggerNode(

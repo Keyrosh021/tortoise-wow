@@ -34,7 +34,10 @@ bool TurtleLFGMgr::HandleAddonMessage(Player* player, std::string const& message
         return false;
 
     std::string payload = message.substr(strlen(kPrefix));
-    if (!payload.empty() && payload[0] == kFieldDelimiter)
+    // The client's SendAddonMessage(prefix, msg, channel) transmits "TW_LFG\t<msg>" — a TAB
+    // separator, not ';'. Strip any prefix separator or the dispatch below never matches and
+    // every request is silently swallowed ("Find Group does nothing").
+    while (!payload.empty() && (payload[0] == kFieldDelimiter || payload[0] == '\t' || payload[0] == ' '))
         payload.erase(0, 1);
 
     if (payload.compare(0, strlen("C2S_GET_GROUPS_STATUS"), "C2S_GET_GROUPS_STATUS") == 0)
@@ -52,13 +55,13 @@ bool TurtleLFGMgr::HandleAddonMessage(Player* player, std::string const& message
     if (payload.compare(0, strlen("C2S_SIGNUP"), "C2S_SIGNUP") == 0)
         return HandleSignup(player, payload);
     if (payload.compare(0, strlen("C2S_QUEUE_JOIN"), "C2S_QUEUE_JOIN") == 0)
-        return HandleQueueJoin(player);
+        return HandleQueueJoinPayload(player, payload);
     if (payload.compare(0, strlen("C2S_QUEUE_LEAVE"), "C2S_QUEUE_LEAVE") == 0)
         return HandleQueueLeave(player);
     if (payload.compare(0, strlen("C2S_GET_QUEUE_STATUS"), "C2S_GET_QUEUE_STATUS") == 0)
         return HandleQueueStatus(player);
     if (payload.compare(0, strlen("C2S_ROLECHECK_RESPONSE"), "C2S_ROLECHECK_RESPONSE") == 0)
-        return HandleRolecheckResponse(player);
+        return HandleRolecheckResponsePayload(player, payload);
     if (payload.compare(0, strlen("C2S_OFFER_ACCEPT"), "C2S_OFFER_ACCEPT") == 0)
         return HandleOfferAccept(player);
 
@@ -291,37 +294,7 @@ bool TurtleLFGMgr::HandleSignup(Player* player, std::string const& message)
     return true;
 }
 
-bool TurtleLFGMgr::HandleQueueJoin(Player* player)
-{
-    if (player && player->IsHardcore())
-        SendQueueError(player, "hardcore");
-    else
-        SendQueueError(player, "queue_disabled");
-    return true;
-}
-
-bool TurtleLFGMgr::HandleQueueLeave(Player* player)
-{
-    SendQueueLeft(player);
-    return true;
-}
-
-bool TurtleLFGMgr::HandleQueueStatus(Player* player)
-{
-    if (player && player->IsHardcore())
-        SendQueueError(player, "hardcore");
-    return true;
-}
-
-bool TurtleLFGMgr::HandleRolecheckResponse(Player* player)
-{
-    return player != nullptr;
-}
-
-bool TurtleLFGMgr::HandleOfferAccept(Player* player)
-{
-    return player != nullptr;
-}
+#include "TurtleLFGQueue.inc"
 
 void TurtleLFGMgr::SendGroupsStatus(Player* player) const
 {

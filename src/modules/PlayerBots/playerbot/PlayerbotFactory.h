@@ -50,7 +50,7 @@ public:
     static ObjectGuid GetRandomBot();
     static void Init();
     void Refresh();
-    void Randomize(bool incremental, bool syncWithMaster);
+    void Randomize(bool incremental, bool syncWithMaster, bool forceFull = false);
     // Learn every class-trainer spell the bot's level qualifies for (all ranks).
     // Public so it can be called on bot LOGIN (existing bots leveled before AutoLearn
     // was on and are missing most of their kit -> caps every class + the learned policy).

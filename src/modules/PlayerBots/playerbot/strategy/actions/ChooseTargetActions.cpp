@@ -210,12 +210,28 @@ bool AttackAnythingAction::isUseful()
     if (!bot->IsInCombat() && AI_VALUE(bool, "has available loot"))
         return false;
 
+    // INSTANCE PULL DISCIPLINE (dungeon mode phase 1): inside a dungeon/raid, a grouped bot that
+    // is not the leader must NEVER self-initiate a pull -- the tank/leader controls the pace.
+    // Assisting (attackers exist / leader engaged) and self-defense are handled elsewhere and
+    // remain unaffected; this only stops "headless chicken" body-pulls.
+    if (bot->GetGroup() && bot->GetMap() && (bot->GetMap()->IsDungeon() || bot->GetMap()->IsRaid()) &&
+        !bot->GetGroup()->IsLeader(bot->GetObjectGuid()) &&
+        !bot->IsInCombat() && bot->getAttackers().empty())
+        return false;
+
     // Don't START a new fight badly hurt. Bots revived at ~50% HP were instantly engaging fresh
     // 100% mobs ("attack anything" rel 5.0 beats "food" rel 3.0) and losing the race -- watched
     // Thuskey die 16x in 13 min re-engaging at 52% HP every revive. A real player eats first.
     // Only gates STARTING fights; being attacked / already in combat is unaffected.
     if (!ai->HasRealPlayerMaster() && !bot->IsInCombat() && bot->getAttackers().empty() &&
         bot->GetHealthPercent() < 55.0f)
+        return false;
+
+    // SWARM GUARD (Goal 1: 75% of bot deaths happen outnumbered, 31% with 6+ attackers). While
+    // 3+ mobs are already hitting this bot, never acquire an ADDITIONAL target -- kill what's on
+    // you first. The combat engine keeps fighting the existing attackers (current-target/assist
+    // triggers are unaffected); this only blocks widening the pull into a death swarm.
+    if (!ai->HasRealPlayerMaster() && bot->getAttackers().size() >= 3)
         return false;
 
     Unit* questObjectiveTarget = FindVisibleQuestObjectiveTarget(ai, bot);
@@ -283,7 +299,7 @@ bool AttackAnythingAction::isUseful()
     // firm: GrindTargetValue already rejects far non-quest mobs for travelers -- kill, resume.
     if (!questObjectiveTarget && AI_VALUE(bool, "travel target traveling") &&
         CanFreeMoveValue::CanFreeMoveTo(ai, *AI_VALUE(TravelTarget*,"travel target")->GetPosition()) &&
-        (!target || sServerFacade.GetDistance2d(bot, target) > 45.0f)) //Bot is traveling with no path-local kill
+        (!target || sServerFacade.GetDistance2d(bot, target) > 65.0f)) //Bot is traveling with no path-local kill
         return false;
 
     return true;

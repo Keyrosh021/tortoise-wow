@@ -72,28 +72,8 @@
 
 using namespace ai;
 
-namespace
-{
-    // Per-bot short-lived target blacklist (anti re-acquire thrash). Reimplemented 2026-07-03
-    // after a git reset lost the original definition; signature matches the existing call sites.
-    std::mutex s_targetDeferMx;
-    std::unordered_map<uint32, std::unordered_map<uint64, time_t>> s_targetDefers;
+bool Playerbot_WsgNavigate(Player* bot);  // WSG graph waypoint navigator (BattleGroundTactics.cpp)
 
-    void DeferTargetGuidForBot(Player* bot, ObjectGuid guid, uint32 ticks)
-    {
-        if (!bot || !guid)
-            return;
-        std::lock_guard<std::mutex> lk(s_targetDeferMx);
-        auto& m = s_targetDefers[bot->GetGUIDLow()];
-        m[guid.GetRawValue()] = time(nullptr) + (time_t)ticks;
-        if (m.size() > 64)
-        {
-            const time_t now = time(nullptr);
-            for (auto it = m.begin(); it != m.end();)
-                it = (it->second < now) ? m.erase(it) : std::next(it);
-        }
-    }
-}
 
 
 // DECISION-THRASH INSTRUMENTATION (phase 1, baseline-before-fix). Global, lock-free counters
@@ -352,7 +332,9 @@ static void FreezeNudge(PlayerbotAI* ai, Player* bot)
         const float ang = (((dir + k) & 7)) * (M_PI_F / 4.0f);
         const float nx = x + cosf(ang) * 12.0f, ny = y + sinf(ang) * 12.0f;
         const float nz = map->GetHeight(nx, ny, z + 5.0f, true);
-        if (nz > INVALID_HEIGHT && fabs(nz - z) < 8.0f)
+        // 4y (was 8): an 8y climb at 12y range accepted building eaves/roofs as nudge landings
+        // (bot observed stranded on the Goldshire inn roof -- unhuman + no navmesh off it).
+        if (nz > INVALID_HEIGHT && fabs(nz - z) < 4.0f)
         { bestX = nx; bestY = ny; bestZ = nz; found = true; }
     }
     if (!found)
@@ -376,6 +358,204 @@ static void FreezeNudge(PlayerbotAI* ai, Player* bot)
         fprintf(f, "%s,%s,map%u,from=%.0f|%.0f,to=%.0f|%.0f\n",
             sPlayerbotAIConfig.GetTimestampStr().c_str(), bot->GetName(), bot->GetMapId(), x, y, bestX, bestY);
         fclose(f);
+    }
+}
+
+// Is a REAL (human) player within `range` of this bot? Ignores the virtual-observer sentinel.
+// Map-thread safe (reads the published snapshot). Used to NEVER teleport/relocate a bot a human
+// can see (Goal 3: no visible teleporting).
+static bool RealPlayerWithin(Player* bot, float range)
+{
+    auto rp = sRandomPlayerbotMgr.GetRealPlayerSnapshot();
+    if (!rp)
+        return false;
+    const float bx = bot->GetPositionX(), by = bot->GetPositionY();
+    for (auto const& p : rp->players)
+    {
+        if (p.guidLow == 0xFFFFFFFEu)      // virtual observer -> not a real player
+            continue;
+        if (p.mapId != bot->GetMapId())
+            continue;
+        const float dx = p.x - bx, dy = p.y - by;
+        if (dx * dx + dy * dy <= range * range)
+            return true;
+    }
+    return false;
+}
+
+// Is this spot free of lava/slime/deep water? Used to stop loiterers pacing into hazards.
+static bool SpotDry(uint32 mapId, float x, float y, float z)
+{
+    const TerrainInfo* t = sTerrainMgr.LoadTerrain(mapId);
+    if (!t)
+        return true;
+    GridMapLiquidData d;
+    GridMapLiquidStatus s = t->getLiquidStatus(x, y, z, MAP_ALL_LIQUIDS, &d);
+    if (s == LIQUID_MAP_NO_WATER)
+        return true;
+    if (d.type_flags & (MAP_LIQUID_TYPE_MAGMA | MAP_LIQUID_TYPE_SLIME))
+        return false;                       // lava / slime
+    return !(s & LIQUID_MAP_UNDER_WATER);   // deep water = would swim
+}
+
+// CITY LIFE (Goal 0: "if a player is in the city the bots need to be pretending they are doing
+// activities appropriate for the city"). PopulateCapitalCities sits ~1800 high-level bots in the
+// capitals to make the world feel populated -- but they stand frozen. When one goes idle, give it
+// visible city life: people-watch (turn to face a new direction), one-shot social emotes, and SHORT
+// reachable strolls. NO long-range roam -- the dense city navmesh rejects far random points (that's
+// why "attack anything"/"move random" no-op in cities); short pathfinding hops fail safe. Throttled
+// ~9s/bot. Logged to antiidle.csv (what=city*) so its effect is measurable.
+static void CityResidentActivity(PlayerbotAI* ai, Player* bot)
+{
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> lastMs;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = lastMs[bot->GetGUIDLow()];
+        if (t && now - t < 9000)
+            return;
+        t = now;
+    }
+
+    uint32 h = bot->GetGUIDLow() * 2654435761u + (now / 9000);
+    h ^= h >> 13;
+    const uint32 roll = h % 100;
+    const float ang = (float)(h % 628) / 100.0f;   // 0..2pi
+
+    const char* what;
+    if (roll < 35)
+    {
+        bot->SetFacingTo(ang);                       // people-watch
+        what = "citylook";
+    }
+    else if (roll < 70)
+    {
+        static const uint32 emotes[] = {
+            EMOTE_ONESHOT_TALK, EMOTE_ONESHOT_WAVE, EMOTE_ONESHOT_CHEER,
+            EMOTE_ONESHOT_LAUGH, EMOTE_ONESHOT_APPLAUD, EMOTE_ONESHOT_POINT };
+        bot->HandleEmoteCommand(emotes[h % 6]);      // social emote
+        what = "cityemote";
+    }
+    else
+    {
+        const float dist = 8.0f + (float)(h % 14);   // short reachable stroll (8-22y)
+        float x = bot->GetPositionX() + cos(ang) * dist;
+        float y = bot->GetPositionY() + sin(ang) * dist;
+        float z = bot->GetPositionZ();
+        bot->UpdateAllowedPositionZ(x, y, z);
+        if (MaNGOS::IsValidMapCoord(x, y, z) && ai->CanMove() && bot->IsStandState())
+            bot->GetMotionMaster()->MovePoint(bot->GetMapId(), x, y, z, MOVE_PATHFINDING | MOVE_RUN_MODE, 0.0f);
+        what = "citystroll";
+    }
+
+    FILE* f = fopen("logs/antiidle.csv", "a");
+    if (!f) f = fopen("../logs/antiidle.csv", "a");
+    if (f)
+    {
+        fprintf(f, "%s,%s,map%u,%.0f|%.0f,%s,acted1\n", sPlayerbotAIConfig.GetTimestampStr().c_str(),
+            bot->GetName(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), what);
+        fclose(f);
+    }
+}
+
+// DUNGEON/RAID ENTRANCE LOITER behavior (paired with RandomPlayerbotMgr::PopulateDungeonEntrances).
+// A bot assigned the loiterer role holds its entrance and acts like it's forming a group: paces,
+// social-emotes, looks around. ~1 in 6 are "zone-in" actors -- they walk onto the portal and then
+// vanish (recycled to a grind spot => reads as "entered the dungeon"), freeing the slot so a DIFFERENT
+// bot rotates in. Runs INSTEAD of grind/travel AI (loiterers hold their post). Dormant far-away
+// loiterers just stand frozen at the portal until a player approaches -- the illusion only needs to
+// work when seen, so this stays cheap.
+static void DungeonLoiterController(PlayerbotAI* ai, Player* bot)
+{
+    uint32 mapId; float ex, ey, ez; bool zoneIn;
+    if (!sRandomPlayerbotMgr.GetDungeonLoiterSpot(bot->GetGUIDLow(), mapId, ex, ey, ez, zoneIn))
+        return;
+    if (!bot->IsAlive())
+        return;
+    // Already zoned into the instance -> dwell (afk/dormant) a couple minutes, then leave so
+    // instances don't accumulate occupants over time.
+    if (bot->GetMapId() != mapId)
+    {
+        if (sRandomPlayerbotMgr.LoitererDwellExpired(bot->GetGUIDLow()))
+        {
+            sRandomPlayerbotMgr.EndDungeonRole(bot->GetGUIDLow());
+            // leave the instance -- via the world-thread queue (never teleport from a map tick)
+            sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), 0, 0, 0, 0, true);
+        }
+        return;
+    }
+    // FIGHT hostiles around the entrance: proactively pull anything hostile nearby so the crowd
+    // defends its spot / clears the area instead of standing while mobs are around. (A loiterer
+    // ALREADY in combat never reaches here -- the outer hook falls it through to the full combat AI.)
+    if (ai->DoSpecificAction("attack anything", Event(), true))
+        return;
+
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> lastMs;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = lastMs[bot->GetGUIDLow()];
+        if (t && now - t < 4000) return;
+        t = now;
+    }
+    if (bot->IsNonMeleeSpellCasted(true, false, true) || sServerFacade.isMoving(bot))
+        return;                                  // let an in-flight move/cast finish
+    if (!bot->IsStandState())
+        bot->SetStandState(UNIT_STAND_STATE_STAND);
+    if (!ai->CanMove())
+    {
+        bot->HandleEmoteCommand(EMOTE_ONESHOT_TALK);
+        return;
+    }
+
+    const float dx = bot->GetPositionX() - ex, dy = bot->GetPositionY() - ey;
+    const float dist2 = dx * dx + dy * dy;
+    uint32 h = bot->GetGUIDLow() * 2654435761u + now / 4000; h ^= h >> 13;
+    const float ang = (float)(h % 628) / 100.0f;
+
+    if (dist2 > 45.0f * 45.0f)                   // wandered off -> return to the entrance crowd
+    {
+        bot->GetMotionMaster()->MovePoint(mapId, ex + cos(ang) * (h % 20), ey + sin(ang) * (h % 20), ez,
+            MOVE_PATHFINDING | MOVE_RUN_MODE, 0.0f);
+        return;
+    }
+
+    if (zoneIn && dist2 < 10.0f * 10.0f && (h % 3 == 0))   // reached the portal -> actually zone IN
+    {
+        uint32 dm; float dxp, dyp, dzp;
+        if (sRandomPlayerbotMgr.GetDungeonZoneInDest(bot->GetGUIDLow(), dm, dxp, dyp, dzp))
+        {
+            sRandomPlayerbotMgr.MarkLoitererZonedIn(bot->GetGUIDLow());
+            // into the instance -> dwell; via world-thread queue (never teleport from a map tick)
+            sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), dm, dxp, dyp, dzp, false);
+        }
+        return;
+    }
+
+    const uint32 roll = h % 100;
+    if (zoneIn && roll < 55)                      // zone-in actor edges toward the portal
+    {
+        bot->GetMotionMaster()->MovePoint(mapId, ex, ey, ez, MOVE_PATHFINDING | MOVE_RUN_MODE, 0.0f);
+    }
+    else if (roll < 45)                           // pace around the entrance (waiting for the group)
+    {
+        const float rr = 8.0f + (float)(h % 12);
+        float x = ex + cos(ang) * rr, y = ey + sin(ang) * rr, z = ez;
+        bot->UpdateAllowedPositionZ(x, y, z);
+        if (MaNGOS::IsValidMapCoord(x, y, z) && SpotDry(mapId, x, y, z))   // never pace into lava/water
+            bot->GetMotionMaster()->MovePoint(mapId, x, y, z, MOVE_PATHFINDING | MOVE_RUN_MODE, 0.0f);
+    }
+    else if (roll < 80)                           // "LFG! anyone?" social emotes
+    {
+        static const uint32 em[] = { EMOTE_ONESHOT_TALK, EMOTE_ONESHOT_POINT, EMOTE_ONESHOT_WAVE,
+                                     EMOTE_ONESHOT_ROAR, EMOTE_ONESHOT_APPLAUD, EMOTE_ONESHOT_CHEER };
+        bot->HandleEmoteCommand(em[h % 6]);
+    }
+    else
+    {
+        bot->SetFacingTo(ang);                    // look around for members
     }
 }
 
@@ -444,9 +624,59 @@ static void AntiIdleAction(PlayerbotAI* ai, Player* bot)
     // collision walked them into mobs/terrain and raised DEAD 15%->18% for no idle/move gain. Stuck
     // bots the pathfinder can't move are left to FreezeNudge (far fleet only) or to stand near players.
     (void)dir;
-    bool acted = ai->DoSpecificAction("attack anything", Event(), true);
+    // City residents that have gone idle do city LIFE (people-watch / emote / short stroll) instead
+    // of the grind/roam fallback -- there are no hostile mobs to attack in a capital and long roams
+    // fail on the dense city navmesh, so attack/roam just no-op (acted0). Keeps the capitals visibly
+    // alive when a player walks through (Goal 0). Bots actively traveling/questing never reach here
+    // (they return at the travel-goal / isMoving gates above).
+    if (sRandomPlayerbotMgr.IsCityResident(bot->GetGUIDLow()))
+    {
+        CityResidentActivity(ai, bot);
+        return;
+    }
+
+    // ===== NEVER-IDLE EXECUTOR (the "actor" layer) ==========================================
+    // An actor never has a "nothing" state. A genuinely-idle bot here means the decision engine
+    // resolved to no executable action (chosen travel dest unroutable / no mob in reach / cooling
+    // down). Guarantee a visible activity, in priority order, so idle -> productive every time:
+    //   1) engage the nearest reachable mob (mobs sit on walkable ground -> attack anything works);
+    //   2) if NO human can see it -> teleport-RESCUE to a fresh level-appropriate mob camp (the
+    //      never-fail guarantee: it will be standing in content next tick). Throttled to a real
+    //      "stranded bot" rescue, and NEVER when a human is in range (Goal 3: no visible teleport);
+    //   3) on-screen with nothing to fight -> commit to walking to its travel goal / stroll, and as
+    //      an absolute last resort face around (never a frozen statue).
     const char* what = "attack";
+    bool acted = ai->DoSpecificAction("attack anything", Event(), true);   // (1)
+
+    if (!acted)
+    {
+        const float rr = sPlayerbotAIConfig.activeRenderRange > 0.0f ? sPlayerbotAIConfig.activeRenderRange : 170.0f;
+        const bool humanCanSee = RealPlayerWithin(bot, rr + 80.0f);        // margin past render range
+        if (!humanCanSee && sRandomPlayerbotMgr.IsRandomBot(bot) && !ai->HasRealPlayerMaster()
+            && bot->IsAlive() && !bot->IsInCombat() && !bot->IsTaxiFlying()
+            && !bot->IsBeingTeleported() && !bot->InBattleGround() && !bot->InBattleGroundQueue())
+        {
+            static std::mutex tmx;
+            static std::unordered_map<uint32, uint32> lastTele;
+            const uint32 nowT = WorldTimer::getMSTime();
+            bool doTele = false;
+            {
+                std::lock_guard<std::mutex> lk(tmx);
+                uint32& t = lastTele[bot->GetGUIDLow()];
+                if (!t || nowT - t > 45000) { t = nowT; doTele = true; }   // >=45s between rescues
+            }
+            if (doTele)
+            {
+                // (2) -> mob-dense camp, via the world-thread queue (never teleport from a map tick)
+                sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), 0, 0, 0, 0, true);
+                acted = true; what = "rescue";
+            }
+        }
+    }
+
+    if (!acted) { acted = ai->DoSpecificAction("move to travel target", Event(), true); if (acted) what = "gotarget"; }  // (3)
     if (!acted) { acted = ai->DoSpecificAction("move random", Event(), true); if (acted) what = "roam"; }
+    if (!acted) { bot->SetFacingTo((float)((bot->GetGUIDLow() + WorldTimer::getMSTime() / 1000) % 628) / 100.0f); acted = true; what = "face"; }
 
     FILE* f = fopen("logs/antiidle.csv", "a");
     if (!f) f = fopen("../logs/antiidle.csv", "a");
@@ -817,19 +1047,35 @@ static void ChainPullNext(PlayerbotAI* ai, Player* bot)
         s.prevCombat = inCombat ? 1 : 0;
         if (inCombat)
             s.endedMs = 0;
-        // Chain 2s AFTER the kill, not instantly: the corpse takes a moment to register in the
-        // "available loot" stack, and the instant poke was outracing it -- watched Duzvurdur kill and
-        // sprint at the next mob 1s later, never looting (fleet LOOT share ~0.1%, weak gold). The 2s
-        // grace lets the loot action (rel 6.0) win first; attack-anything's own isUseful still
-        // declines while loot is pending, so this only delays, never double-fires.
-        if (s.endedMs && now - s.endedMs >= 2000 && now - s.endedMs < 6000)
+        // 300ms confirmation covers the XpGain->available-loot packet race (packet handlers run
+        // inside UpdateAIInternal AFTER this supervisor hook); beyond that, chain the INSTANT the
+        // loot pipeline is idle instead of a fixed 2s grace (measured: the 2s floor + post-loot
+        // re-scan was 3-4s of dead-air on every one of ~110 kills/bot/2h). Loot stays first: the
+        // window holds open while anything is lootable, and bots without loot rights (group
+        // round-robin losers, foreign taps) chain immediately.
+        if (s.endedMs && now - s.endedMs >= 300)
         {
-            readyToChain = true;
-            s.endedMs = 0;
+            if (now - s.endedMs > 15000)
+                s.endedMs = 0;                     // safety cap: stop polling after 15s
+            else
+                readyToChain = true;               // provisional; loot check below may hold it
         }
     }
     if (!readyToChain || bot->GetHealthPercent() < 55.0f)
         return;
+
+    AiObjectContext* chainCtx = ai->GetAiObjectContext();
+    const bool lootPending = chainCtx &&
+        (chainCtx->GetValue<bool>("has available loot")->Get() ||
+         chainCtx->GetValue<bool>("can loot")->Get() ||
+         !chainCtx->GetValue<LootObject>("loot target")->Get().IsEmpty() ||
+         bot->GetLootGuid());
+    if (lootPending)
+        return;                                    // keep endedMs armed; re-check next tick
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        track[bot->GetGUIDLow()].endedMs = 0;      // consuming the chain now
+    }
 
     if (ai->DoSpecificAction("attack anything", Event(), true))
     {
@@ -842,6 +1088,259 @@ static void ChainPullNext(PlayerbotAI* ai, Player* bot)
             fclose(f);
         }
     }
+}
+
+// CHAIN-PULL PRE-SELECTION (goal #4): while the current victim is dying (<=25% HP), decide the
+// NEXT grind target so the post-kill sequence is loot -> engage with zero re-think. Pure internal
+// state: no selection packets, so pre-selection can never aggro anything early. The plan is
+// consumed (and re-validated) by GrindTargetValue when "attack anything" next runs.
+static void PreSelectNextTarget(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive() || !bot->IsInCombat())
+        return;
+    if (ai->HasRealPlayerMaster())
+        return;
+    Unit* victim = bot->GetVictim();
+    if (!victim || victim->GetHealthPercent() > 25.0f)
+        return;
+
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> lastMs;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = lastMs[bot->GetGUIDLow()];
+        if (t && now - t < 1000)
+            return;
+        t = now;
+    }
+
+    AiObjectContext* ctx = ai->GetAiObjectContext();
+    if (!ctx)
+        return;
+    ObjectGuid existing = ctx->GetValue<ObjectGuid>("pre-selected next target")->Get();
+    if (existing)
+    {
+        Unit* ex = ai->GetUnit(existing);
+        if (ex && sServerFacade.IsAlive(ex))
+            return;                                // stay firm: keep the existing plan
+    }
+    Unit* next = ctx->GetValue<Unit*>("next grind target")->Get();
+    if (next && next != victim)
+        ctx->GetValue<ObjectGuid>("pre-selected next target")->Set(next->GetObjectGuid());
+}
+
+// LFT MASTER CLEANUP. LFT-filled bots get a real-player master set directly (Playerbot_PrepareLfgBot).
+// If that player later leaves the group / kicks the bot while staying online, the bot would keep the
+// master link and follow them across the world forever. A random bot whose real-player master is no
+// longer a group mate releases the link and returns to the fleet.
+static void LftMasterCleanup(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld())
+        return;
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> lastMs;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = lastMs[bot->GetGUIDLow()];
+        if (t && now - t < 30000)
+            return;
+        t = now;
+    }
+
+    Player* master = ai->GetMaster();
+    if (!master || master == bot || !master->isRealPlayer())
+        return;
+    if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+        return;
+
+    const bool sameGroup = bot->GetGroup() && master->GetGroup() == bot->GetGroup();
+    if (sameGroup)
+        return;
+
+    if (bot->GetGroup())
+        bot->GetGroup()->RemoveMember(bot->GetObjectGuid(), 0);
+    ai->SetMaster(nullptr);
+    ai->ResetStrategies();
+    ai->Reset(true);
+
+    // Send the fill HOME: back to its pre-dungeon spot (falls back to homebind if the origin is
+    // unknown or the bot somehow originated inside an instance). Without this, released bots
+    // idle in the emptied dungeon forever instead of resuming their open-world lives.
+    extern bool Playerbot_GetLfgOrigin(uint32 guidLow, WorldLocation& out);
+    if (bot->GetMap() && (bot->GetMap()->IsDungeon() || bot->GetMap()->IsRaid()))
+    {
+        WorldLocation origin;
+        bool haveOrigin = Playerbot_GetLfgOrigin(bot->GetGUIDLow(), origin);
+        if (haveOrigin && !sMapStore.LookupEntry(origin.mapid)->Instanceable())
+            sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), origin.mapid, origin.coord_x, origin.coord_y, origin.coord_z, false, false);
+        else
+            sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), 0, 0, 0, 0, true, false);
+    }
+    sLog.outDetail("LFT: released bot %s back to the fleet (master left group)", bot->GetName());
+}
+
+// INSTANCE STRAND RESCUE. During raid/dungeon runs with a real player, fill bots that end up
+// OUTSIDE the instance (walked out the portal, wrong instance id, died at the entrance — user
+// watched fills exit MC's portal and die in the lava) get revived and teleported to the master:
+// with the master inside, the group bind resolves them into the CORRECT instance.
+static void InstanceStrandRescue(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld())
+        return;
+    if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+        return;
+    Player* master = ai->GetMaster();
+    if (!master || master == bot || !master->isRealPlayer() || !master->IsInWorld())
+        return;
+    if (!bot->GetGroup() || master->GetGroup() != bot->GetGroup())
+        return;
+    Map* mmap = master->GetMap();
+    if (!mmap || (!mmap->IsDungeon() && !mmap->IsRaid()))
+        return;
+    // bot inside the same instance (map + instance id): fine
+    if (bot->GetMapId() == master->GetMapId() && bot->GetInstanceId() == master->GetInstanceId())
+        return;
+
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> lastMs;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = lastMs[bot->GetGUIDLow()];
+        if (t && now - t < 15000)
+            return;
+        t = now;
+    }
+
+    sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), master->GetMapId(),
+        master->GetPositionX(), master->GetPositionY(), master->GetPositionZ(), false, !bot->IsAlive());
+    sLog.outBasic("LFT rescue: %s queued into %s's instance (map %u)", bot->GetName(), master->GetName(), master->GetMapId());
+}
+
+// TRAVEL SCHEDULE RESCUE (the Erielah class): some bots hold an ACTIVE travel target while their
+// travel Execute is never scheduled at all — no movement, no breaker (it lives inside Execute),
+// zero TravelFrozenAbandoned events, forever. Detect it from the outside: an alive, out-of-combat
+// bot with a live travel target that hasn't displaced 5y in 45s gets its target expired, which
+// re-enters the (verifiably scheduled) choose/request planning path.
+static void TravelScheduleRescue(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive() || bot->IsInCombat() || bot->IsTaxiFlying())
+        return;
+    if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+        return;
+
+    AiObjectContext* ctx = ai->GetAiObjectContext();
+    if (!ctx)
+        return;
+    TravelTarget* target = ctx->GetValue<TravelTarget*>("travel target")->Get();
+    if (!target)
+        return;
+    TravelStatus status = target->GetStatus();
+    if (status != TravelStatus::TRAVEL_STATUS_TRAVEL && status != TravelStatus::TRAVEL_STATUS_READY)
+        return;
+
+    struct St { float x = 0, y = 0; uint32 sinceMs = 0; };
+    static std::mutex mx;
+    static std::unordered_map<uint32, St> track;
+    const uint32 now = WorldTimer::getMSTime();
+    const float x = bot->GetPositionX(), y = bot->GetPositionY();
+
+    std::lock_guard<std::mutex> lk(mx);
+    St& st = track[bot->GetGUIDLow()];
+    const float dx = x - st.x, dy = y - st.y;
+    if (!st.sinceMs || dx * dx + dy * dy > 25.0f)
+    {
+        st.x = x; st.y = y; st.sinceMs = now;
+        return;
+    }
+    if (now - st.sinceMs < 45000)
+        return;
+
+    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+    st.sinceMs = now;
+    if (sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        sPlayerbotAIConfig.logEvent(ai, "TravelScheduleRescue", "unscheduled travel expired", "");
+}
+
+// ABANDONED-RUN + HOSTILE-CORPSE RESCUE. When the real player logs out mid-dungeon, LFT fills were
+// left masterless inside the instance; they wandered out (or graveyard-ported) into the enemy capital
+// and corpse-looped under the guards (user report: alliance fills dying to Orgrimmar guards after an
+// RFC run). Two rules, both random-bot-only:
+//  1. A random bot inside an instance whose group has NO online real player (or no group at all)
+//     is an abandoned fill: leave group, drop master, teleport home.
+//  2. A dead random bot whose corpse lies in a zone where guards will farm it forever (any capital
+//     or the bot ghost-looping repeatedly) gets a spirit-rez and a trip home.
+static void AbandonedRunRescue(PlayerbotAI* ai, Player* bot)
+{
+    if (!ai || !bot || !bot->IsInWorld())
+        return;
+    if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+        return;
+
+    static std::mutex mx;
+    static std::unordered_map<uint32, uint32> lastMs;
+    const uint32 now = WorldTimer::getMSTime();
+    {
+        std::lock_guard<std::mutex> lk(mx);
+        uint32& t = lastMs[bot->GetGUIDLow()];
+        if (t && now - t < 20000)
+            return;
+        t = now;
+    }
+
+    // Rule 2: corpse stranded in an enemy capital -> rez + go home
+    if (!bot->IsAlive())
+    {
+        if (Corpse* corpse = bot->GetCorpse())
+        {
+            uint32 zone = sTerrainMgr.GetZoneId(corpse->GetMapId(), corpse->GetPositionX(), corpse->GetPositionY(), corpse->GetPositionZ());
+            const bool allianceBot = bot->GetTeam() == ALLIANCE;
+            const bool inEnemyCapital = allianceBot
+                ? (zone == 1637 || zone == 1497 || zone == 1638)   // Org, UC, TB
+                : (zone == 1519 || zone == 1537 || zone == 1657);  // SW, IF, Darn
+            if (inEnemyCapital)
+            {
+                if (bot->GetGroup())
+                    bot->GetGroup()->RemoveMember(bot->GetObjectGuid(), 0);
+                ai->SetMaster(nullptr);
+                ai->ResetStrategies();
+                ai->Reset(true);
+                // teleport+rez QUEUED to the world thread — direct TeleportTo from a map-update
+                // thread deadlocks the MapManager (the 6h world freeze).
+                sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), 0, 0, 0, 0, true, true);
+                sLog.outBasic("LFT rescue: %s queued for rez+home (enemy capital zone %u)", bot->GetName(), zone);
+                return;
+            }
+        }
+    }
+
+    // Rule 1: abandoned inside an instance
+    if (!bot->GetMap() || (!bot->GetMap()->IsDungeon() && !bot->GetMap()->IsRaid()))
+        return;
+    Group* group = bot->GetGroup();
+    bool hasLiveRealPlayer = false;
+    if (group)
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+            if (Player* member = ref->getSource())
+                if (member->isRealPlayer() && member->IsInWorld())
+                    { hasLiveRealPlayer = true; break; }
+    if (hasLiveRealPlayer)
+        return;
+
+    if (group)
+        group->RemoveMember(bot->GetObjectGuid(), 0);
+    ai->SetMaster(nullptr);
+    ai->ResetStrategies();
+    ai->Reset(true);
+    extern bool Playerbot_GetLfgOrigin(uint32 guidLow, WorldLocation& out);
+    WorldLocation origin;
+    if (Playerbot_GetLfgOrigin(bot->GetGUIDLow(), origin) && !sMapStore.LookupEntry(origin.mapid)->Instanceable())
+        sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), origin.mapid, origin.coord_x, origin.coord_y, origin.coord_z, false, false);
+    else
+        sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), 0, 0, 0, 0, true, false);
+    sLog.outBasic("LFT rescue: %s abandoned in instance -> queued home", bot->GetName());
 }
 
 // AUTO-REPAIR. Bots almost never visit repair vendors (the only wiring is an RPG-idle flavor action
@@ -2837,8 +3336,155 @@ PlayerbotAI::~PlayerbotAI()
         delete aiObjectContext;
 }
 
+// ===== 10K SCALABILITY (Phase A) ============================================================
+// The full supervisor sweep, extracted so both the fast path (1 Hz) and the full path (per-tick
+// while fighting, 1 Hz otherwise) share it. Every helper keeps its own internal per-bot
+// throttle; this gate only removes the 16 call+mutex+map-lookup overheads from the ~6/sec
+// not-due brain calls that dominate at 1000+ bots.
+static void RunSupervisorHelpers(PlayerbotAI* ai, Player* bot)
+{
+    // Dormant-tier bots are parked by design: no rescues, no anti-idle prodding (forcing an
+    // invisible bot to act recreates the invisible-aggro bug), and no supervisor.csv rows
+    // (a 9k dormant tier would otherwise swamp the active fleet's idle stats).
+    if (ai->IsColdDormant())
+        return;
+    SupervisorTrack(ai, bot);
+    FreezeNudge(ai, bot);              // physically dislodge bots pathfinding can't move (travel/flee/corpse)
+    AntiIdleAction(ai, bot);           // force standing bots to grind/roam instead of looping no-op decisions
+    HopelessFightBreaker(ai, bot);     // give up on unkillable targets (training dummies, evade mobs)
+    GhostRescue(ai, bot);              // stuck ghost -> teleport to corpse (invisible to living players)
+    AutoRepair(ai, bot);               // broken gear = death spiral; repair (paid when affordable)
+    AutoAmmo(ai, bot);                 // hunters shoot dry and never restock; top up (invisible)
+    LftMasterCleanup(ai, bot);         // released LFT fills return to the fleet
+    AbandonedRunRescue(ai, bot);       // logout-abandoned fills + hostile-capital corpses go home
+    InstanceStrandRescue(ai, bot);     // fills outside the master's instance get pulled back in
+    TravelScheduleRescue(ai, bot);     // Erielah-class: live travel target, Execute never scheduled
+    PreSelectNextTarget(ai, bot);      // decide the NEXT pull while the current victim dies
+    ChainPullNext(ai, bot);            // kill -> loot -> next pull with no re-think dead-air
+    NoProgressGrindFallback(ai, bot);  // 10 min w/o xp -> stop wandering, grind the local area
+    LootUnderFire(ai, bot);            // group-combat but personally safe -> grab the corpse now
+    QuestLoopBreaker(ai, bot);         // 6+ kills of the same quest mob w/o the drop -> do other quests
+    // 1/sec gravity sweep for STATIONARY bots: catches every stop path that isn't StopMoving
+    // (motion-clears, chase-holds) so no bot stands floating above the ground.
+    if (!sServerFacade.isMoving(bot))
+        SettleToGround(bot);
+}
+
+// Fleet-wide brain service-interval histogram: delta between consecutive UpdateAIInternal
+// executions per bot. This is the acceptance metric for the 10k-bot mandate ("a decision every
+// 20 seconds is bad"): the goal is p95 <= ~1s for active bots at any fleet size. Dumped to
+// logs/brain_interval.csv once a minute by whichever brain crosses the boundary.
+static std::atomic<uint32> s_brainIntervalBuckets[7] = {}; // <250ms <500 <1s <2s <5s <10s >=10s
+static std::atomic<uint64> s_brainExecs{0};
+static std::atomic<uint64> s_fastPathSkips{0};
+static std::atomic<uint32> s_brainDumpDueMs{0};
+static std::mutex s_brainDumpMx;
+
+static void RecordBrainServiceInterval(uint32 nowMs, uint32& lastExecMs)
+{
+    if (lastExecMs)
+    {
+        const uint32 d = nowMs - lastExecMs;
+        const int b = d < 250 ? 0 : d < 500 ? 1 : d < 1000 ? 2 : d < 2000 ? 3 : d < 5000 ? 4 : d < 10000 ? 5 : 6;
+        s_brainIntervalBuckets[b].fetch_add(1, std::memory_order_relaxed);
+    }
+    lastExecMs = nowMs;
+    s_brainExecs.fetch_add(1, std::memory_order_relaxed);
+
+    if (nowMs >= s_brainDumpDueMs.load(std::memory_order_relaxed) && s_brainDumpMx.try_lock())
+    {
+        if (nowMs >= s_brainDumpDueMs.load(std::memory_order_relaxed))
+        {
+            s_brainDumpDueMs.store(nowMs + 60000, std::memory_order_relaxed);
+            FILE* f = fopen("logs/brain_interval.csv", "a");
+            if (!f) f = fopen("../logs/brain_interval.csv", "a");
+            if (f)
+            {
+                time_t tt = time(0); struct tm tmv; localtime_r(&tt, &tmv);
+                char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+                fprintf(f, "%s,execs=%llu,fastskips=%llu,lt250=%u,lt500=%u,lt1s=%u,lt2s=%u,lt5s=%u,lt10s=%u,ge10s=%u\n",
+                    ts,
+                    (unsigned long long)s_brainExecs.exchange(0),
+                    (unsigned long long)s_fastPathSkips.exchange(0),
+                    s_brainIntervalBuckets[0].exchange(0), s_brainIntervalBuckets[1].exchange(0),
+                    s_brainIntervalBuckets[2].exchange(0), s_brainIntervalBuckets[3].exchange(0),
+                    s_brainIntervalBuckets[4].exchange(0), s_brainIntervalBuckets[5].exchange(0),
+                    s_brainIntervalBuckets[6].exchange(0));
+                fclose(f);
+            }
+        }
+        s_brainDumpMx.unlock();
+    }
+}
+
 void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
 {
+    // ===== 10K FAST PATH (APM scalability, Phase A) =====
+    // At 1000 bots ~6 of every 7 UpdateAI calls arrive while the bot's think-delay is still
+    // counting down, yet each paid the full entry cost (WorldPosition + string alloc, perf
+    // monitor, telemetry, 16 supervisor scans) before reaching the delay check -- measured
+    // ~0.4 ms/call, saturating the two continent threads and collapsing per-bot APM as the
+    // fleet grows. A not-due bot with nothing needing an instant reaction pays only the
+    // countdown (plus the 1 Hz supervisor cadence) here. Every state that needs the full
+    // body -- combat entry/exit wake+preempt, a master (real-player fills), jump landing,
+    // transport, teleport, open loot, logout, cheats, dormancy, action-log debug -- falls
+    // through to the full path below.
+    // DORMANT FAST LANE: a cold-dormant bot (10k two-tier fleet: parked, invisible, synthetic
+    // progression) needs only its countdown and a 1 Hz wake probe -- nothing else. This is what
+    // makes the dormant tier ~free per map tick: no supervisor scans, no telemetry, no perf
+    // monitor, no facing/reaction machinery.
+    if (coldDormant && !master && bot->IsInWorld())
+    {
+        MapManager::SetContinentUpdatePhase("bot-ai-dormant", bot->GetGUIDLow());
+        if (aiInternalUpdateDelay > elapsed) aiInternalUpdateDelay -= elapsed;
+        else { aiInternalUpdateDelay = 0; isWaiting = false; }
+        const uint32 dNow = WorldTimer::getMSTime();
+        if (dNow >= supervisorHelperNextMs)
+        {
+            supervisorHelperNextMs = dNow + 1000;
+            const bool wake = bot->IsInCombat() || !bot->getAttackers().empty()
+                || sRandomPlayerbotMgr.IsActiveCohort(bot->GetGUIDLow())
+                || IsInstancedContent();
+            if (wake)
+            {
+                SetColdDormant(false);
+                ResetAIInternalUpdateDelay();   // think NOW -- wake is next map tick
+            }
+        }
+        return;
+    }
+
+    // Cheats that only matter on a per-tick basis (continuous stat pinning). The fleet default
+    // mask "taxi,item,breath" must NOT veto the fast path: taxi never runs in UpdateAI, and
+    // item (ammo restock) + breath are idempotent and fire plenty often on brain-due ticks.
+    const uint32 perTickCheats = (uint32)BotCheatMask::health | (uint32)BotCheatMask::mana
+        | (uint32)BotCheatMask::power | (uint32)BotCheatMask::cooldown | (uint32)BotCheatMask::movespeed;
+
+    if (sPlayerbotAIConfig.fastPathEnabled
+        && !bot->IsInCombat() && !inCombat && bot->getAttackers().empty()
+        && aiInternalUpdateDelay >= elapsed + 100U   // stays not-due even after this decrement
+        && !master && !jumpTime
+        && !bot->IsBeingTeleported() && !bot->GetTransport() && !isMovingToTransport
+        && !bot->GetLootGuid()
+        && !bot->IsStunnedByLogout() && !bot->GetSession()->isLogingOut()
+        && (((uint32)GetCheat() | (uint32)sPlayerbotAIConfig.botCheatMask) & perTickCheats) == 0
+        && !ai::botdiag::IsActionLogEnabled())
+    {
+        MapManager::SetContinentUpdatePhase("bot-ai-fast", bot->GetGUIDLow());
+        aiInternalUpdateDelay -= elapsed;
+        s_fastPathSkips.fetch_add(1, std::memory_order_relaxed);
+        if (sPlayerbotAIConfig.supervisorMode)
+        {
+            const uint32 fpNow = WorldTimer::getMSTime();
+            if (fpNow >= supervisorHelperNextMs)
+            {
+                supervisorHelperNextMs = fpNow + 1000;
+                RunSupervisorHelpers(this, bot);
+            }
+        }
+        return;
+    }
+
     AiObjectContext* context = aiObjectContext;
     std::string mapString = WorldPosition(bot).isInstance() ? "I" : std::to_string(bot->GetMapId());
     auto pmo = sPerformanceMonitor.start(PERF_MON_TOTAL, "PlayerbotAI::UpdateAI " + mapString, nullptr, bot->GetMapId(), bot->GetInstanceId());
@@ -2861,25 +3507,17 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     if (ai::botdiag::IsActionLogEnabled())
         DebugSayIdle(this, bot);
 
-    // SUPERVISOR MODE: honest per-second visible-activity trace for the whole fleet (runs every tick,
-    // throttled to 1/sec internally, so it samples even while a bot sits on a multi-second move-wait).
+    // SUPERVISOR MODE: full sweep per-tick while fighting (chain-pull, next-target and
+    // loot-under-fire need combat cadence), 1 Hz otherwise (every helper self-throttles to
+    // >=1s per bot internally anyway, so nothing loses cadence -- only call overhead).
     if (sPlayerbotAIConfig.supervisorMode)
     {
-        SupervisorTrack(this, bot);
-        FreezeNudge(this, bot);   // physically dislodge bots pathfinding can't move (travel/flee/corpse)
-        AntiIdleAction(this, bot);   // force standing bots to grind/roam instead of looping no-op decisions
-        HopelessFightBreaker(this, bot);   // give up on unkillable targets (training dummies, evade mobs)
-        GhostRescue(this, bot);            // stuck ghost -> teleport to corpse (invisible to living players)
-        AutoRepair(this, bot);             // broken gear = death spiral; repair (paid when affordable)
-        AutoAmmo(this, bot);               // hunters shoot dry and never restock; top up (invisible)
-        ChainPullNext(this, bot);          // kill -> loot -> next pull with no re-think dead-air
-        NoProgressGrindFallback(this, bot); // 10 min w/o xp -> stop wandering, grind the local area
-        LootUnderFire(this, bot);          // group-combat but personally safe -> grab the corpse now
-        QuestLoopBreaker(this, bot);       // 6+ kills of the same quest mob w/o the drop -> do other quests
-        // 1/sec gravity sweep for STATIONARY bots: catches every stop path that isn't StopMoving
-        // (motion-clears, chase-holds) so no bot stands floating above the ground.
-        if (!sServerFacade.isMoving(bot))
-            SettleToGround(bot);
+        const uint32 supNow = WorldTimer::getMSTime();
+        if (bot->IsInCombat() || !bot->getAttackers().empty() || supNow >= supervisorHelperNextMs)
+        {
+            supervisorHelperNextMs = supNow + 1000;
+            RunSupervisorHelpers(this, bot);
+        }
     }
 
     // ===== LOD COLD DORMANCY (the scale lever for 10-15k bots) =====
@@ -2892,8 +3530,30 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // of online real players (cheap even at 15k bots) -- the expensive DoNextAction is what we skip,
     // so we only pay full AI cost for bots a player can actually see. Instant rollback:
     // AiPlayerbot.LODColdUpdateMs = 0 in bin/aiplayerbot.conf + restart.
+    bool parkEligible = false;
     if (sPlayerbotAIConfig.lodColdUpdateMs && bot->IsInWorld() && !HasRealPlayerMaster()
-        && sRandomPlayerbotMgr.IsRandomBot(bot))
+        && sRandomPlayerbotMgr.IsRandomBot(bot)
+        && !IsInstancedContent()                                    // instanced bots never park
+        && !bot->InBattleGroundQueue())                              // queued bots stay awake to process the BG invite
+    {
+        const uint32 nowPark = WorldTimer::getMSTime();
+        if (sRandomPlayerbotMgr.IsActiveCohort(bot->GetGUIDLow()))
+            lastActiveCohortMs = nowPark;                           // active cohort never parks
+        // GROUP COHERENCE: a party member whose LEADER is in the active cohort stays awake too, so it
+        // can FOLLOW instead of parking and drifting away (measured: only 33% of grouped members stayed
+        // near their leader because followers parked while the leader ran on). Keeps the whole visible
+        // party together. Bounded: only near-a-player parties (their leader is active) stay awake.
+        else if (bot->GetGroup() && !IsGroupLeader()
+                 && sRandomPlayerbotMgr.IsActiveCohort(bot->GetGroup()->GetLeaderGuid().GetCounter()))
+            lastActiveCohortMs = nowPark;
+        // TRANSITION HYSTERESIS: a bot that just dropped out of the active set (player walked
+        // away / turned around) keeps its full brain for a 10s grace window before parking --
+        // no flicker at the render-range boundary, and a returning player finds it mid-task
+        // instead of mid-wakeup.
+        else if (!lastActiveCohortMs || nowPark - lastActiveCohortMs > 10000)
+            parkEligible = true;
+    }
+    if (parkEligible)
     {
         // NEVER go dormant while in a fight: SetColdDormant does CombatStop, so dormant-ing a
         // bot mid-combat makes it "stop attacking and stand there eating hits" -- exactly the
@@ -2902,7 +3562,7 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         // the fight ends, then goes dormant. (A dormant bot is invisible so nothing attacks it ->
         // it never enters this branch unless it was already awake + engaged.)
         const bool fighting = bot->IsInCombat() || !bot->getAttackers().empty();
-        if (!fighting && !HasPlayerNearby(sPlayerbotAIConfig.lodColdRange))
+        if (!fighting)   // out of the brain budget -> park (allocator owns proximity now)
         {
             if (!coldDormant)
                 SetColdDormant(true);
@@ -2913,6 +3573,19 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
             SetColdDormant(false);  // player near OR pulled into a fight -> wake / stay awake
         }
     }
+
+    // DUNGEON/RAID ENTRANCE LOITERER: an awake bot assigned this "actor role" holds its post at the
+    // entrance (paces / social-emotes / some walk in and zone in) INSTEAD of running grind/travel AI,
+    // so a passing player sees a lively group-forming crowd. (Parked far-away loiterers never reach
+    // here -- they stand frozen at the portal, which is exactly what we want until a player shows up.)
+    if (sRandomPlayerbotMgr.IsDungeonLoiterer(bot->GetGUIDLow())
+        && !bot->IsInCombat() && bot->getAttackers().empty())
+    {
+        DungeonLoiterController(this, bot);
+        return;
+    }
+    // A loiterer that is fighting / being attacked does NOT get held at its post -- it falls through
+    // to the full combat AI below and kills what's on it, then resumes loitering when combat ends.
 
     // COMBAT PREEMPT: a bot that is in combat or is being attacked must NOT stay parked on a long
     // non-combat wait. Travel/camp/move actions set multi-second WaitForReach delays, and the
@@ -2964,20 +3637,73 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // LOD fast wake: a dormant (COLD) bot must become visible/active the INSTANT a real
     // player comes within range, not after its slow ~15s brain tick. Cheap: short-circuits
     // on an empty server and only scans the handful of real players.
-    if (coldDormant && bot && bot->IsInWorld() && !sRandomPlayerbotMgr.GetPlayers().empty())
+    if (coldDormant && bot && bot->IsInWorld() && !sRandomPlayerbotMgr.GetRealPlayerSnapshot()->players.empty())
     {
         const bool nearPlayer = HasPlayerNearby(sPlayerbotAIConfig.lodColdRange);
         // TEMP COLDDBG: sample whether dormant bots see the online player + distance.
         static std::atomic<uint32> dbgCtr{0};
         if ((dbgCtr++ % 150) == 0)
             sLog.outError("COLDDBG dormant bot=%s map=%u players=%u near=%d range=%.0f",
-                bot->GetName(), bot->GetMapId(), (uint32)sRandomPlayerbotMgr.GetPlayers().size(),
+                bot->GetName(), bot->GetMapId(), (uint32)sRandomPlayerbotMgr.GetRealPlayerSnapshot()->players.size(),
                 nearPlayer ? 1 : 0, sPlayerbotAIConfig.lodColdRange);
         if (nearPlayer)
         {
             sLog.outError("COLDWAKE bot=%s woke (player within %.0f)", bot->GetName(), sPlayerbotAIConfig.lodColdRange);
             SetColdDormant(false);
             ResetAIInternalUpdateDelay();   // think now, don't wait out the cold delay
+        }
+    }
+
+    // ===== BG WAYPOINT NAVIGATION (WSG) =====
+    // Replaces straight-line forced movement (which clipped through walls/ground). Bots now
+    // follow the hand-traced waypoint graph -- out the tunnels, around the flag-room buildings,
+    // across mid-field, down the one-way graveyard cliff-jumps -- via Playerbot_WsgNavigate().
+    // This block only handles TRAVEL when the bot is idle+safe; combat (target chase via
+    // MoveChase) and flag pickup/cap are the engine's job when an enemy/flag is close.
+    if (bot->InBattleGround() && bot->IsAlive() && sRandomPlayerbotMgr.IsRandomBot(bot)
+        && !HasRealPlayerMaster())
+    {
+        BattleGround* wsg = bot->GetBattleGround();
+        if (wsg && wsg->GetTypeId() == BATTLEGROUND_WS && wsg->GetStatus() == STATUS_IN_PROGRESS
+            && !bot->IsNonMeleeSpellCasted(true, false, true) && !bot->IsBeingTeleported()
+            && !bot->IsInCombat() && bot->getAttackers().empty() && !bot->IsMoving())
+        {
+            // enemy within engage range -> DON'T travel; hand to combat (engine + MoveChase fight)
+            bool enemyNear = false;
+            for (auto const& pr : wsg->GetPlayers())
+            {
+                Player* op = sObjectMgr.GetPlayer(pr.first);
+                if (!op || !op->IsInWorld() || !op->IsAlive() || op->GetTeam() == bot->GetTeam())
+                    continue;
+                if (bot->GetDistance(op) <= 15.0f) { enemyNear = true; break; }
+            }
+            if (!enemyNear)
+                Playerbot_WsgNavigate(bot);   // one traced-route leg toward the objective
+        }
+    }
+
+        // HUMAN-LIKE IDLE JUMPS: real players hop around while standing at the AH or waiting on a
+    // boat, not only mid-travel (the MoveTo path covers running jumps). Rolls every 4-12s per
+    // bot, scaled by HumanLikeJumpChance * per-bot jumpiness. Never during a cast/channel,
+    // combat, sitting (eating/drinking), looting, taxi or teleport -- nothing that would
+    // interrupt what the bot is doing. Only bothers when a real player can actually see it.
+    if (sPlayerbotAIConfig.humanLikeJumpChance > 0.0f && !coldDormant && bot->IsInWorld())
+    {
+        const uint32 nowJump = WorldTimer::getMSTime();
+        if (nowJump >= nextIdleJumpMs)
+        {
+            nextIdleJumpMs = nowJump + urand(4000, 12000);
+            if (bot->IsAlive() && !bot->IsInCombat() && bot->getAttackers().empty()
+                && !bot->IsNonMeleeSpellCasted(true, false, true)
+                && bot->GetStandState() == UNIT_STAND_STATE_STAND
+                && !bot->IsTaxiFlying() && !bot->IsBeingTeleported()
+                && !bot->GetLootGuid()
+                && !IsJumping()
+                && HasPlayerNearby()
+                && frand(0.0f, 1.0f) < sPlayerbotAIConfig.humanLikeJumpChance * GetJumpiness() * 0.5f)
+            {
+                DoSpecificAction("jump::random", Event(), true);
+            }
         }
     }
 
@@ -3122,21 +3848,17 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
             bot->m_movementInfo.AddMovementFlag(MOVEFLAG_FALLINGFAR);
 
             WorldPacket stop(MSG_MOVE_STOP);
-#ifdef MANGOSBOT_TWO
-            stop << bot->GetObjectGuid().WriteAsPacked();
-#endif
+            stop << bot->GetObjectGuid().WriteAsPacked();   // packed GUID first (all versions)
             stop << bot->m_movementInfo;
-            QueuePacket(stop);
+            bot->SendMessageToSetExcept(stop, bot);
 
             bot->m_movementInfo.SetMovementFlags(MOVEFLAG_NONE);
             bot->m_movementInfo.jump = MovementInfo::JumpInfo();
 
             WorldPacket land(MSG_MOVE_FALL_LAND);
-#ifdef MANGOSBOT_TWO
-            land << bot->GetObjectGuid().WriteAsPacked();
-#endif
+            land << bot->GetObjectGuid().WriteAsPacked();   // packed GUID first (all versions)
             land << bot->m_movementInfo;
-            QueuePacket(land);
+            bot->SendMessageToSetExcept(land, bot);
             sLog.outDetail("%s: Jump: Landed, landTime: %u", bot->GetName(), curTime);
 
             jumpTime = 0;
@@ -3323,6 +4045,7 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
 
         SC_PHASE("UpdateAI.UpdateAIInternal", bot ? bot->GetName() : "(null)");
         MapManager::SetContinentUpdatePhase("bot-internal", bot ? bot->GetGUIDLow() : 0);
+        RecordBrainServiceInterval(WorldTimer::getMSTime(), lastBrainExecMs);
         UpdateAIInternal(elapsed, minimal);
 
         // LOD COLD tier: a bot with NO real player within lodColdRange (different
@@ -3336,7 +4059,10 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         // execution volume). SetAIInternalUpdateDelay here is not overridden by the
         // YieldAIInternalThread below (it only acts when the delay is near zero).
         if (sPlayerbotAIConfig.lodColdUpdateMs && bot && bot->IsInWorld()
-            && !HasPlayerNearby(sPlayerbotAIConfig.lodColdRange))
+            && !HasRealPlayerMaster() && sRandomPlayerbotMgr.IsRandomBot(bot)
+            && !sRandomPlayerbotMgr.IsActiveCohort(bot->GetGUIDLow())     // brain budget decides
+            && !IsInstancedContent()                                     // instanced bots never park
+            && !bot->IsInCombat() && bot->getAttackers().empty())         // finish the fight first
         {
             SetColdDormant(true);
             SetAIInternalUpdateDelay(sPlayerbotAIConfig.lodColdUpdateMs);
@@ -3358,9 +4084,21 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         if (sPlayerbotAIConfig.supervisorMode)
             min = false;
 
+        // FULL CADENCE for the active brain set (the 200 bots nearest a real player) + instanced
+        // bots. Without this they dropped to the 1s "minimal" yield and looked frozen/laggy near the
+        // player (the "bots standing still around me" report) even when the tick was fast.
+        if (IsInstancedContent() || sRandomPlayerbotMgr.IsActiveCohort(bot->GetGUIDLow()))
+            min = false;
+
         SC_PHASE("UpdateAI.YieldAIInternalThread", bot ? bot->GetName() : "(null)");
         MapManager::SetContinentUpdatePhase("bot-yield", bot ? bot->GetGUIDLow() : 0);
         YieldAIInternalThread(min);
+
+        // TIGHTER react floor for instanced bots so they press buttons + update movement/range
+        // faster than the open-world 100ms (max 40-80 bots per instance -> cheap). Applied after
+        // Yield (which set the 100ms floor); shrink it to instanceReactDelay for responsiveness.
+        if (IsInstancedContent() && aiInternalUpdateDelay > sPlayerbotAIConfig.instanceReactDelay)
+            aiInternalUpdateDelay = sPlayerbotAIConfig.instanceReactDelay;
 	}
 	SC_PHASE("UpdateAI.exit", bot ? bot->GetName() : "(null)");
     MapManager::SetContinentUpdatePhase("bot-ai-exit", bot ? bot->GetGUIDLow() : 0);
@@ -4004,6 +4742,25 @@ void PlayerbotAI::OnResurrected()
 void PlayerbotAI::HandleCommands()
 {
     ExternalEventHelper helper(aiObjectContext);
+
+    // NL COMMAND BRIDGE, execution side: run LLM-translated commands. Parse failures here are
+    // dropped silently (the LLM only speaks the known vocabulary; anything else is noise).
+    {
+        std::queue<std::pair<std::string, uint32>> ready;
+        {
+            std::scoped_lock lock(translatedCommandsMutex);
+            ready.swap(translatedCommands);
+        }
+        while (!ready.empty())
+        {
+            auto& pr = ready.front();
+            Player* owner = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, pr.second));
+            if (owner)
+                helper.ParseChatCommand(pr.first, owner);
+            ready.pop();
+        }
+    }
+
     std::list<ChatCommandHolder> delayed;
     while (!chatCommands.empty())
     {
@@ -4020,9 +4777,64 @@ void PlayerbotAI::HandleCommands()
         Player* owner = holder.GetOwner();
         if (!helper.ParseChatCommand(command, owner) && holder.GetType() == CHAT_MSG_WHISPER)
         {
-            //ostringstream out; out << "Unknown command " << command;
-            //TellPlayer(out);
-            //helper.ParseChatCommand("help");
+            // NL COMMAND BRIDGE, translation side: a whisper from the real-player master that no
+            // string command matched. Ask the LLM to translate it into the known vocabulary
+            // (CMD: a | b) or classify it as conversation (SAY: ...). Async — never blocks the tick.
+            if (sPlayerbotAIConfig.llmCommandBridgeEnabled && sPlayerbotAIConfig.llmEnabled &&
+                owner && owner->isRealPlayer() && GetMaster() == owner)
+            {
+                std::string text = command;
+                uint32 ownerGuid = owner->GetGUIDLow();
+                uint32 msgType = holder.GetType();
+                PlayerbotAI* self = this;
+                std::string senderName = owner->GetName();
+
+                std::map<std::string, std::string> jsonFill;
+                jsonFill["<pre prompt>"] = sPlayerbotAIConfig.llmCommandPrompt;
+                jsonFill["<context>"] = "";
+                jsonFill["<prompt>"] = "Player instruction: " + PlayerbotLLMInterface::SanitizeForJson(text);
+                jsonFill["<post prompt>"] = "";
+                std::string json = PlayerbotTextMgr::GetReplacePlaceholders(sPlayerbotAIConfig.llmApiJson, jsonFill);
+
+                (void)std::async(std::launch::async, [self, json, ownerGuid, msgType, text, senderName]()
+                {
+                    std::vector<std::string> debug;
+                    std::string response = PlayerbotLLMInterface::Generate(json,
+                        sPlayerbotAIConfig.llmGenerationTimeout, sPlayerbotAIConfig.llmMaxSimultaniousGenerations, debug);
+                    std::vector<std::string> parts = PlayerbotLLMInterface::ParseResponse(response,
+                        sPlayerbotAIConfig.llmResponseStartPattern, sPlayerbotAIConfig.llmResponseEndPattern,
+                        sPlayerbotAIConfig.llmResponseDeletePattern, sPlayerbotAIConfig.llmResponseSplitPattern, debug);
+                    std::string parsed;
+                    for (std::string const& part : parts)
+                        parsed += part + " ";
+
+                    size_t cmdPos = parsed.find("CMD:");
+                    if (cmdPos != std::string::npos)
+                    {
+                        std::string cmds = parsed.substr(cmdPos + 4);
+                        std::scoped_lock lock(self->translatedCommandsMutex);
+                        std::stringstream ss(cmds);
+                        std::string one;
+                        while (std::getline(ss, one, '|'))
+                        {
+                            // trim
+                            size_t b = one.find_first_not_of(" \t\r\n");
+                            size_t e = one.find_last_not_of(" \t\r\n.");
+                            if (b == std::string::npos)
+                                continue;
+                            self->translatedCommands.push({ one.substr(b, e - b + 1), ownerGuid });
+                        }
+                    }
+                    else
+                    {
+                        // conversation: hand to the normal AI-chat reply path
+                        size_t sayPos = parsed.find("SAY:");
+                        (void)sayPos;
+                        self->QueueChatResponse(msgType, ObjectGuid(HIGHGUID_PLAYER, ownerGuid), ObjectGuid(),
+                            text, "", senderName, true);
+                    }
+                });
+            }
         }
 
         chatCommands.pop();
@@ -7266,7 +8078,24 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
 
                         if (!isFromFreeBot)
                         {
-                            if (!isMentioned && urand(0, 4))
+                            // WHO IS BEING ADDRESSED (user: "bots whisper me from all over"): for
+                            // say/yell from a real player, a bot only treats it as directed at them
+                            // when it plausibly IS: the player targets this bot, said its name, or
+                            // stands close AND faces it. Everyone else stays quiet.
+                            if (isAiChat && (msgtype == CHAT_MSG_SAY || msgtype == CHAT_MSG_YELL))
+                            {
+                                Player* speaker = sObjectAccessor.FindPlayer(guid1);
+                                bool targeted = speaker && speaker->GetSelectionGuid() == bot->GetObjectGuid();
+                                bool addressed = targeted || isMentioned;
+                                if (!addressed && speaker && speaker->IsInWorld() &&
+                                    speaker->GetMapId() == bot->GetMapId() &&
+                                    speaker->GetDistance(bot) <= 8.0f &&
+                                    speaker->HasInArc(bot, M_PI_F / 3.0f))
+                                    addressed = true;
+                                if (!addressed)
+                                    return;
+                            }
+                            else if (!isMentioned && urand(0, 4))
                                 return;
                         }
                         else
@@ -7493,6 +8322,430 @@ void PlayerbotAI::ChangeEngine(BotState type)
 }
 
 
+// ===================== AUTONOMOUS FSM (decision-engine replacement) =========================
+// The measured pathology (headless observer + bot_events, 2026-07-08, active near-player cohort):
+// moving 15% / combat 6% / target=none 37%; apm median 14, p90 162, MAX 966 -- i.e. a quarter of the
+// active cohort makes 20-966 decisions/min while moving=0 AND combat=0. The relevance engine can pick
+// an action that never executes and then re-pick it forever (no execute-or-fail damper). This FSM
+// replaces the top-level DECISION for autonomous (no real master), out-of-combat, random bots: it
+// picks ONE concrete action and then COMMITS -- it will NOT re-decide until that action's observable
+// effect resolves (moved toward target / arrived / entered combat) or a break event fires. Combat
+// rotation, combat reactions, quests/rpg/rest/buffs are left to the existing engine (delegated).
+// Rollback: AiPlayerbot.AutonomousFSM = 0.
+enum FsmVerdict { FSM_DELEGATE = 0, FSM_HANDLED = 1 };
+
+struct FsmTrack
+{
+    uint32 commitUntil = 0;      // suppress re-decision until this ms (the anti-thrash core)
+    uint32 idleSince = 0;        // first ms we had nothing concrete to do
+    uint32 idleDelegateAt = 0;   // next ms we permit an engine delegation (throttles idle-thrash)
+    uint32 relocateAt = 0;       // next ms a relocate is allowed
+    float  lastX = 0.f, lastY = 0.f;
+    uint32 lastMoveCheck = 0;
+    uint8  state = 0;            // 0 idle 1 grind 2 travel 3 loot 4 pursue-content
+    uint8  stuckStrikes = 0;     // consecutive no-displacement checks while committed to a move
+    uint32 grindSkipUntil = 0;   // skip GRIND after a stuck pull (the mob is unreachable)
+    uint32 lookAliveAt = 0;      // next ms a watched-idle bot performs a look-alive action
+    float  destX = 0.f, destY = 0.f, destZ = 0.f;  // committed mob-camp destination (pursue-content)
+    uint32 destPickAt = 0;       // next ms we may re-pick the destination
+};
+
+// ---- FSM branch telemetry (which branch each autonomous non-combat bot takes; per-min -> fsm_branch.csv)
+static std::atomic<uint32> s_fsmGrind{0}, s_fsmPursue{0}, s_fsmPursueMove{0}, s_fsmFollow{0},
+                           s_fsmLoot{0}, s_fsmHold{0}, s_fsmNoSpot{0};
+static std::atomic<uint32> s_fsmCalls{0}, s_fsmSit{0}, s_fsmInvite{0};   // diagnostic: where do bots go?
+static std::atomic<uint32> s_fsmDumpDueMs{0};
+static std::mutex s_fsmDumpMx;
+static void FsmBranchTelemetry(uint32 nowMs)
+{
+    if (nowMs < s_fsmDumpDueMs.load(std::memory_order_relaxed) || !s_fsmDumpMx.try_lock())
+        return;
+    if (nowMs >= s_fsmDumpDueMs.load(std::memory_order_relaxed))
+    {
+        s_fsmDumpDueMs.store(nowMs + 60000, std::memory_order_relaxed);
+        FILE* f = fopen("logs/fsm_branch.csv", "a");
+        if (!f) f = fopen("../logs/fsm_branch.csv", "a");
+        if (f)
+        {
+            time_t tt = time(0); struct tm tmv; localtime_r(&tt, &tmv); char ts[32];
+            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+            fprintf(f, "%s,calls=%u,grind=%u,pursue=%u,pursueMove=%u,follow=%u,loot=%u,hold=%u,sit=%u,invite=%u,nospot=%u\n", ts,
+                s_fsmCalls.exchange(0), s_fsmGrind.exchange(0), s_fsmPursue.exchange(0), s_fsmPursueMove.exchange(0),
+                s_fsmFollow.exchange(0), s_fsmLoot.exchange(0), s_fsmHold.exchange(0),
+                s_fsmSit.exchange(0), s_fsmInvite.exchange(0), s_fsmNoSpot.exchange(0));
+            fclose(f);
+        }
+    }
+    s_fsmDumpMx.unlock();
+}
+
+static FsmVerdict AutonomousFsmTick(PlayerbotAI* ai, Player* bot, bool minimal, bool* executed)
+{
+    *executed = false;
+    s_fsmCalls.fetch_add(1, std::memory_order_relaxed);   // every FSM entry (diagnostic)
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive())
+        return FSM_DELEGATE;
+    // PENDING GROUP INVITE must be handled by the engine IMMEDIATELY -- the accept-invitation action
+    // lives there, and the FSM's idle throttle otherwise delays acceptance by seconds (measured: a
+    // real player inviting fleet bots got only 2/8 to accept, slowly). Never let the FSM sit on a
+    // real player's invite; delegate every tick until the invite resolves.
+    if (bot->GetGroupInvite())
+        { s_fsmInvite.fetch_add(1, std::memory_order_relaxed); return FSM_DELEGATE; }
+    if (bot->IsTaxiFlying() || bot->IsBeingTeleported() || !bot->IsStandState())
+        { s_fsmSit.fetch_add(1, std::memory_order_relaxed); ai->SetAIInternalUpdateDelay(500); *executed = true; return FSM_HANDLED; }  // busy/sitting
+
+    AiObjectContext* context = ai->GetAiObjectContext();
+    if (!context)
+        return FSM_DELEGATE;
+
+    const uint32 now = WorldTimer::getMSTime();
+    const uint32 guid = bot->GetGUIDLow();
+    static std::mutex fsmMx;
+    static std::unordered_map<uint32, FsmTrack> fsmTracks;
+
+    FsmTrack s;
+    { std::lock_guard<std::mutex> lk(fsmMx); s = fsmTracks[guid]; }
+    // Every FSM-handled path MUST set an update delay, else the bot re-ticks at the floor rate and
+    // spins (apm explosion) even though the commit window blocks re-DECISION. The delay makes the
+    // bot actually SLEEP until its next meaningful check. reactDelay(~100ms) is the floor.
+    auto handled = [&](bool exec, uint32 sleepMs) -> FsmVerdict {
+        { std::lock_guard<std::mutex> lk(fsmMx); fsmTracks[guid] = s; }
+        ai->SetAIInternalUpdateDelay(std::max<uint32>(sleepMs, sPlayerbotAIConfig.reactDelay));
+        *executed = exec;
+        return FSM_HANDLED;
+    };
+    auto save = [&]() { std::lock_guard<std::mutex> lk(fsmMx); fsmTracks[guid] = s; };
+
+    const float x = bot->GetPositionX(), y = bot->GetPositionY();
+    FsmBranchTelemetry(now);
+
+    // ---- FOLLOW/ASSIST: a grouped NON-leader bot sticks to its leader and focus-fires the leader's
+    // target -- real party behavior ("don't fall behind, be active + helping"). FormGrindingParties
+    // (world thread) creates the parties; this map-thread branch drives the followers. The leader is a
+    // normal autonomous bot (grinds/travels via the rest of the FSM); followers converge + assist.
+    if (sPlayerbotAIConfig.autonomousParties && bot->GetGroup() && !ai->IsGroupLeader())
+    {
+        Player* leader = ai->GetGroupMaster();
+        if (leader && leader != bot && leader->IsInWorld() && leader->IsAlive())
+        {
+            s_fsmFollow.fetch_add(1, std::memory_order_relaxed);
+            const bool sameMap = leader->GetMapId() == bot->GetMapId();
+            const float ld = sameMap ? bot->GetDistance(leader) : 99999.f;
+
+            // ASSIST: leader is fighting -> engage its target (focus fire). Entering combat hands off
+            // to the combat director, which STICKS to the target.
+            Unit* lv = leader->GetVictim();
+            if (lv && sServerFacade.IsAlive(lv) && !bot->IsInCombat() && sameMap && ld < 60.0f)
+            {
+                context->GetValue<Unit*>("current target")->Set(lv);
+                const bool a = ai->DoSpecificAction("reach melee", Event(), true) ||
+                               ai->DoSpecificAction("attack anything", Event(), true);
+                return handled(a, 300);
+            }
+
+            // CATCH-UP: too far behind / on another map, unseen, out of combat -> teleport to the leader
+            // (the "never fall behind in dungeons/raids" guard). Only when a human can't see the blink.
+            if ((!sameMap || ld > 80.0f) && !bot->IsInCombat() && !RealPlayerWithin(bot, 120.0f))
+            {
+                sRandomPlayerbotMgr.QueueBotTeleport(guid, leader->GetMapId(),
+                    leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ(), false);
+                return handled(true, 1500);
+            }
+
+            // FOLLOW: run to the leader when spread out; hold when close.
+            if (sameMap && ld > 12.0f && !bot->IsInCombat())
+            {
+                const bool a = ai->DoSpecificAction("follow", Event(), true);
+                return handled(a, 400);
+            }
+            if (!bot->IsInCombat())
+                return handled(false, 800);   // close & leader idle -> hold near leader
+            // in combat -> fall through (combat director / engine handles the fight)
+        }
+        // leader invalid -> fall through to normal solo FSM; group disbands naturally.
+    }
+
+    // ---- COMMIT WINDOW: while a concrete action is in flight, verify progress; do NOT re-decide.
+    if (now < s.commitUntil)
+    {
+        if (s.state == 2 /*travel*/ && now - s.lastMoveCheck > 1200)
+        {
+            const float moved = sqrtf((x - s.lastX) * (x - s.lastX) + (y - s.lastY) * (y - s.lastY));
+            s.lastX = x; s.lastY = y; s.lastMoveCheck = now;
+            if (moved < 3.0f) { if (++s.stuckStrikes >= 2) s.commitUntil = 0; }  // unroutable -> break
+            else s.stuckStrikes = 0;
+        }
+        // GRIND verify: a bot committed to a pull must be moving toward the mob OR in combat. If it is
+        // neither for 2 checks, the mob is unreachable -> break the commit and blacklist GRIND briefly
+        // so the bot doesn't re-pick the same unreachable mob and spin (the residual apm>=100 mv0 case).
+        if (s.state == 1 /*grind*/ && !bot->IsInCombat() && now - s.lastMoveCheck > 800)
+        {
+            const float moved = sqrtf((x - s.lastX) * (x - s.lastX) + (y - s.lastY) * (y - s.lastY));
+            s.lastX = x; s.lastY = y; s.lastMoveCheck = now;
+            if (moved < 2.0f) { if (++s.stuckStrikes >= 2) { s.commitUntil = 0; s.grindSkipUntil = now + 6000; } }
+            else s.stuckStrikes = 0;
+        }
+        if (now < s.commitUntil)
+        {
+            s_fsmHold.fetch_add(1, std::memory_order_relaxed);
+            // sleep until the commit expires (cap so travel re-checks displacement ~every 600ms)
+            return handled(true, std::min<uint32>(s.commitUntil - now, 600));
+        }
+    }
+
+    // ---- DECIDE: one action, one commit. -------------------------------------------------------
+
+    // (A) LOOT owed -> run the loot chain first (Goal 4).
+    LootObject lootTarget = AI_VALUE(LootObject, "loot target");
+    if (AI_VALUE(bool, "has available loot") || bot->GetLootGuid() || !lootTarget.IsEmpty())
+    {
+        const bool acted = ai->DoSpecificAction("move to loot", Event(), true) ||
+                           ai->DoSpecificAction("open loot", Event(), true) ||
+                           ai->DoSpecificAction("loot", Event(), true);
+        s.state = 3; s.commitUntil = now + 800; s.stuckStrikes = 0; s.idleSince = 0;
+        s_fsmLoot.fetch_add(1, std::memory_order_relaxed);
+        return handled(acted, 400);
+    }
+
+    // (B) GRIND: a live, level-appropriate mob within grind range -> engage. "attack anything" sets
+    //     up a persistent MoveChase, so one call + a commit window makes the bot close and fight
+    //     WITHOUT re-deciding every tick (the apm-966 fix).
+    Unit* gt = (now >= s.grindSkipUntil) ? AI_VALUE(Unit*, "grind target") : nullptr;
+    if (gt && sServerFacade.IsAlive(gt) && sServerFacade.GetDistance2d(bot, gt) <= sPlayerbotAIConfig.grindDistance)
+    {
+        const bool acted = ai->DoSpecificAction("attack anything", Event(), true);
+        if (acted)
+        {
+            s.state = 1;
+            s.commitUntil = now + std::min<uint32>(sPlayerbotAIConfig.maxWaitForMove, 2500);
+            s.lastX = x; s.lastY = y; s.lastMoveCheck = now; s.stuckStrikes = 0; s.idleSince = 0;
+            s_fsmGrind.fetch_add(1, std::memory_order_relaxed);
+            return handled(true, 500);   // engaged; re-check in 0.5s (combat reconcile takes over on aggro)
+        }
+        // "attack anything" DECLINED this mob (grey / tapped / swarmed / unreachable). Do NOT commit to
+        // a hold here (that was the trap: bots standing on a mob they won't attack). Skip grind briefly
+        // and WALK to a fresh, level-appropriate camp via PURSUE below.
+        s.grindSkipUntil = now + 5000;
+    }
+
+    // (C) TRAVEL branch REMOVED. It relied on the engine's "travel target", which is the DEAD travel
+    //     pipeline: 71% of idle bots had a travel target stuck in COOLDOWN, "travel target active"
+    //     stayed true, so "move to travel target" fired every tick, no-op'd (unroutable), and the bot
+    //     HELD in a commit window -- never walking, never reaching PURSUE. That trap is why 80% of
+    //     open-world bots stood idle. The brain now owns ALL movement via PURSUE below (its own
+    //     content search), so the engine's travel target is never consulted again.
+
+    // (D) PURSUE CONTENT -- NEVER STAND IDLE. No loot, no mob in grind range, no active travel. Rather
+    //     than hand the bot back to the dead travel pipeline (measured live: 85% of near-player bots
+    //     standing still, 67% with NO travel destination -> they just stood there), the FSM OWNS the
+    //     content search: pick the nearest real mob camp (from the spawn cache) and WALK to it, every
+    //     tick, until a mob is in grind range (then GRIND above engages). This is the "always doing
+    //     something purposeful" rewrite -- no hold, no stroll-in-place, no delegation-to-idle.
+    s.state = 4;
+    if (!s.idleSince) s.idleSince = now;
+
+    const bool haveDest = (s.destX != 0.f || s.destY != 0.f);
+    const float dxd = s.destX - x, dyd = s.destY - y;
+    const float destDist = haveDest ? sqrtf(dxd * dxd + dyd * dyd) : 1e9f;
+
+    // (Re)pick a destination when we have none, arrived (mobs should now be in grind range), or it aged.
+    bool pickedNew = false;
+    if (!haveDest || destDist < 25.0f || now >= s.destPickAt)
+    {
+        float nx, ny, nz;
+        if (sRandomPlayerbotMgr.GetNearestGrindSpot(bot, 60.0f, nx, ny, nz))
+        {
+            s.destX = nx; s.destY = ny; s.destZ = nz; s.destPickAt = now + 20000;
+            s.lastX = x; s.lastY = y; s.lastMoveCheck = now; s.stuckStrikes = 0;
+            pickedNew = true;
+        }
+        else
+        {
+            s_fsmNoSpot.fetch_add(1, std::memory_order_relaxed);
+            // No cached spot on this map (rare). Unseen -> level teleport to content; seen -> short roam.
+            if (!RealPlayerWithin(bot, 180.f) && !bot->IsInCombat())
+            {
+                sRandomPlayerbotMgr.QueueBotTeleport(guid, 0, 0.f, 0.f, 0.f, /*forLevel*/ true);
+                s.destX = s.destY = 0.f;
+                return handled(true, 1500);
+            }
+            s.destX = s.destY = 0.f;
+            return handled(ai->DoSpecificAction("move random", Event(), true), 1200);
+        }
+    }
+
+    // ALWAYS WALK toward content -- we do NOT teleport-then-sleep here (that queued teleport made the
+    // bot sit mv0 for 1.5s each tick = the "standing around" the player sees). Verify displacement; if
+    // walking is genuinely BLOCKED for 2 checks, THEN teleport as a stuck-escape (unseen only) or
+    // re-pick another camp. Otherwise the stepped walk below keeps the bot continuously moving.
+    if (!pickedNew && now - s.lastMoveCheck > 1200)
+    {
+        const float moved = sqrtf((x - s.lastX) * (x - s.lastX) + (y - s.lastY) * (y - s.lastY));
+        s.lastX = x; s.lastY = y; s.lastMoveCheck = now;
+        if (moved < 3.0f)
+        {
+            if (++s.stuckStrikes >= 2)
+            {
+                s.stuckStrikes = 0;
+                if (destDist > 200.0f && !RealPlayerWithin(bot, 200.f) && !bot->IsInCombat())
+                    sRandomPlayerbotMgr.QueueBotTeleport(guid, bot->GetMapId(), s.destX, s.destY, s.destZ, false);
+                s.destX = s.destY = 0.f; s.destPickAt = 0;   // re-pick / re-plan next tick
+                return handled(true, 1000);
+            }
+        }
+        else s.stuckStrikes = 0;
+    }
+    // WALK toward the camp. For a FAR (often cross-zone) camp, MovePoint to the exact far point fails
+    // to pathfind and the bot just STANDS (the L60-in-Stormwind bug). So step toward it in a reachable
+    // ~120y hop -- the bot is ALWAYS walking toward content, on foot when a human is watching (visible,
+    // purposeful) and eventually reaching mobs where GRIND engages.
+    float wx = s.destX, wy = s.destY, wz = s.destZ;
+    if (destDist > 150.0f)
+    {
+        const float f = 120.0f / destDist;
+        wx = x + (s.destX - x) * f;
+        wy = y + (s.destY - y) * f;
+        wz = bot->GetPositionZ();   // pathfinder snaps to ground
+    }
+    s_fsmPursue.fetch_add(1, std::memory_order_relaxed);
+    if (pickedNew || !sServerFacade.isMoving(bot))
+    {
+        bot->GetMotionMaster()->MovePoint(bot->GetMapId(), wx, wy, wz,
+                                          MOVE_PATHFINDING | MOVE_RUN_MODE, 0.0f);
+        s_fsmPursueMove.fetch_add(1, std::memory_order_relaxed);
+    }
+    return handled(true, 500);   // walking toward content; re-check in 0.5s (GRIND takes over when close)
+}
+
+// ---- Combat-director telemetry (O(1)/tick atomic counters, dumped once/min to combat_director.csv).
+static std::atomic<uint32> s_cdInRange{0};   // delegated: in range, engine rotates
+static std::atomic<uint32> s_cdChase{0};     // director forced/held a chase
+static std::atomic<uint32> s_cdReached{0};   // chase converted to in-range this window
+static std::atomic<uint32> s_cdGaveUp{0};    // stuck-chase guard dropped an unreachable target
+static std::atomic<uint32> s_cdDumpDueMs{0};
+static std::mutex s_cdDumpMx;
+static void CombatDirectorTelemetry(uint32 nowMs)
+{
+    if (nowMs < s_cdDumpDueMs.load(std::memory_order_relaxed) || !s_cdDumpMx.try_lock())
+        return;
+    if (nowMs >= s_cdDumpDueMs.load(std::memory_order_relaxed))
+    {
+        s_cdDumpDueMs.store(nowMs + 60000, std::memory_order_relaxed);
+        FILE* f = fopen("logs/combat_director.csv", "a");
+        if (!f) f = fopen("../logs/combat_director.csv", "a");
+        if (f)
+        {
+            time_t tt = time(0); struct tm tmv; localtime_r(&tt, &tmv); char ts[32];
+            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+            fprintf(f, "%s,inrange=%u,chase=%u,reached=%u,gaveup=%u\n", ts,
+                s_cdInRange.exchange(0), s_cdChase.exchange(0),
+                s_cdReached.exchange(0), s_cdGaveUp.exchange(0));
+            fclose(f);
+        }
+    }
+    s_cdDumpMx.unlock();
+}
+
+// COMBAT DIRECTOR: "less thinking, more acting" for autonomous random bots in combat. Measured
+// pathology on live: 68% of in-combat bots are NOT moving (chase-stalled) while the relevance engine
+// re-decides ~5x/sec (apm median 283, max 916) -- it keeps clearing/re-picking instead of COMMITTING
+// to chase the target it already has. This director enforces the simple, snappy rule: if I have a live
+// target and I'm out of range and healthy and can move -> CHASE it (persistent MoveChase, tested
+// reach action) with a SHORT re-check delay, so the bot STICKS and closes fast. Melee -> reach melee
+// (melee range); ranged/caster -> reach spell (spell range). A STUCK-CHASE guard drops a target the
+// bot cannot close on for several seconds (the "chase a fleeing/unreachable bot for 20 min" lock).
+// In range, low HP (flee), rooted/feared, mid-cast, or no target -> delegated to the engine unchanged.
+// The reaction engine (flee/AoE/interrupt) runs earlier in UpdateAI and is untouched. Rollback:
+// AiPlayerbot.CombatDirector=0.
+struct CdTrack { uint32 tgtLow=0; float lastDist=0.f; uint32 lastProgressMs=0; };
+
+static FsmVerdict CombatFsmTick(PlayerbotAI* ai, Player* bot, bool* executed)
+{
+    *executed = false;
+    if (!ai || !bot || !bot->IsInWorld() || !bot->IsAlive())
+        return FSM_DELEGATE;
+    if (bot->GetHealthPercent() < 30.0f)
+        return FSM_DELEGATE;                                   // survival -> engine decides flee/heal
+    if (!ai->CanMove())
+        return FSM_DELEGATE;                                   // rooted/feared/stunned -> engine
+    if (bot->IsNonMeleeSpellCasted(true, false, true))
+        return FSM_DELEGATE;                                   // mid-cast -> never interrupt
+
+    AiObjectContext* context = ai->GetAiObjectContext();
+    if (!context)
+        return FSM_DELEGATE;
+
+    Unit* target = bot->GetVictim();
+    if (!target || !sServerFacade.IsAlive(target))
+        target = AI_VALUE(Unit*, "current target");
+    if (!target || !sServerFacade.IsAlive(target))
+        return FSM_DELEGATE;                                   // no live target -> engine acquires one
+
+    const uint32 now = WorldTimer::getMSTime();
+    CombatDirectorTelemetry(now);
+
+    // Melee vs ranged: paladins count as melee even when IsRanged()'s holy heuristic says otherwise.
+    const bool ranged = ai->IsRanged(bot) && bot->getClass() != CLASS_PALADIN;
+    bool inRange;
+    if (ranged)
+    {
+        const float spellRange = ai->GetRange("spell");
+        inRange = bot->IsWithinLOSInMap(target) &&
+                  bot->GetDistance(target) <= spellRange;
+    }
+    else
+        inRange = bot->CanReachWithMeleeAutoAttack(target) && bot->IsWithinLOSInMap(target);
+
+    // In range + LoS -> the engine runs the class rotation (that part works well).
+    if (inRange)
+    {
+        s_cdInRange.fetch_add(1, std::memory_order_relaxed);
+        s_cdReached.fetch_add(1, std::memory_order_relaxed);
+        return FSM_DELEGATE;
+    }
+
+    // OUT OF RANGE, healthy, can move -> STICK and CHASE. Keep "current target" consistent so the reach
+    // action chases exactly this target.
+    context->GetValue<Unit*>("current target")->Set(target);
+
+    // STUCK-CHASE guard: if we've been chasing this same target but not getting closer for >4s, it's
+    // effectively unreachable (fleeing bot, bad path, LoS wall) -> drop it so a new target is picked
+    // next tick instead of chasing forever (the observed 15-20 min cross-faction chase-lock).
+    static std::mutex cdMx;
+    static std::unordered_map<uint32, CdTrack> cdTracks;
+    const uint32 guid = bot->GetGUIDLow();
+    const uint32 tgtLow = target->GetGUIDLow();
+    const float dist = bot->GetDistance(target);
+    bool giveUp = false;
+    {
+        std::lock_guard<std::mutex> lk(cdMx);
+        CdTrack& c = cdTracks[guid];
+        if (c.tgtLow != tgtLow) { c.tgtLow = tgtLow; c.lastDist = dist; c.lastProgressMs = now; }
+        else if (dist < c.lastDist - 1.0f) { c.lastDist = dist; c.lastProgressMs = now; }  // progress
+        else if (now - c.lastProgressMs > 4000) { giveUp = true; c.tgtLow = 0; }           // stuck
+    }
+    if (giveUp)
+    {
+        s_cdGaveUp.fetch_add(1, std::memory_order_relaxed);
+        bot->AttackStop();
+        context->GetValue<Unit*>("current target")->Set(nullptr);
+        ai->SetAIInternalUpdateDelay(sPlayerbotAIConfig.reactDelay);
+        *executed = true; return FSM_HANDLED;   // re-acquire next tick (engine or director)
+    }
+
+    s_cdChase.fetch_add(1, std::memory_order_relaxed);
+    const bool alreadyChasing =
+        bot->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE;
+    bool acted = true;
+    if (!alreadyChasing)
+        acted = ai->DoSpecificAction(ranged ? "reach spell" : "reach melee", Event(), true);
+    ai->SetAIInternalUpdateDelay(alreadyChasing ? 300 : (sPlayerbotAIConfig.reactDelay + 100));
+    if (acted)
+        { *executed = true; return FSM_HANDLED; }
+    return FSM_DELEGATE;   // reach failed (LoS/path) -> let the engine try something else
+}
+
+
 void PlayerbotAI::DoNextAction(bool min)
 {
     SC_PHASE("DoNextAction.entry", bot ? bot->GetName() : "(null)");
@@ -7544,6 +8797,7 @@ void PlayerbotAI::DoNextAction(bool min)
         // fast lane is actually trying to release or corpse-run.
         aiObjectContext->GetValue<Unit*>("old target")->Reset();
         aiObjectContext->GetValue<Unit*>("current target")->Reset();
+        aiObjectContext->GetValue<ObjectGuid>("pre-selected next target")->Reset();
         aiObjectContext->GetValue<Unit*>("pull target")->Reset();
         aiObjectContext->GetValue<Unit*>("dps target")->Reset();
         aiObjectContext->GetValue<Unit*>("enemy player target")->Reset();
@@ -7913,6 +9167,7 @@ void PlayerbotAI::DoNextAction(bool min)
             aiObjectContext->GetValue<bool>("has attackers")->Reset();
             aiObjectContext->GetValue<Unit*>("old target")->Reset();
             aiObjectContext->GetValue<Unit*>("current target")->Reset();
+            aiObjectContext->GetValue<ObjectGuid>("pre-selected next target")->Reset();
             aiObjectContext->GetValue<Unit*>("pull target")->Reset();
             aiObjectContext->GetValue<Unit*>("dps target")->Reset();
             aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
@@ -8034,6 +9289,7 @@ void PlayerbotAI::DoNextAction(bool min)
                 aiObjectContext->GetValue<bool>("has attackers")->Reset();
                 aiObjectContext->GetValue<Unit*>("old target")->Reset();
                 aiObjectContext->GetValue<Unit*>("current target")->Reset();
+                aiObjectContext->GetValue<ObjectGuid>("pre-selected next target")->Reset();
                 aiObjectContext->GetValue<Unit*>("pull target")->Reset();
                 aiObjectContext->GetValue<Unit*>("dps target")->Reset();
                 aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
@@ -8565,6 +9821,7 @@ void PlayerbotAI::DoNextAction(bool min)
 
                 aiObjectContext->GetValue<Unit*>("old target")->Reset();
                 aiObjectContext->GetValue<Unit*>("current target")->Reset();
+                aiObjectContext->GetValue<ObjectGuid>("pre-selected next target")->Reset();
                 aiObjectContext->GetValue<Unit*>("pull target")->Reset();
                 aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
                 aiObjectContext->GetValue<Unit*>("dps target")->Reset();
@@ -8905,6 +10162,7 @@ void PlayerbotAI::DoNextAction(bool min)
                         DeferTargetGuidForBot(bot, targetGuid, fakeMovingTargetStare ? 12 : 8);
                     aiObjectContext->GetValue<Unit*>("old target")->Reset();
                     aiObjectContext->GetValue<Unit*>("current target")->Reset();
+                    aiObjectContext->GetValue<ObjectGuid>("pre-selected next target")->Reset();
                     aiObjectContext->GetValue<Unit*>("pull target")->Reset();
                     aiObjectContext->GetValue<Unit*>("dps target")->Reset();
                     aiObjectContext->GetValue<ObjectGuid>("attack target")->Reset();
@@ -9791,7 +11049,35 @@ void PlayerbotAI::DoNextAction(bool min)
 
     SC_PHASE("DoNextAction.engineDoNextAction", bot ? bot->GetName() : "(null)");
     MapManager::SetContinentUpdatePhase("bot-engine", bot ? bot->GetGUIDLow() : 0);
-    bool actionExecuted = currentEngine->DoNextAction(NULL, 0, (minimal || min), bot->IsTaxiFlying());
+    // AUTONOMOUS FSM: for out-of-combat autonomous random bots, the deterministic FSM owns the
+    // decision (execute-or-commit, no thrash). It either HANDLES the tick (movement/grind/loot/
+    // relocate) or DELEGATEs to the relevance engine for productive non-move work (quests/rest).
+    // Combat is untouched: the combat reconcile above has already flipped currentState to COMBAT
+    // when genuinely fighting, so the FSM gate below is false and the combat engine runs as before.
+    bool actionExecuted;
+    bool fsmExecuted = false;
+    if (sPlayerbotAIConfig.autonomousFsm
+        && currentState == BotState::BOT_STATE_NON_COMBAT
+        && sRandomPlayerbotMgr.IsRandomBot(bot)
+        && !HasRealPlayerMaster()
+        && !HasActivePlayerMaster()
+        && AutonomousFsmTick(this, bot, (minimal || min), &fsmExecuted) == FSM_HANDLED)
+    {
+        actionExecuted = fsmExecuted;
+    }
+    else if (sPlayerbotAIConfig.combatDirector
+        && currentState == BotState::BOT_STATE_COMBAT
+        && sRandomPlayerbotMgr.IsRandomBot(bot)
+        && !HasRealPlayerMaster()
+        && !HasActivePlayerMaster()
+        && CombatFsmTick(this, bot, &fsmExecuted) == FSM_HANDLED)
+    {
+        actionExecuted = fsmExecuted;   // director forced a snappy chase; engine skipped this tick
+    }
+    else
+    {
+        actionExecuted = currentEngine->DoNextAction(NULL, 0, (minimal || min), bot->IsTaxiFlying());
+    }
     SC_PHASE("DoNextAction.afterEngine", bot ? bot->GetName() : "(null)");
     MapManager::SetContinentUpdatePhase("bot-engine-done", bot ? bot->GetGUIDLow() : 0);
 
@@ -10907,9 +12193,10 @@ bool PlayerbotAI::SayToGuild(std::string msg, bool likePlayer)
         if (Guild* guild = sGuildMgr.GetGuildById(bot->GetGuildId()))
         {
 
-            for (auto& player : sRandomPlayerbotMgr.GetPlayers())
+            auto guildSnap = sRandomPlayerbotMgr.GetRealPlayerSnapshot();
+            for (auto const& player : guildSnap->players)
             {
-                if (player.second->GetGuildId() == bot->GetGuildId())
+                if (player.guildId == bot->GetGuildId())
                 {
                     if (likePlayer || (sPlayerbotAIConfig.llmEnabled > 0 && (HasStrategy("ai chat", BotState::BOT_STATE_NON_COMBAT) || sPlayerbotAIConfig.llmEnabled == 3) &&
                         sPlayerbotAIConfig.llmBotToBotChatChance))
@@ -11418,7 +12705,7 @@ bool PlayerbotAI::TellPlayerNoFacing(Player* player, std::string text, Playerbot
         {
             case CHAT_MSG_SAY:
             {
-                bot->Say(text, (bot->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH));
+                bot->Say(text, PlayerbotChatLanguage(bot));
                 return true;
             }
 
@@ -12410,6 +13697,20 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
     if (pet && pet->HasSpell(spellId))
     {
         return CastPetSpell(spellId, target);
+    }
+
+    // HEALER DISCIPLINE (dungeon/raid/BG groups): a healer-role bot in instanced content with
+    // a group NEVER casts offensive spells -- every offensive global is mana not available for
+    // the next heal, and dungeon wipes trace back to healers smiting at 40% mana. Utility and
+    // heals (positive spells) pass through untouched.
+    if (IsInstancedContent() && bot->GetGroup() && target && target != bot && !bot->IsFriendlyTo(target))
+    {
+        if (AiFactory::GetPlayerRoles(bot) & BOT_ROLE_HEALER)
+        {
+            const SpellEntry* offCheck = sServerFacade.LookupSpellInfo(spellId);
+            if (offCheck && !IsPositiveSpell(offCheck))
+                return false;
+        }
     }
 
     aiObjectContext->GetValue<LastMovement&>("last movement")->Get().Set(NULL);
@@ -13575,6 +14876,40 @@ void PlayerbotAI::InterruptSpell(bool withMeleeAndAuto)
 // VISIBILITY_OFF removes it from the world's visibility/aggro scan (creatures can't see it)
 // but it stays logged in (still in /who, still wandering). Reversed instantly when a player
 // approaches and it promotes to HOT/WARM. Idempotent: only acts on the actual transition.
+// THE INSTANCED FAST BRAIN, structurally: the open-world brain schedules its next thought
+// per-action (0.5-2s action durations, react waits, strategy yields -- fine for 10k bots
+// grinding). Inside a dungeon/raid/BG every one of those delays funnels through here and is
+// clamped to InstanceReactDelay (10ms): the bot re-evaluates EVERY map cycle -- range checks,
+// target swaps, interrupts, kiting all react at frame speed. Cheap because instanced bots are
+// capped at 40-80. EXCEPTION: an in-flight cast keeps its full delay -- clamping mid-cast
+// re-runs the engine which CANCELS the cast (the historical recast-loop bug).
+void PlayerbotAI::SetAIInternalUpdateDelay(const uint32 delay)
+{
+    uint32 d = delay;
+    // never clamp in-flight casts (re-running the engine cancels them). For MOVEMENT:
+    // out-of-combat movers keep their travel wait (10ms re-picks jittered the destination and
+    // froze bots), but IN-COMBAT movers re-path every 200ms -- a chasing bot that only
+    // re-evaluates at spline end aims at where its target WAS and permanently falls behind
+    // (the "bots suck at sticking to their target" report). 200ms tracks a strafing player
+    // without spline-restart thrash.
+    if (IsInstancedContent() && bot && !bot->IsNonMeleeSpellCasted(true, false, true))
+    {
+        if (!bot->IsMoving())
+            d = std::min(d, sPlayerbotAIConfig.instanceReactDelay);
+        else if (bot->IsInCombat())
+            d = std::min(d, 200u);
+    }
+    PlayerbotAIBase::SetAIInternalUpdateDelay(d);
+}
+
+float PlayerbotAI::GetJumpiness() const
+{
+    // stable per-bot personality: hash the guid into 0.3x - 2.5x
+    uint32 h = bot->GetGUIDLow() * 2654435761u;
+    h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    return 0.3f + float(h % 1000) * 0.0022f;
+}
+
 void PlayerbotAI::SetColdDormant(bool dormant)
 {
     // LOD COLD dormancy RE-ENABLED 2026-06-30 for scale (10-15k bots). The previous breakage --
@@ -13590,18 +14925,23 @@ void PlayerbotAI::SetColdDormant(bool dormant)
 
     if (dormant)
     {
-        // Pure invisibility -- NO GM mode (no <GM> tag, no faction swap) and NO aura.
-        // VISIBILITY_OFF removes the bot from the world's visibility scan, so neither
-        // players nor creatures can see it (creatures' target search skips invisible
-        // units -> no aggro). Drop current combat and make existing attackers release
-        // their threat so a mob can't keep swinging at a now-invisible target.
         bot->CombatStop(true);
         bot->GetHostileRefManager().deleteReferences();
-        bot->SetVisibility(VISIBILITY_OFF);
+        // SELECTIVE park-visibility: only CITY RESIDENTS stay visible (they sit in capitals to
+        // populate them, waking when a player approaches to do town activities). Every other
+        // parked bot goes invisible -- otherwise thousands of dense starter-zone bots stay
+        // visible and their O(n^2) visibility updates balloon the continent tick and starve all
+        // brains (the "bots stand still" regression). Invisible far bots are cheap; the player
+        // only sees active bots near them anyway.
+        const bool keepVisible = sPlayerbotAIConfig.parkVisible
+            && sRandomPlayerbotMgr.IsCityResident(bot->GetGUIDLow());
+        if (!keepVisible)
+            bot->SetVisibility(VISIBILITY_OFF);
     }
     else
     {
-        bot->SetVisibility(VISIBILITY_ON);                       // visible again
+        if (bot->GetVisibility() != VISIBILITY_ON)
+            bot->SetVisibility(VISIBILITY_ON);                   // visible again
     }
 }
 
@@ -14029,34 +15369,26 @@ bool PlayerbotAI::HasPlayerNearby(WorldPosition pos, float range)
         range = pos.getVisibilityDistance();
 
     float sqRange = range * range;
-    bool nearPlayer = false;
-    for (auto& i : sRandomPlayerbotMgr.GetPlayers())
+    // Runs on MAP THREADS constantly (LOD, dormant wake probes, say/yell listen checks).
+    // Read the world-thread-built snapshot; NEVER iterate the raw players map or touch
+    // Player pointers here -- that race was the whole 2026-07-04 SIGSEGV family.
+    auto snap = sRandomPlayerbotMgr.GetRealPlayerSnapshot();
+    for (auto const& s : snap->players)
     {
-        Player* player = i.second;
-        if (!player || !player->IsInWorld())
-            continue;
-
         // GM observers still count for bot LOD. Otherwise an invisible GM can
         // stand in a crowd and every bot nearby is treated as background work.
-        {
-            if (player->GetMapId() != bot->GetMapId())
-                continue;
+        if (s.mapId != bot->GetMapId())
+            continue;
 
-            if (pos.sqDistance(WorldPosition(player)) < sqRange)
-                nearPlayer = true;
+        if (pos.sqDistance(WorldPosition(s.mapId, s.x, s.y, s.z)) < sqRange)
+            return true;
 
-            // if player is far check farsight/cinematic camera
-            Camera& viewPoint = player->GetCamera();
-            WorldObject* viewObj = viewPoint.GetBody();
-            if (viewObj && viewObj != player)
-            {
-                if (pos.sqDistance(WorldPosition(viewObj)) < sqRange)
-                    nearPlayer = true;
-            }
-        }
+        // if player is far check farsight/cinematic camera
+        if (s.hasCam && pos.sqDistance(WorldPosition(s.mapId, s.camX, s.camY, s.camZ)) < sqRange)
+            return true;
     }
 
-    return nearPlayer;
+    return false;
 }
 
 bool PlayerbotAI::HasPlayerNearby(float range)
@@ -14069,10 +15401,15 @@ bool PlayerbotAI::HasManyPlayersNearby(uint32 trigerrValue, float range)
     float sqRange = range * range;
     uint32 found = 0;
 
-    for (auto& i : sRandomPlayerbotMgr.GetPlayers())
+    // snapshot read -- same map-thread safety rule as HasPlayerNearby (the old raw loop
+    // also skipped the null check entirely and deref'd freed players on relog)
+    auto snap = sRandomPlayerbotMgr.GetRealPlayerSnapshot();
+    for (auto const& s : snap->players)
     {
-        Player* player = i.second;
-        if ((!player->IsGameMaster() || player->isGMVisible()) && sServerFacade.GetDistance2d(player, bot) < sqRange)
+        if (s.mapId != bot->GetMapId())
+            continue;
+        const float dx = s.x - bot->GetPositionX(), dy = s.y - bot->GetPositionY();
+        if (dx * dx + dy * dy < sqRange)
         {
             found++;
 
@@ -14092,8 +15429,9 @@ bool PlayerbotAI::ChannelHasRealPlayer(std::string channelName)
         {
             ChannelAcces* chna = reinterpret_cast<ChannelAcces*>(chn);
 
-            for (auto& player : sRandomPlayerbotMgr.GetPlayers())
-                if (chna->IsOn(player.second->GetObjectGuid()))
+            auto snap = sRandomPlayerbotMgr.GetRealPlayerSnapshot();
+            for (auto const& s : snap->players)
+                if (chna->IsOn(ObjectGuid(HIGHGUID_PLAYER, s.guidLow)))
                     return true;
         }
     }
@@ -14222,19 +15560,16 @@ ActivePiorityType PlayerbotAI::GetPriorityType()
 
     //If has real players - slow down continents without player
     //This means we first disable bots in a different continent/area.
-    if (sRandomPlayerbotMgr.GetPlayers().empty())
+    // MAP-THREAD SAFE: read the world-thread real-player view; the old raw players-map
+    // iteration + GetSocial()->HasFriend deref here (called via AllowActivity from every
+    // map thread) was the primary crash site of the 2026-07-04 SIGSEGV family.
+    auto rpView = sRandomPlayerbotMgr.GetRealPlayerSnapshot();
+    if (rpView->players.empty())
         return ActivePiorityType::IN_EMPTY_SERVER;
 
-    // friends always active
-    for (auto& i : sRandomPlayerbotMgr.GetPlayers())
-    {
-        Player* player = i.second;
-        if (!player || !player->IsInWorld())
-            continue;
-
-        if (player->GetSocial()->HasFriend(bot->GetObjectGuid()))
-            return ActivePiorityType::PLAYER_FRIEND;
-    }
+    // friends always active (pre-computed on the world thread)
+    if (rpView->friendBotGuids.count(bot->GetGUIDLow()))
+        return ActivePiorityType::PLAYER_FRIEND;
 
     // real guild always active if member+
     if (IsInRealGuild())
@@ -16757,7 +18092,9 @@ bool PlayerbotAI::HasPlayerRelation()
 void PlayerbotAI::QueueChatResponse(uint32 msgType, ObjectGuid guid1, ObjectGuid guid2, std::string message, std::string chanName, std::string name, bool noDelay)
 {
     std::scoped_lock lock(chatRepliesMutex);
-    chatReplies.push(ChatQueuedReply(msgType, guid1.GetCounter(), guid2.GetCounter(), message, chanName, name, time(0) + (noDelay ? 0 : urand(inCombat ? 15 : 10, inCombat ? 30 : 20))));
+    // AI-chat replies were instant (noDelay) — inhumanly fast. Give them reading+thinking time;
+    // the 200ms/char typing drip in LinesToPackets then paces the actual sentences.
+    chatReplies.push(ChatQueuedReply(msgType, guid1.GetCounter(), guid2.GetCounter(), message, chanName, name, time(0) + (noDelay ? urand(4, 9) : urand(inCombat ? 15 : 10, inCombat ? 30 : 20))));
 }
 
 bool PlayerbotAI::PlayAttackEmote(float chanceMultiplier)

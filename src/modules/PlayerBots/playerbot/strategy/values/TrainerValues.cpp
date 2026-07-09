@@ -3,6 +3,7 @@
 #include "TrainerValues.h"
 #include "SharedValueContext.h"
 #include "playerbot/PlayerbotHelpMgr.h"
+#include "playerbot/TrainerGuideMgr.h"
 
 using namespace ai;
 
@@ -170,6 +171,7 @@ std::vector<int32> AvailableTrainersValue::Calculate()
 {
     std::vector<TrainerSpell const*> trainableSpells = AI_VALUE2(std::vector<TrainerSpell const*>, "trainable spells", getQualifier());;
     std::vector<int32> retTrainers;
+    std::vector<uint32> requirementHints;
 
     int8 qualifierType = getQualifier().empty() ? -1 : stoi(getQualifier());
 
@@ -192,6 +194,9 @@ std::vector<int32> AvailableTrainersValue::Calculate()
                 if (std::find(trainableSpells.begin(), trainableSpells.end(), trainerSpell) == trainableSpells.end())
                     continue;
 
+                if (std::find(requirementHints.begin(), requirementHints.end(), requirement) == requirementHints.end())
+                    requirementHints.push_back(requirement);
+
                 for (auto& trainer : trainers)
                 {
                     if(std::find(retTrainers.begin(), retTrainers.end(), trainer) == retTrainers.end())
@@ -200,6 +205,11 @@ std::vector<int32> AvailableTrainersValue::Calculate()
             }
         }
     }
+
+    // Route trainer travel through the guide table: prioritized/enabled trainers only
+    // (falls back to the unfiltered list when the table is empty or nothing matches).
+    if (qualifierType >= 0)
+        retTrainers = sTrainerGuideMgr.FilterTrainerEntries(bot, (TrainerType)qualifierType, retTrainers, requirementHints);
 
     return retTrainers;
 }

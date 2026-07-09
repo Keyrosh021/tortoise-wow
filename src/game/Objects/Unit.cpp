@@ -5029,6 +5029,17 @@ void Unit::HandleTriggers(Unit* pVictim, uint32 procExtra, uint32 amount, int32 
             if ((triggeredByAura->GetSpellProto()->TargetAuraState == AURA_STATE_HEALTHLESS_20_PERCENT) && (!itr.target || !itr.target->HasAuraState(AURA_STATE_HEALTHLESS_20_PERCENT)))
                 continue;
 
+            // CRASH #2 FIX: AuraProcHandler[] is sized TOTAL_AURAS, but m_auraname
+            // can legitimately be >= TOTAL_AURAS (Turtle custom spells define aura
+            // types beyond vanilla's 225). Indexing OOB reads a garbage
+            // pointer-to-member-function and *calls* it -> jump to a wild address ->
+            // heap/stack corruption that later crashes in scattered places
+            // (vtable-delete mismatch, list corruption, proc load8). The core already
+            // guards this exact index at AddAuraToModList (m_modAuras[m_auraname]) and
+            // RemoveAura; this proc call site was the one that lost the guard.
+            if (auraModifier->m_auraname >= TOTAL_AURAS)
+                continue;
+
             SpellAuraProcResult procResult = (*caster.*AuraProcHandler[auraModifier->m_auraname])(itr.target, amount, originalAmount, triggeredByAura, procSpell, itr.procFlag, procExtra, cooldown);
             switch (procResult)
             {

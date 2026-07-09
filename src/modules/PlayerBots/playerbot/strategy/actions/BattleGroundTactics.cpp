@@ -2115,6 +2115,142 @@ std::vector<BattleBotPath*> const vPaths_WS =
     &vPath_WSG_AllianceTunnel_to_AllianceBaseRoof,
 };
 
+// ============================================================================
+// WSG WAYPOINT NAVIGATOR -- bots follow the hand-traced routes around buildings,
+// out the tunnels, across mid-field, and down the one-way graveyard cliff-jumps.
+// NO straight-line movement -> no clipping through walls/ground. The path DATA
+// and connectivity (the vPath_WSG_* chains) were walked by a human; this just
+// routes over them (BFS graph) and hops waypoint-to-waypoint with forced move.
+// ============================================================================
+namespace {
+enum WsgNode { WN_HFLAG, WN_HGY, WN_HTUN, WN_HGYJ, WN_HROOF,
+               WN_AFLAG, WN_AGY, WN_ATUN, WN_AGYJ, WN_AROOF, WN_COUNT };
+struct WsgEdge { BattleBotPath* path; WsgNode a; WsgNode b; bool downOnly; };
+// downOnly = the graveyard cliff-jump: traversable a->b (jump down) only, never b->a (can't climb up)
+static WsgEdge const WSG_EDGES[] = {
+    { &vPath_WSG_HordeFlagRoom_to_HordeGraveyard,        WN_HFLAG, WN_HGY,   false },
+    { &vPath_WSG_HordeGraveyard_to_HordeTunnel,          WN_HGY,   WN_HTUN,  false },
+    { &vPath_WSG_HordeTunnel_to_HordeFlagRoom,           WN_HTUN,  WN_HFLAG, false },
+    { &vPath_WSG_HordeTunnel_to_AllianceTunnel_1,        WN_HTUN,  WN_ATUN,  false },
+    { &vPath_WSG_HordeTunnel_to_AllianceTunnel_2,        WN_HTUN,  WN_ATUN,  false },
+    { &vPath_WSG_HordeGYJump_to_HordeTunnel,             WN_HGYJ,  WN_HTUN,  true  },
+    { &vPath_WSG_HordeGYJump_to_AllianceTunnel,          WN_HGYJ,  WN_ATUN,  true  },
+    { &vPath_WSG_HordeGYJump_to_AllianceFlagRoom,        WN_HGYJ,  WN_AFLAG, true  },
+    { &vPath_WSG_AllianceFlagRoom_to_AllianceGraveyard,  WN_AFLAG, WN_AGY,   false },
+    { &vPath_WSG_AllianceGraveyard_to_AllianceTunnel,    WN_AGY,   WN_ATUN,  false },
+    { &vPath_WSG_AllianceTunnel_to_AllianceFlagRoom,     WN_ATUN,  WN_AFLAG, false },
+    { &vPath_WSG_AllianceGYJump_to_AllianceTunnel,       WN_AGYJ,  WN_ATUN,  true  },
+    { &vPath_WSG_AllianceGYJump_to_HordeTunnel,          WN_AGYJ,  WN_HTUN,  true  },
+    { &vPath_WSG_AllianceGYJump_to_HordeFlagRoom,        WN_AGYJ,  WN_HFLAG, true  },
+    { &vPath_WSG_HordeTunnel_to_HordeBaseRoof,           WN_HTUN,  WN_HROOF, false },
+    { &vPath_WSG_AllianceTunnel_to_AllianceBaseRoof,     WN_ATUN,  WN_AROOF, false },
+};
+static const int WSG_EDGE_COUNT = sizeof(WSG_EDGES) / sizeof(WSG_EDGES[0]);
+
+// node anchor positions, derived once from path endpoints
+static float g_node[WN_COUNT][3];
+static bool  g_nodeInit = false;
+static void wsgInitNodes()
+{
+    if (g_nodeInit) return;
+    auto FR = [](BattleBotPath* p, int i){ return (*p).front(); };
+    auto BK = [](BattleBotPath* p){ return (*p).back(); };
+    #define SETN(N, WP) do { auto _w = (WP); g_node[N][0]=_w.x; g_node[N][1]=_w.y; g_node[N][2]=_w.z; } while(0)
+    SETN(WN_HFLAG, vPath_WSG_HordeTunnel_to_HordeFlagRoom.back());
+    SETN(WN_HTUN,  vPath_WSG_HordeTunnel_to_HordeFlagRoom.front());
+    SETN(WN_HGY,   vPath_WSG_HordeFlagRoom_to_HordeGraveyard.back());
+    SETN(WN_HGYJ,  vPath_WSG_HordeGYJump_to_HordeTunnel.front());
+    SETN(WN_HROOF, vPath_WSG_HordeTunnel_to_HordeBaseRoof.back());
+    SETN(WN_AFLAG, vPath_WSG_AllianceTunnel_to_AllianceFlagRoom.back());
+    SETN(WN_ATUN,  vPath_WSG_AllianceTunnel_to_AllianceFlagRoom.front());
+    SETN(WN_AGY,   vPath_WSG_AllianceFlagRoom_to_AllianceGraveyard.back());
+    SETN(WN_AGYJ,  vPath_WSG_AllianceGYJump_to_AllianceTunnel.front());
+    SETN(WN_AROOF, vPath_WSG_AllianceTunnel_to_AllianceBaseRoof.back());
+    #undef SETN
+    g_nodeInit = true;
+}
+static float wsgDist2(float x1,float y1,float x2,float y2){ float dx=x1-x2,dy=y1-y2; return dx*dx+dy*dy; }
+} // namespace
+
+// Called from the bot AI tick for an alive WSG bot that is NOT in combat. Drives one movement
+// leg toward the objective along the traced graph. Returns true if it issued movement.
+bool Playerbot_WsgNavigate(Player* bot)
+{
+    if (!bot || !bot->IsInWorld()) return false;
+    wsgInitNodes();
+    const float bx = bot->GetPositionX(), by = bot->GetPositionY();
+    const bool ally = bot->GetTeam() == ALLIANCE;
+    const bool carrying = bot->HasAura(23333) || bot->HasAura(23335);
+    // carrying -> run to OWN flag room to cap; else -> enemy flag room to grab
+    const WsgNode goal = carrying ? (ally ? WN_AFLAG : WN_HFLAG)
+                                  : (ally ? WN_HFLAG : WN_AFLAG);
+    // nearest graph node to the bot = where we join the route
+    WsgNode start = WN_HTUN; float best = 1e18f;
+    for (int n = 0; n < WN_COUNT; ++n)
+    {
+        const float d = wsgDist2(bx, by, g_node[n][0], g_node[n][1]);
+        if (d < best) { best = d; start = (WsgNode)n; }
+    }
+    if (start == goal)
+        return false; // already at the objective -> let the engine grab/cap/fight
+
+    // BFS over the (mostly undirected) edge graph, respecting downOnly cliff-jumps
+    int prevNode[WN_COUNT]; int prevEdge[WN_COUNT]; bool prevRev[WN_COUNT];
+    for (int i = 0; i < WN_COUNT; ++i) { prevNode[i] = -1; prevEdge[i] = -1; }
+    bool seen[WN_COUNT] = { false };
+    int queue[WN_COUNT]; int qh = 0, qt = 0;
+    queue[qt++] = start; seen[start] = true;
+    while (qh < qt)
+    {
+        int cur = queue[qh++];
+        if (cur == goal) break;
+        for (int e = 0; e < WSG_EDGE_COUNT; ++e)
+        {
+            const WsgEdge& E = WSG_EDGES[e];
+            int nxt = -1; bool rev = false;
+            if (E.a == cur) { nxt = E.b; rev = false; }
+            else if (E.b == cur && !E.downOnly) { nxt = E.a; rev = true; } // downOnly: can't go b->a
+            if (nxt < 0 || seen[nxt]) continue;
+            seen[nxt] = true; prevNode[nxt] = cur; prevEdge[nxt] = e; prevRev[nxt] = rev;
+            queue[qt++] = nxt;
+        }
+    }
+    if (!seen[goal])
+        return false; // no route (shouldn't happen) -> let caller fall back
+
+    // reconstruct edge chain start..goal, then concatenate waypoints in travel order
+    int chainEdge[WN_COUNT]; bool chainRev[WN_COUNT]; int clen = 0;
+    for (int n = goal; n != start && prevEdge[n] >= 0; n = prevNode[n])
+    { chainEdge[clen] = prevEdge[n]; chainRev[clen] = prevRev[n]; ++clen; }
+    // chain is goal->start; reverse to start->goal
+    std::vector<const BattleBotWaypoint*> route;
+    for (int i = clen - 1; i >= 0; --i)
+    {
+        const BattleBotPath* pp = WSG_EDGES[chainEdge[i]].path;
+        if (!chainRev[i]) for (size_t k = 0; k < pp->size(); ++k) route.push_back(&(*pp)[k]);
+        else              for (int k = (int)pp->size() - 1; k >= 0; --k) route.push_back(&(*pp)[k]);
+    }
+    if (route.empty()) return false;
+
+    // find the route waypoint nearest the bot (our current progress), then aim at the NEXT one
+    size_t nearIdx = 0; float nearD = 1e18f;
+    for (size_t i = 0; i < route.size(); ++i)
+    {
+        const float d = wsgDist2(bx, by, route[i]->x, route[i]->y);
+        if (d < nearD) { nearD = d; nearIdx = i; }
+    }
+    // advance past any waypoints we're basically on top of, so we always move FORWARD
+    size_t tgt = nearIdx;
+    while (tgt < route.size() - 1 &&
+           wsgDist2(bx, by, route[tgt]->x, route[tgt]->y) < 5.0f * 5.0f)
+        ++tgt;
+    const BattleBotWaypoint* w = route[tgt];
+    // hop to the next traced waypoint (short segment on valid ground -> no clipping); force the
+    // destination so a broken navmesh query can't cancel the move, but the Z is the traced ground.
+    bot->GetMotionMaster()->MovePoint(0, w->x, w->y, w->z, MOVE_FORCE_DESTINATION | MOVE_RUN_MODE);
+    return true;
+}
+
 std::vector<BattleBotPath*> const vPaths_AB =
 {
     &vPath_AB_AllianceBase_to_Stables,
@@ -2766,12 +2902,44 @@ bool BGTactics::Execute(Event& event)
         break;
     }
 
+    // BG-TACTICS HEARTBEAT (throttled 10s/bot): proves whether the tactics engine drives each
+    // bot and with which action -- "standing AFK" reports become greppable decisions.
+    {
+        static std::mutex hbMx;
+        static std::unordered_map<uint32, uint32> hbLast;
+        const uint32 hbNow = WorldTimer::getMSTime();
+        std::lock_guard<std::mutex> hbLk(hbMx);
+        uint32& t = hbLast[bot->GetGUIDLow()];
+        if (!t || hbNow - t >= 10000)
+        {
+            t = hbNow;
+            sLog.outString("BGTACT %s action=%s status=%u role=%u moving=%d",
+                bot->GetName(), getName().c_str(), (uint32)bg->GetStatus(),
+                context->GetValue<uint32>("bg role")->Get(), bot->IsMoving() ? 1 : 0);
+        }
+    }
+
     if (getName() == "move to start")
         return moveToStart();
 
     if (getName() == "select objective")
     {
-        return selectObjective();
+        const bool selOk = selectObjective();
+        {
+            static std::mutex soMx;
+            static std::unordered_map<uint32, uint32> soLast;
+            const uint32 soNow = WorldTimer::getMSTime();
+            std::lock_guard<std::mutex> soLk(soMx);
+            uint32& t = soLast[bot->GetGUIDLow()];
+            if (!t || soNow - t >= 10000)
+            {
+                t = soNow;
+                ai::PositionEntry obj = context->GetValue<ai::PositionMap&>("position")->Get()["bg objective"];
+                sLog.outString("BGTACT %s selectObjective=%d obj=(%.0f,%.0f) role=%u",
+                    bot->GetName(), selOk ? 1 : 0, obj.x, obj.y, context->GetValue<uint32>("bg role")->Get());
+            }
+        }
+        return selOk;
     }
     
     if (getName() == "protect fc")
@@ -2792,6 +2960,41 @@ bool BGTactics::Execute(Event& event)
         if (bg->GetStatus() == STATUS_WAIT_JOIN)
             return false;
 
+        // MOTION WATCHDOG (AFK-creep fix): the user-match trace showed 33 "successful"
+        // move-to-objective executions with the bot standing still -- the waypoint-network
+        // attach no-ops for bots knocked off the path mid-field after fights. Three
+        // consecutive stationary "successes" -> bypass the network and path DIRECTLY to the
+        // objective; mmaps handles the open field fine.
+        {
+            static std::mutex mwMx;
+            static std::unordered_map<uint32, uint32> mwCnt;
+            uint32 stalls = 0;
+            {
+                std::lock_guard<std::mutex> lk(mwMx);
+                uint32& c = mwCnt[bot->GetGUIDLow()];
+                if (bot->IsMoving() || sServerFacade.IsInCombat(bot)) c = 0; else ++c;
+                stalls = c;
+                if (stalls >= 3) c = 0;
+            }
+            if (stalls >= 3)
+            {
+                ai::PositionEntry obj = context->GetValue<ai::PositionMap&>("position")->Get()["bg objective"];
+                if (obj.isSet())
+                {
+                    Spell* curSpell = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+                    Spell* curChan = bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+                    sLog.outString("BGSTALL %s wp-net no-op x3 -> direct path (%.0f,%.0f) casting=%d gen=%u chan=%u mutestate=%d",
+                        bot->GetName(), obj.x, obj.y,
+                        bot->IsNonMeleeSpellCasted(true, false, true) ? 1 : 0,
+                        curSpell && curSpell->m_spellInfo ? curSpell->m_spellInfo->Id : 0,
+                        curChan && curChan->m_spellInfo ? curChan->m_spellInfo->Id : 0,
+                        (int)bot->hasUnitState(UNIT_STAT_CAN_NOT_MOVE));
+                    if (MoveTo(bot->GetMapId(), obj.x, obj.y, obj.z))
+                        return true;
+                }
+            }
+        }
+
         if (useBuff())
             return true;
 
@@ -2805,9 +3008,12 @@ bool BGTactics::Execute(Event& event)
             return false;
         }
 
-        if (!moveToObjective())
+        const bool moOk = moveToObjective();
+        bool selWpOk = false;
+        if (!moOk)
         {
-            if (selectObjectiveWp(*vPaths))
+            selWpOk = selectObjectiveWp(*vPaths);
+            if (selWpOk)
                 return true;
         }
         else
@@ -2821,11 +3027,30 @@ bool BGTactics::Execute(Event& event)
 #endif
             return false;
 
-        if (startNewPathBegin(*vPaths))
+        const bool npbOk = startNewPathBegin(*vPaths);
+        if (npbOk)
             return true;
 
-        if (startNewPathFree(*vPaths))
+        const bool npfOk = startNewPathFree(*vPaths);
+        if (npfOk)
             return true;
+
+        // TOTAL DEAD END: every movement fallback failed -- this bot is a statue. Name the
+        // exact failing stage (throttled) so the mock loop can fix it.
+        {
+            static std::mutex deMx;
+            static std::unordered_map<uint32, uint32> deLast;
+            const uint32 deNow = WorldTimer::getMSTime();
+            std::lock_guard<std::mutex> deLk(deMx);
+            uint32& t = deLast[bot->GetGUIDLow()];
+            if (!t || deNow - t >= 10000)
+            {
+                t = deNow;
+                sLog.outString("BGDEADEND %s moveToObjective=%d selWp=%d pathBegin=%d pathFree=%d pos=(%.0f,%.0f)",
+                    bot->GetName(), moOk ? 1 : 0, selWpOk ? 1 : 0, npbOk ? 1 : 0, npfOk ? 1 : 0,
+                    bot->GetPositionX(), bot->GetPositionY());
+            }
+        }
     }
 
     if (getName() == "use buff")
@@ -2863,6 +3088,23 @@ bool BGTactics::moveToStart(bool force)
 
     if (!force && bg->GetStatus() != STATUS_WAIT_JOIN)
         return false;
+
+    // HARD PRE-START CONTAINMENT: mmaps has no dynamic-door collision. Escapees are pulled back
+    // via the WORLD-THREAD teleport queue -- a direct TeleportTo here runs on the BG map's own
+    // update thread and crashes (14:01 SIGSEGV: teleport-ack desync). Movement is also blocked
+    // at the source in MovementAction::MoveTo, so this is only the backstop.
+    if (bg->GetStatus() == STATUS_WAIT_JOIN)
+    {
+        float sx, sy, sz, so;
+        bg->GetTeamStartLoc(bot->GetTeam(), sx, sy, sz, so);
+        if (bot->GetDistance(sx, sy, sz) > 40.0f)
+        {
+            sLog.outString("BGTACT %s escaped the gate pre-start (%.0fyd) -> queued pull-back", bot->GetName(), bot->GetDistance(sx, sy, sz));
+            ai->StopMoving();
+            sRandomPlayerbotMgr.QueueBotTeleport(bot->GetGUIDLow(), bg->GetMapId(), sx, sy, sz, false, false);
+            return true;
+        }
+    }
 
     BattleGroundTypeId bgType = bg->GetTypeId();
 #ifdef MANGOSBOT_TWO
@@ -4498,7 +4740,10 @@ bool BGTactics::atFlag(std::vector<BattleBotPath*> const& vPaths, std::vector<ui
         }
         case BATTLEGROUND_WS:
         {
-            if (bot->IsWithinDistInMap(go, INTERACTION_DISTANCE))
+            // use the CORE's bounding-box interact predicate: the lenient IsWithinDistInMap
+            // passed ~1yd before the core accepted the use packet, so bots stood at the flag
+            // spam-failing "too far away to be used" and never picked it up (mock-game finding)
+            if (bot->CanInteract(go))
             {
                 if (atBase)
                 {
