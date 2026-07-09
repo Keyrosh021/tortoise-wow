@@ -55,9 +55,19 @@ namespace mind
                 Log().arrivals.fetch_add(1, std::memory_order_relaxed);
 
             float nx, ny, nz;
-            if (sRandomPlayerbotMgr.GetNearestGrindSpot(bot, 60.0f, nx, ny, nz))
+            // Randomize the "nearest" pick and scatter the arrival point:
+            // with a fixed minDist every bot in an area resolves to the SAME
+            // camp coordinate and piles up on it (observed: 20+ levelers
+            // standing on one spot in Westfall). Varying minDist spreads
+            // bots across different camps; the offset spreads them within one.
+            const float pickDist = 60.0f + (float)urand(0, 120);
+            if (sRandomPlayerbotMgr.GetNearestGrindSpot(bot, pickDist, nx, ny, nz))
             {
-                destX = nx; destY = ny; destZ = nz;
+                const float ang = frand(0, 2 * M_PI_F);
+                const float off = frand(8.0f, 30.0f);
+                destX = nx + std::cos(ang) * off;
+                destY = ny + std::sin(ang) * off;
+                destZ = nz;
                 destPickAt = now + 20000;
                 ResetStuck(now);
                 pickedNew = true;

@@ -180,14 +180,15 @@ namespace mind
     // the tick to CombatStep + the combat engine.
     Verdict BotMind::StepCombatChase(uint32 now)
     {
-        // PULL DISCIPLINE ("am I ready for a fight?"): a real player doesn't
-        // start a fresh pull at half health or on an empty mana bar — they
-        // sit and recover first. HOLD here (don't fall through to Journey,
-        // which would march a hungry bot into the next camp); the engine's
-        // food/drink strategy and out-of-combat regen do the recovering.
-        const bool lowHp = bot->GetHealthPercent() < 55.0f;
+        // PULL DISCIPLINE ("am I ready for a fight?"), tiered so a bot with
+        // no food can't hold forever: under 40% hp (or 20% mana) HOLD and
+        // recover (engine food/drink + regen); in the 40-55% band pulls are
+        // allowed but the safety margin below shrinks appetite via the pack
+        // score already, and a genuinely dangerous fight is refused by the
+        // pack filter. Vanilla regen alone climbs out of the hold band.
+        const bool lowHp = bot->GetHealthPercent() < 40.0f;
         const bool lowMana = bot->GetPowerType() == POWER_MANA && bot->GetMaxPower(POWER_MANA) > 0 &&
-            bot->GetPower(POWER_MANA) * 100 < bot->GetMaxPower(POWER_MANA) * 35;
+            bot->GetPower(POWER_MANA) * 100 < bot->GetMaxPower(POWER_MANA) * 20;
         if (lowHp || lowMana)
             return { true, false, 1000 };
 

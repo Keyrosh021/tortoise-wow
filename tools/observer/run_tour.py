@@ -19,7 +19,7 @@ SPOTS=[
 ]
 
 SECS=int(sys.argv[1]) if len(sys.argv)>1 else 45
-SCR="/tmp/claude-1000/-home-zuppier-tw-server-dev/feea4b59-7628-4127-b8b5-0bba71fa2c61/scratchpad"
+SCR="out"
 
 for label,mapid,x,y,z in SPOTS:
     # wait until previous session fully logged out

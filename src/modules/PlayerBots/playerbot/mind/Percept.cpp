@@ -138,13 +138,16 @@ namespace mind
             const float dist = std::sqrt(dx * dx + dy * dy);
 
             // Pack pressure at the target + adds along the approach corridor.
+            // Radii mirror vanilla social-aggro assist range (~8y), not camp
+            // size: 12y radii rejected nearly every camp mob (loot collapsed
+            // 268 -> 33/min fleet-wide) — camps place everything within 12y.
             int pack = 0, corridor = 0;
             for (Unit* o : candidates)
             {
                 if (o == u || !o->IsAlive())
                     continue;
                 const float ox = o->GetPositionX() - ux, oy = o->GetPositionY() - uy;
-                if (ox * ox + oy * oy < 12.0f * 12.0f)
+                if (ox * ox + oy * oy < 8.0f * 8.0f)
                     ++pack;
                 // Distance of o from the segment bot->target (2d projection).
                 if (dist > 1.0f)
@@ -153,7 +156,7 @@ namespace mind
                         ((o->GetPositionX() - bx) * dx + (o->GetPositionY() - by) * dy) / (dist * dist)));
                     const float px = bx + t * dx - o->GetPositionX();
                     const float py = by + t * dy - o->GetPositionY();
-                    if (px * px + py * py < 10.0f * 10.0f)
+                    if (px * px + py * py < 7.0f * 7.0f)
                         ++corridor;
                 }
             }
@@ -161,8 +164,8 @@ namespace mind
 
             const bool questNeed = KillHelpsQuest(u->GetEntry());
 
-            // A 3+ mob pack is not a solo pull, quest or not. Walk on.
-            if (pack >= 3 && !bot->GetGroup())
+            // A 4+ linked pull is suicide solo, quest or not. Walk on.
+            if (pack >= 3 && !bot->GetGroup() && !questNeed)
                 continue;
 
             float score = dist + pack * 30.0f + corridor * 45.0f;
