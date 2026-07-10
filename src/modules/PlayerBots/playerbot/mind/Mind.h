@@ -119,8 +119,11 @@ namespace mind
         uint32 lastMoveCheck = 0;
         uint8 stuckStrikes = 0;
 
-        // journey
+        // journey. dest is always a RAW cache/objective point (valid ground Z
+        // — teleports land here); the scatter is applied only to the walking
+        // aim so bots spread within a camp without airborne/rooftop landings.
         float destX = 0.f, destY = 0.f, destZ = 0.f;
+        float scatterAng = 0.f, scatterOff = 0.f;
         uint32 destPickAt = 0;
         bool destIsObjective = false;  // current dest aims at a quest objective area (telemetry)
         // objective-directed journey cache: nearest unfinished quest-objective

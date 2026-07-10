@@ -229,11 +229,18 @@ namespace mind
             }
             if (haveSpot)
             {
-                const float ang = frand(0, 2 * M_PI_F);
-                const float off = frand(8.0f, 30.0f);
-                destX = nx + std::cos(ang) * off;
-                destY = ny + std::sin(ang) * off;
+                // dest stays the RAW cache/objective point — it is the only
+                // coordinate with a KNOWN-VALID ground Z, and the stuck-escape
+                // below teleports to it. Scattering the stored dest teleported
+                // bots onto whatever surface matched the stale Z at the offset
+                // X/Y — user screenshotted 30 L60s standing on a Karazhan
+                // rooftop. De-clump scatter now applies to the WALK aim only
+                // (further down), where the pathfinder keeps feet on ground.
+                destX = nx;
+                destY = ny;
                 destZ = nz;
+                scatterAng = frand(0, 2 * M_PI_F);
+                scatterOff = frand(8.0f, 30.0f);
                 destPickAt = now + 20000;
                 destIsObjective = objective;
                 ResetStuck(now);
@@ -275,7 +282,10 @@ namespace mind
 
         if (destIsObjective)
             Log().questJourney.fetch_add(1, std::memory_order_relaxed);
-        MoveTowards(destX, destY, destZ, now);
+        // Walk toward the de-clump point NEAR the camp (pathfinding snaps to
+        // ground); teleports above always use the raw dest.
+        MoveTowards(destX + std::cos(scatterAng) * scatterOff,
+                    destY + std::sin(scatterAng) * scatterOff, destZ, now);
         return { true, true, 500 };
     }
 }
