@@ -35,7 +35,8 @@ namespace mind
                            "idleFallback=%u,maintenance=%u,scans=%u,scanEmpty=%u,scanFound=%u,"
                            "rejUsable=%u,rejPack=%u,engageRefused=%u,"
                            "rejNotCreature=%u,rejInvalid=%u,rejLevel=%u,rejNoXp=%u,"
-                           "rejTapped=%u,rejFighting=%u,rejEliteCrit=%u\n", ts,
+                           "rejTapped=%u,rejFighting=%u,rejEliteCrit=%u,"
+                           "busyTaxi=%u,busyTeleport=%u,busyCast=%u\n", ts,
                     c.steps.exchange(0), c.engage.exchange(0), c.chase.exchange(0),
                     c.lootRuns.exchange(0), c.lootOpens.exchange(0), c.social.exchange(0),
                     c.errands.exchange(0), c.journey.exchange(0), c.questJourney.exchange(0),
@@ -46,7 +47,8 @@ namespace mind
                     c.rejUsable.exchange(0), c.rejPack.exchange(0), c.engageRefused.exchange(0),
                     c.rejNotCreature.exchange(0), c.rejInvalid.exchange(0), c.rejLevel.exchange(0),
                     c.rejNoXp.exchange(0), c.rejTapped.exchange(0), c.rejFighting.exchange(0),
-                    c.rejEliteCrit.exchange(0));
+                    c.rejEliteCrit.exchange(0),
+                    c.busyTaxi.exchange(0), c.busyTeleport.exchange(0), c.busyCast.exchange(0));
                 fclose(f);
             }
         }

@@ -47,13 +47,21 @@ namespace mind
         if (!bot->IsInWorld() || !bot->IsAlive())
             return false;
 
-        if (bot->IsTaxiFlying() || bot->IsBeingTeleported())
+        if (bot->IsTaxiFlying())
         {
+            Log().busyTaxi.fetch_add(1, std::memory_order_relaxed);
+            ai->SetAIInternalUpdateDelay(1000);
+            return true;
+        }
+        if (bot->IsBeingTeleported())
+        {
+            Log().busyTeleport.fetch_add(1, std::memory_order_relaxed);
             ai->SetAIInternalUpdateDelay(1000);
             return true;
         }
         if (bot->IsNonMeleeSpellCasted(true, false, true))
         {
+            Log().busyCast.fetch_add(1, std::memory_order_relaxed);
             ai->SetAIInternalUpdateDelay(300);
             return true;
         }

@@ -36,6 +36,12 @@ namespace mind
         std::atomic<uint32> rejPack{0};      // pack >= 3 links (solo, non-quest)
         std::atomic<uint32> engageRefused{0};// "attack" action declined the pinned target
 
+        // BusyHold reasons (per tick): a rising busyTeleport with flat steps
+        // = bots latched in teleport limbo (the suspected activity-decay sink).
+        std::atomic<uint32> busyTaxi{0};
+        std::atomic<uint32> busyTeleport{0};
+        std::atomic<uint32> busyCast{0};
+
         // rejUsable split (why candidates die):
         std::atomic<uint32> rejNotCreature{0}; // player/pet/totem
         std::atomic<uint32> rejInvalid{0};     // IsValidAttackTarget false
