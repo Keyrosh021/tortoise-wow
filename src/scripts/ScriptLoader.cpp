@@ -110,7 +110,10 @@ void AddSC_boss_garr();
 void AddSC_boss_baron_geddon();
 void AddSC_boss_shazzrah();
 void AddSC_boss_golemagg();
+void AddSC_boss_incindis();
 void AddSC_boss_sulfuron();
+void AddSC_boss_thane();
+void AddSC_boss_twin_golems();
 void AddSC_boss_majordomo();
 void AddSC_boss_ragnaros();
 void AddSC_instance_molten_core();
@@ -218,6 +221,7 @@ void AddSC_westfall();
 void AddSC_wetlands();
 
 //kalimdor
+void AddSC_boss_velthelaxx_the_defiler();            //blackfathom_deeps
 void AddSC_instance_blackfathom_deeps();             //blackfathom_deeps
 void AddSC_boss_celebras_the_cursed();               //maraudon
 void AddSC_boss_landslide();
@@ -250,6 +254,7 @@ void AddSC_instance_temple_of_ahnqiraj();
 void AddSC_instance_wailing_caverns();               //Wailing caverns
 void AddSC_wailing_caverns();
 void AddSC_zulfarrak();                              //zulfarrak
+void AddSC_farraki_arena();
 void AddSC_instance_zulfarrak();
 
 void AddSC_ashenvale();
@@ -263,7 +268,9 @@ void AddSC_duskwood();
 void AddSC_felwood();
 void AddSC_feralas();
 void AddSC_moonglade();
+void AddSC_moonwhisper_coast();
 void AddSC_mulgore();
+void AddSC_northwind();
 void AddSC_orgrimmar();
 void AddSC_silithus();
 void AddSC_stonetalon_mountains();
@@ -465,7 +472,10 @@ void AddScripts()
     AddSC_boss_baron_geddon();
     AddSC_boss_shazzrah();
     AddSC_boss_golemagg();
+    AddSC_boss_incindis();
     AddSC_boss_sulfuron();
+    AddSC_boss_thane();
+    AddSC_boss_twin_golems();
     AddSC_boss_majordomo();
     AddSC_boss_ragnaros();
     AddSC_instance_molten_core();
@@ -573,6 +583,7 @@ void AddScripts()
     AddSC_wetlands();
 
     //kalimdor
+    AddSC_boss_velthelaxx_the_defiler();                    //blackfathom_deeps
     AddSC_instance_blackfathom_deeps();                     //blackfathom_deeps
     AddSC_boss_celebras_the_cursed();                       //maraudon
     AddSC_boss_landslide();
@@ -605,6 +616,7 @@ void AddScripts()
     AddSC_wailing_caverns();                               //Wailing caverns
     AddSC_instance_wailing_caverns();
     AddSC_zulfarrak();                                      //zulfarrak
+    AddSC_farraki_arena();
     AddSC_instance_zulfarrak();
 
     AddSC_ashenvale();
@@ -618,7 +630,9 @@ void AddScripts()
     AddSC_felwood();
     AddSC_feralas();
     AddSC_moonglade();
+    AddSC_moonwhisper_coast();
     AddSC_mulgore();
+    AddSC_northwind();
     AddSC_orgrimmar();
     AddSC_silithus();
     RegisterScripts_Silithus();
