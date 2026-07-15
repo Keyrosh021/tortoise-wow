@@ -33,6 +33,7 @@
 #include "Player.h"
 #include "ObjectMgr.h"
 #include "Group.h"
+#include "LFTMgr.h"
 #include "Guild.h"
 #include "GuildMgr.h"
 #include "World.h"
@@ -709,6 +710,8 @@ void WorldSession::LogoutPlayer(bool Save)
 
             guild->BroadcastEvent(GE_SIGNED_OFF, _player->GetObjectGuid(), _player->GetName());
         }
+
+        sLFTMgr.OnPlayerLogout(_player->GetObjectGuid());
 
         ///- Remove pet
         _player->RemovePet(PET_SAVE_AS_CURRENT);

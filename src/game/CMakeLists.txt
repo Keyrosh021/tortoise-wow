@@ -132,6 +132,9 @@ set (game_SRCS
     HttpApi/TransferController.cpp
     HttpApi/TransferController.hpp
     LFG/LFGMgr.cpp
+    LFT/LFTMgr.cpp
+    LFT/LFTQeueue.cpp
+    LFT/LFTUserGroups.cpp
     Logging/DatabaseLogger.hpp
     Logging/DatabaseLogger.cpp
     Mail/Mail.cpp
@@ -316,6 +319,7 @@ set (game_SRCS
     Handlers/NPCHandler.h
     Handlers/LFGHandler.h
     LFG/LFGMgr.h
+    LFT/LFTMgr.h
     Mail/Mail.h
     Mail/MassMailMgr.h
     Maps/Cell.h
@@ -517,6 +521,7 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/Guild
   ${CMAKE_CURRENT_SOURCE_DIR}/Handlers
   ${CMAKE_CURRENT_SOURCE_DIR}/LFG
+  ${CMAKE_CURRENT_SOURCE_DIR}/LFT
   ${CMAKE_CURRENT_SOURCE_DIR}/Mail
   ${CMAKE_CURRENT_SOURCE_DIR}/MapNodes
   ${CMAKE_CURRENT_SOURCE_DIR}/MapNodes/Handlers

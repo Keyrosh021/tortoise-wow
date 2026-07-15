@@ -30,6 +30,7 @@
 #include "Database/DatabaseEnv.h"
 #include "ChannelMgr.h"
 #include "Group.h"
+#include "LFTMgr.h"
 #include "Guild.h"
 #include "GuildMgr.h"
 #include "Player.h"
@@ -1002,11 +1003,11 @@ bool WorldSession::HandleTurtleAddonMessages(uint32 lang, uint32 type, std::stri
         return false;
     }
 
-    if (type == CHAT_MSG_GUILD && strstr(msg.c_str(), "TW_LFG"))
-        return sTurtleLFGMgr.HandleAddonMessage(_player, msg);
-
+    
     if (type == CHAT_MSG_GUILD && strstr(msg.c_str(), "TW_BARBERSHOP"))
         return sTurtleBarbershopMgr.HandleAddonMessage(_player, msg);
+    if (sLFTMgr.HandleAddonMessage(_player, type, msg))
+        return true;
 
     //guild bank
     // no type == CHAT_MSG_GUILD on this, to protecc fraudulent messages

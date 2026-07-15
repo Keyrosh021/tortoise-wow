@@ -37,6 +37,42 @@
 #define STUPID_RESTRICTIONS false
 #define TRANSMOG_CURRENCY 51217
 
+namespace
+{
+bool IsChestOrRobe(uint32 invType)
+{
+	return invType == INVTYPE_CHEST || invType == INVTYPE_ROBE;
+}
+
+bool IsOneHandAxeMaceSword(uint32 subClass)
+{
+	return subClass == ITEM_SUBCLASS_WEAPON_AXE || subClass == ITEM_SUBCLASS_WEAPON_MACE || subClass == ITEM_SUBCLASS_WEAPON_SWORD;
+}
+
+bool IsTwoHandAxeMaceSword(uint32 subClass)
+{
+	return subClass == ITEM_SUBCLASS_WEAPON_AXE2 || subClass == ITEM_SUBCLASS_WEAPON_MACE2 || subClass == ITEM_SUBCLASS_WEAPON_SWORD2;
+}
+
+uint8 const TransmogEquipmentSlots[] =
+{
+	EQUIPMENT_SLOT_HEAD,
+	EQUIPMENT_SLOT_SHOULDERS,
+	EQUIPMENT_SLOT_BODY,
+	EQUIPMENT_SLOT_CHEST,
+	EQUIPMENT_SLOT_WAIST,
+	EQUIPMENT_SLOT_LEGS,
+	EQUIPMENT_SLOT_FEET,
+	EQUIPMENT_SLOT_WRISTS,
+	EQUIPMENT_SLOT_HANDS,
+	EQUIPMENT_SLOT_BACK,
+	EQUIPMENT_SLOT_MAINHAND,
+	EQUIPMENT_SLOT_OFFHAND,
+	EQUIPMENT_SLOT_RANGED,
+	EQUIPMENT_SLOT_TABARD
+};
+}
+
 TransmogMgr::TransmogMgr(Player* owner) : _owner(owner)
 {
 	prefix = "TW_TRANSMOG";
@@ -104,10 +140,9 @@ void TransmogMgr::HandleAddonMessages(std::string msg)
 		}
 
 		uint8 InventorySlotId = atoi(params[1]);
-		uint8 invType = atoi(params[2]);
 		uint32 destItemId = atoi(params[3]);
 
-		SendAvailableTransmogs(InventorySlotId, invType, destItemId);
+		SendAvailableTransmogs(InventorySlotId, destItemId);
 		return;
 	}
 	
@@ -225,7 +260,7 @@ uint8 TransmogMgr::ApplyTransmog(uint8 slot, uint32 sourceItemID, uint32 slotId)
 		if (_owner->GetItemCount(TRANSMOG_CURRENCY) == 0)
 			return 11; // no coin
 
-		if (slot > EQUIPMENT_SLOT_END)
+		if (slot >= EQUIPMENT_SLOT_END)
 			return 2; // bad slot
 
 		if (!HasTransmog(sourceItemID))
@@ -347,19 +382,17 @@ uint8 TransmogMgr::ApplyTransmog(uint8 slot, uint32 sourceItemID, uint32 slotId)
 std::string TransmogMgr::GetTransmogStatus()
 {
 	std::string status;
-	for (auto slot = 0; slot < EQUIPMENT_SLOT_END; ++slot)
+	for (uint8 slot : TransmogEquipmentSlots)
 	{
 		if (Item* pItem = _owner->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
 		{
-			// serverSlot to inventorySlotId
-			uint8 InventorySlotId = ServerSlotToClientInventorySlotId(slot);
-
-			//tmogProto->InventoryType
 			if (ItemPrototype const* tmogProto = sObjectMgr.GetItemPrototype(pItem->GetTransmogrification()))
-				status += std::to_string(InventorySlotId) + ":" + std::to_string(tmogProto->SourceItemId) + ",";
+				status += std::to_string(ServerSlotToClientInventorySlotId(slot)) + ":" + std::to_string(tmogProto->SourceItemId) + ",";
 			else
 				status += std::to_string(0) + ":0" + ",";
 		}
+		else
+			status += std::to_string(0) + ":0" + ",";
 	}
 
 	if (status.empty())
@@ -391,11 +424,51 @@ bool TransmogMgr::HasTransmog(uint32 newItemId)
         ItemPrototype const* collectedItemProto = sObjectMgr.GetItemPrototype(collectedItemId);
         if (!collectedItemProto)
             continue;
-        if (newItemProto->DisplayInfoID == collectedItemProto->DisplayInfoID && (newItemProto->Class == collectedItemProto->Class && newItemProto->SubClass == newItemProto->SubClass))
+        if (newItemProto->DisplayInfoID == collectedItemProto->DisplayInfoID && (newItemProto->Class == collectedItemProto->Class && newItemProto->SubClass == collectedItemProto->SubClass))
             return true;
     }
 
     return false;
+}
+
+bool TransmogMgr::ItemIsValidTransmogForDest(uint32 item, ItemPrototype const* destItemProto)
+{
+	ItemPrototype const* srcItemProto = sObjectMgr.GetItemPrototype(item);
+	if (!srcItemProto || !destItemProto)
+		return false;
+
+	if (srcItemProto->Class == ITEM_CLASS_WEAPON && destItemProto->Class == ITEM_CLASS_WEAPON)
+	{
+		if (destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_FIST && srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_FIST)
+		{
+			if (destItemProto->InventoryType == INVTYPE_WEAPON || destItemProto->InventoryType == INVTYPE_WEAPONMAINHAND)
+				return srcItemProto->InventoryType == INVTYPE_WEAPON || srcItemProto->InventoryType == INVTYPE_WEAPONMAINHAND;
+			if (destItemProto->InventoryType == INVTYPE_WEAPONOFFHAND)
+				return srcItemProto->InventoryType == INVTYPE_WEAPONOFFHAND;
+		}
+
+		if (destItemProto->InventoryType == INVTYPE_RANGED || destItemProto->InventoryType == INVTYPE_RANGEDRIGHT)
+			return destItemProto->InventoryType == srcItemProto->InventoryType && destItemProto->SubClass == srcItemProto->SubClass;
+		if (destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_DAGGER)
+			return srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_DAGGER;
+		if (destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF)
+			return srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF;
+		if (destItemProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM)
+			return srcItemProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM;
+		if (IsOneHandAxeMaceSword(destItemProto->SubClass))
+			return IsOneHandAxeMaceSword(srcItemProto->SubClass);
+		if (IsTwoHandAxeMaceSword(destItemProto->SubClass))
+			return IsTwoHandAxeMaceSword(srcItemProto->SubClass);
+	}
+	else
+	{
+		if (IsChestOrRobe(destItemProto->InventoryType))
+			return IsChestOrRobe(srcItemProto->InventoryType);
+
+		return srcItemProto->InventoryType == destItemProto->InventoryType;
+	}
+
+	return false;
 }
 
 void TransmogMgr::RemoveFromCollection(uint32 itemId)
@@ -427,7 +500,7 @@ void TransmogMgr::AddToCollection(uint32 itemId)
 	_owner->SendAddonMessage("TW_TRANSMOG","NewTransmog:" + std::to_string(itemId));
 }
 
-std::vector<uint32> TransmogMgr::GetAvailableTransmogs(uint8 InventorySlotId, uint8 invType, uint32 destItemId)
+std::vector<uint32> TransmogMgr::GetAvailableTransmogs(uint32 destItemId)
 {
 
 	std::vector<uint32> tmogs;
@@ -576,7 +649,7 @@ std::vector<uint32> TransmogMgr::GetAvailableTransmogs(uint8 InventorySlotId, ui
     return tmogs;
 }
 
-void TransmogMgr::SendAvailableTransmogs(uint8 InventorySlotId, uint8 invType, uint32 destItemId)
+void TransmogMgr::SendAvailableTransmogs(uint8 InventorySlotId, uint32 destItemId)
 {
 	uint32 numPossibleTransmogs;
 
@@ -587,12 +660,9 @@ void TransmogMgr::SendAvailableTransmogs(uint8 InventorySlotId, uint8 invType, u
 		return;
 	}
 
-	if (destItemProto->Class == ITEM_CLASS_ARMOR && destItemProto->SubClass != ITEM_SUBCLASS_ARMOR_SHIELD)
-		numPossibleTransmogs = sObjectMgr.GetPossibleTransmogs(_owner->GetClass(), destItemProto->Class, 1, destItemProto->InventoryType, STUPID_RESTRICTIONS);
-	else
-		numPossibleTransmogs = sObjectMgr.GetPossibleTransmogs(_owner->GetClass(), destItemProto->Class, destItemProto->SubClass, destItemProto->InventoryType, STUPID_RESTRICTIONS);
+	numPossibleTransmogs = sObjectMgr.GetPossibleTransmogs(_owner->GetClass(), destItemProto->Class, destItemProto->SubClass, destItemProto->InventoryType, STUPID_RESTRICTIONS);
 
-	std::vector<uint32> tmogs = GetAvailableTransmogs(InventorySlotId, invType, destItemId);
+	std::vector<uint32> tmogs = GetAvailableTransmogs(destItemId);
 
 	std::vector<std::string> messages;
 	std::string message = "AvailableTransmogs:" + std::to_string(InventorySlotId) + ":" + std::to_string(numPossibleTransmogs) + ":";
@@ -633,6 +703,8 @@ uint8 TransmogMgr::ServerSlotToClientInventorySlotId(uint8 InventorySlotId)
             return 1;
         case EQUIPMENT_SLOT_SHOULDERS:// = 2,
             return 3;
+        case EQUIPMENT_SLOT_BODY:// = 3,
+            return 4;
         case EQUIPMENT_SLOT_CHEST:// = 4,
             return 5;
         case EQUIPMENT_SLOT_WAIST:// = 5,
@@ -653,6 +725,8 @@ uint8 TransmogMgr::ServerSlotToClientInventorySlotId(uint8 InventorySlotId)
             return 17;
         case EQUIPMENT_SLOT_RANGED:// = 17,
             return 18;
+        case EQUIPMENT_SLOT_TABARD:// = 18,
+            return 19;
     }
     return 0;
 }
